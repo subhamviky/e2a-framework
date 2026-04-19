@@ -79,7 +79,7 @@ Score all three LOW → infrastructure-layer controls (API idempotency key, SQS 
 
 ## Full Framework Document
 
-📄 [E2A_Framework_v1.0.docx](docs/E2A_Framework_v1.0.docx)
+📄 [E2A_Framework_v1.0.docx](docs/Subham_Gupta_E2A_Enterprise_Agentic_Framework)
 
 Nine sections covering: core thesis, Clean Architecture mapping, NFR-First methodology,
 financial integrity patterns, domain mapping reference (agents, RAG, tools, observability,
