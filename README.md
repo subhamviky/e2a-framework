@@ -85,6 +85,10 @@ Nine sections covering: core thesis, Clean Architecture mapping, NFR-First metho
 financial integrity patterns, domain mapping reference (agents, RAG, tools, observability,
 NFR triad), CI/CD pipeline, cross-platform applicability, and quick reference card.
 
+[E2A_Master_Abstraction_Reference](docs/E2A_Master_Abstraction_Reference.pdf)
+
+Eight abstract classes across four layers: Agentic Orchestration, RAG based Retrieval, MCP based Tool Services, Foundation (environment-specific)
+
 ---
 
 ## Validated In Production
