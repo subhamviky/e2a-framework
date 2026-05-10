@@ -1,107 +1,166 @@
-# E2A — Enterprise-to-Agentic Architecture Framework
+# Enterprise-to-Agentic (E2A) Architecture Framework
 
-> **The runtime changes. The architecture does not.**
-
-A structured methodology for engineers with enterprise architecture backgrounds
-(SAP, Oracle, Mainframe, Java EE) transitioning to production-grade agentic AI systems.
-
-**Core thesis:** The structural layers in SAP RAP, Spring Boot, and LangGraph agents
-are the same Clean Architecture pattern — Behavior Definitions are BaseAgent abstract
-classes; Determinations are CriticAgents; CDS Entities are AgentState TypedDicts.
-Enterprise architects already know how to design these systems. They have not seen
-the mapping made explicit.
+> *"The patterns that make $350M financial settlement systems reliable
+> are the same patterns that make Agentic AI production-ready."*
 
 ---
 
-## Who This Is For
+## What Is E2A?
 
-- SAP / ABAP architects building or evaluating agentic AI systems
-- Java EE / Spring engineers moving to Python-based AI pipelines  
-- Oracle, Mainframe, MuleSoft architects assessing agentic AI architecture
-- Engineering managers evaluating whether enterprise patterns apply to AI
+The E2A Framework is a formal methodology for translating enterprise
+distributed systems patterns into production-grade agentic AI systems.
+It is a **layered abstract class hierarchy** — not a library — that
+enforces NFRs, governance, and observability as structural contracts.
 
-## Who This Is Not For
-
-- Researchers building experimental agents (this framework is production-oriented)
-- Teams building simple chatbots (the NFR-First methodology is overkill for low-complexity flows)
+**Agent = Microservice · RAG = CQRS Knowledge Layer ·
+MCP Tool = Idempotency-Aware API · Orchestration = Saga-Compensating Control Plane**
 
 ---
 
-## The 10-Layer Mapping
+## The SAP RAP → Agentic AI Equivalence
 
-| Architectural Layer | SAP RAP | Spring Boot | FastAPI/Python | LangGraph Agent |
-|---|---|---|---|---|
-| Data model | CDS View Entity | `@Entity` JPA | Pydantic `BaseModel` | `AgentState TypedDict` |
-| Interface contract | Behavior Definition (BDEF) | Java `interface` | `Protocol` / ABC | `BaseAgent` abstract class |
-| Business logic | Behavior Implementation (BIMP) | `@Service` | Concrete service class | Agent class + LLM calls |
-| Callable operation | RAP Action | `@Transactional` method | Route handler | `AgentTool` / MCP Tool |
-| Auto quality gate | Determination | Spring `@Aspect` / AOP | Middleware / decorator | `CriticAgent` |
-| Exposure layer | OData Service Binding | `@RestController` | `FastAPI APIRouter` | `/workflow` endpoint |
-| Async events | BOPF Event Framework | Spring Kafka `@KafkaListener` | SQS worker | LangGraph conditional edge |
-| Observability | CDS Analytical Views + ATC | Micrometer + Actuator | structlog + OTel | `observability/` module |
-| Governance | Authorization Objects | Spring Security | `policies/` YAML + OPA | CriticAgent SLO gate |
-| Deployment | SAP CTS+ transport | Docker + Helm + kubectl | ECS + GitHub Actions | GitHub Actions → ECR → ECS |
+![E2A Mental Model](docs/sap-to-agentic-mental-model.svg)
 
-→ Full reference: [reference/mapping-tables.md](reference/mapping-tables.md)
+| SAP RAP Layer | E2A / Agentic AI Layer |
+|---|---|
+| CDS View Entity | `AgentState` TypedDict |
+| Behavior Definition (BDEF) | `BaseAgent` abstract class |
+| Behavior Implementation (BIMP) | Agent class (LLM + tools) |
+| RAP Action / BOPF Action | MCP Tool (DynamoDB idempotency) |
+| Determination (auto quality gate) | `CriticAgent` (RAGAS faithfulness) |
+| OData Service Binding | FastAPI `APIRouter` |
 
 ---
 
-## NFR-First Development Sequence
+## Framework Architecture — 8 Abstract Classes
 
-| Phase | What Gets Built | Why Before Business Logic |
+### Primary Classes (shared implementations enforce NFRs)
+
+| Class | Public Method | What the base class enforces |
 |---|---|---|
-| 1. Scaffold | Folder structure, Poetry, pre-commit hooks | Forces architecture decisions before code |
-| 2. IaC | Terraform: ECS, ALB, SQS, OpenSearch, Secrets | Infrastructure reproducible from day one |
-| 3. Observability | structlog, OTel, CloudWatch, SLO checker | Every feature deployed into a monitored environment |
-| 4. CI/CD | GitHub Actions: OIDC, RAGAS gate, Trivy, auto-rollback | Quality gates enforced before logic ships |
-| 5. NFRs | Circuit breakers, FinOps routing, policy-as-code | Resilience and governance baked in, not bolted on |
-| 6. Business Logic | Agents, RAG pipeline, tool microservices | Built on a production-ready foundation |
+| `BaseAgent` | `run()` | Idempotency, token budget, governance, latency SLO, observability |
+| `BaseWorkflow` | `execute()` | Governance approval, intent routing, agent dispatch |
+| `BaseRAGPipeline` | `retrieve()` | Retries, latency SLO, faithfulness gate, observability |
+| `BaseToolService` | `execute()` | Governance, idempotency, auth, async HTTP, latency SLO |
 
-→ Full methodology: [reference/nfr-first-sequence.md](reference/nfr-first-sequence.md)
+### Foundation Classes (Interface pattern — environment-specific)
 
----
+`BaseInfraProvisioner` · `BaseObservability` · `BasePipeline` · `BaseGovernanceFramework`
 
-## Financial Integrity — Correct by Design
-
-The E2A calibration principle: **financial integrity controls belong at the business
-logic layer when domain complexity justifies it.** Three factors determine the appropriate layer:
-
-1. **Input mutability** — can amounts or quantities change legitimately mid-flight?
-2. **Output ambiguity** — can two records with the same value carry different business meaning?
-3. **Audit exposure** — what is the cost of a wrong posting?
-
-Score all three HIGH → business-layer controls (Saga, @Idempotent AOP, double-entry invariant).  
-Score all three LOW → infrastructure-layer controls (API idempotency key, SQS dedup ID).
-
-→ Decision table: [reference/calibration-principle.md](reference/calibration-principle.md)
+> Foundation classes are **Interfaces** (Python `Protocol` or pure ABC).
+> No shared implementations — cloud provider, observability vendor,
+> and CI/CD platform differ per deployment. The interface enforces
+> the contract; the subclass owns the complete implementation.
 
 ---
 
-## Full Framework Document
+## Cloud Portability
 
-📄 [E2A_Framework.pdf](docs/Subham_Gupta_E2A_Enterprise_Agentic_Framework.pdf)
+The same subclass runs on any cloud by changing one config value:
 
-Nine sections covering: core thesis, Clean Architecture mapping, NFR-First methodology,
-financial integrity patterns, domain mapping reference (agents, RAG, tools, observability,
-NFR triad), CI/CD pipeline, cross-platform applicability, and quick reference card.
+```python
+# AWS Bedrock — Claude 3.5 Sonnet
+agent.run(state, {'model_id': 'anthropic.claude-3-5-sonnet-20241022-v2:0'})
 
-[E2A_Master_Abstraction_Reference](docs/E2A_Master_Abstraction_Reference.pdf)
+# GCP Vertex AI — Gemini 2.5 Pro
+agent.run(state, {'model_id': 'gemini-2.5-pro'})
 
-Eight abstract classes across four layers: Agentic Orchestration, RAG based Retrieval, MCP based Tool Services, Foundation (environment-specific)
+# Azure AI Foundry — GPT-4o
+agent.run(state, {'model_id': 'gpt-4o', 'provider': 'azure'})
 
----
-
-## Validated In Production
-
-The E2A Framework is validated through three active AWS portfolio projects:
-
-| Project | Stack | E2A Patterns Applied |
-|---|---|---|
-| [Financial Settlement Platform](https://github.com/subhamviky/financial-settlement-platform) | Java 21 · Spring Boot · Kafka · Spring AI | Saga · @Idempotent AOP · double-entry ledger · RAG audit |
-| [Order-to-Cash Agentic AI](https://github.com/subhamviky/order-to-cash-agentic-ai) | Python · LangGraph · Bedrock · Terraform IaC | Full 6-phase NFR-First · CriticAgent · RAGAS CI/CD gate |
-| [Payment Reconciliation Engine](https://github.com/subhamviky/aws-reconciliation-engine) | Python · Lambda · DynamoDB · Bedrock | Two-layer idempotency · DLQ · LangGraph multi-agent |
+# Meta Llama 4 — Bedrock or standalone
+agent.run(state, {'model_id': 'meta.llama4-maverick-17b-instruct-v1:0'})
+```
 
 ---
 
-**Author:** Subham Gupta · Staff Architect, SAP Labs India  
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0077B5?logo=linkedin)](https://linkedin.com/in/subham-gupta-0a05a058)
+## Documentation
+
+### 📘 [Master Abstraction Reference](docs/E2A_Master_Abstraction_Reference.pdf)
+The complete class contract specification. Covers:
+- All 8 abstract classes with PUBLIC / PROTECTED / PRIVATE / INTERFACE / CLASS VAR access modifiers
+- Full method signatures with input/output parameter tables
+- NFR enforcement matrix (13 NFRs × BaseAgent / BaseRAG / BaseTool)
+- Universal applicability (Python · Java Spring Boot · TypeScript · Go)
+- SAP RAP to Agentic AI structural equivalence
+
+### 📗 [Implementation Playbook](docs/E2A_Implementation_Playbook.pdf)
+The hands-on guide for using the framework. Covers:
+- Complete `e2a_base.py` scaffold file — drop into `src/`, never modify
+- Config / environment variable resolution chain (`kwargs > config > env > default`)
+- Repo directory structure recommendation
+- `RefundAgent` inheritance example with every protected method shown
+- Three invocation patterns: direct call, LangGraph node, FastAPI endpoint
+- Multi-class end-to-end example (agent + RAG + tool in one workflow)
+
+### 📙 [Multi-Cloud AI Ecosystem Reference](docs/E2A_MultiCloud_Reference.pdf)
+Cloud provider mapping and decision framework. Covers:
+- AWS, GCP, Azure, and Meta Llama: 6-pillar breakdown per vendor
+- 11-step `BaseAgent.run()` → managed service mapping for all three major clouds
+- Corrected E2A-compliant code examples for all four vendors
+- Cross-cloud comparison: orchestration frameworks, anti-lock-in strategy
+- Decision matrix: 10 business scenarios × 4 providers
+- Domain-specific recommendations (Finance, SAP/ERP, Healthcare, Retail, Manufacturing)
+
+---
+
+## Quick Start
+
+```bash
+# 1. Copy scaffold into your repo
+cp e2a_base.py src/
+
+# 2. Create your agent — override only what you need
+```
+
+```python
+from src.e2a_base import BaseAgent, AgentState
+
+class OrderOpsAgent(BaseAgent):
+    agent_name = 'OrderOpsAgent'   # governance key
+
+    def _build_messages(self, state, config=None, **kwargs) -> list:
+        return [{'role': 'user', 'content': [{'text': state['query']}]}]
+
+    def _validate_state(self, state, config=None, **kwargs) -> bool:
+        return 'query' in state and 'intent' in state
+
+    def _evaluate_output(self, response, state, config=None, **kwargs) -> float:
+        return 0.95  # or run RAGAS
+
+    # run() is NOT overridden — inherited from BaseAgent
+    # All NFR enforcement (idempotency, latency SLO, token budget) inherited
+```
+
+```python
+# 3. Invoke
+agent = OrderOpsAgent(config={
+    'model_id': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+    'approved_agents': ['OrderOpsAgent'],
+    'min_confidence': 0.85,
+    'max_latency': 2.0
+}, state=state)
+
+result = await agent.run(state, agent.config)
+```
+
+---
+
+## Reference Implementation
+
+The **Order-to-Cash Agentic AI Platform** is the primary E2A reference implementation:
+[github.com/subhamviky/order-to-cash-agentic-ai](https://github.com/subhamviky/order-to-cash-agentic-ai)
+
+| E2A Class | O2C Implementation |
+|---|---|
+| `BaseAgent` | `RouterAgent`, `KnowledgeAgent`, `OrderOpsAgent`, `FinanceAgent`, `CriticAgent` |
+| `BaseRAGPipeline` | `ConcreteRAGPipeline` (OpenSearch KNN + BM25 hybrid) |
+| `BaseToolService` | `CreateOrderTool`, `CheckStockTool`, `RiskScoreTool`, `OpenCaseTool` |
+| `BaseWorkflow` | `O2CWorkflow` (LangGraph StateGraph) |
+
+---
+
+## Author
+
+**Subham Gupta**
+[github.com/subhamviky](https://github.com/subhamviky) · [linkedin.com/in/subhamgupta-0a05a058](https://linkedin.com/in/subhamgupta-0a05a058)
