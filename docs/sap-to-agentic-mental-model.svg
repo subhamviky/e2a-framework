@@ -1,0 +1,105 @@
+<svg width="680" height="480" viewBox="0 0 680 480" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>SAP RAP to Python Agentic Stack — mental model mapping</title>
+  <desc>Each layer of SAP RAP Managed Architecture maps 1:1 to a Python Agentic Stack component: OData Service maps to FastAPI Routers, Behavior Implementation to Agent Classes, BDEF to BaseAgent abstract class, CDS Entity to AgentState TypedDict.</desc>
+
+  <style>
+    text { font-family: -apple-system, "Segoe UI", Arial, sans-serif; fill: #1a1a1a; }
+    .label-title { font-size: 13px; font-weight: 600; }
+    .label-sub { font-size: 11px; fill: #444; }
+    .vs-text { font-size: 15px; font-weight: 700; fill: #333; }
+    .footer-title { font-size: 13px; font-weight: 700; }
+    .footer-sub { font-size: 11px; font-style: italic; fill: #555; }
+    .connector-label { font-size: 10px; font-style: italic; fill: #666; }
+
+    .box-blue { fill: #dbeafe; stroke: #2563eb; stroke-width: 0.5; }
+    .box-green { fill: #dcfce7; stroke: #16a34a; stroke-width: 0.5; }
+    .box-amber { fill: #fef3c7; stroke: #d97706; stroke-width: 0.5; }
+    .text-blue { fill: #1e40af; }
+    .text-green { fill: #14532d; }
+    .text-amber { fill: #78350f; }
+    .text-sub-blue { fill: #1d4ed8; }
+    .text-sub-green { fill: #166534; }
+    .text-sub-amber { fill: #92400e; }
+  </style>
+
+  <!-- vertical spine guides -->
+  <line x1="141" y1="82" x2="141" y2="390" stroke="#d1d5db" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="539" y1="82" x2="539" y2="390" stroke="#d1d5db" stroke-width="0.5" stroke-dasharray="4 3"/>
+
+  <!-- horizontal connectors -->
+  <line x1="267" y1="136" x2="312" y2="136" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="368" y1="136" x2="413" y2="136" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="267" y1="208" x2="312" y2="208" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="368" y1="208" x2="413" y2="208" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="267" y1="280" x2="312" y2="280" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="368" y1="280" x2="413" y2="280" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="267" y1="352" x2="312" y2="352" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+  <line x1="368" y1="352" x2="413" y2="352" stroke="#9ca3af" stroke-width="0.5" stroke-dasharray="4 3"/>
+
+  <!-- ROW 1: Headers -->
+  <rect x="15" y="20" width="252" height="56" rx="8" class="box-blue"/>
+  <text x="141" y="42" text-anchor="middle" class="label-title text-blue">RAP Managed Architecture</text>
+  <text x="141" y="62" text-anchor="middle" class="label-sub text-sub-blue">(SAP ABAP)</text>
+
+  <rect x="413" y="20" width="252" height="56" rx="8" class="box-green"/>
+  <text x="539" y="42" text-anchor="middle" class="label-title text-green">Python Agentic Stack</text>
+  <text x="539" y="62" text-anchor="middle" class="label-sub text-sub-green">FastAPI · LangGraph · AWS Bedrock</text>
+
+  <!-- ROW 2: API Layer -->
+  <rect x="15" y="108" width="252" height="56" rx="6" class="box-green"/>
+  <text x="141" y="130" text-anchor="middle" class="label-title text-green">OData Service</text>
+  <text x="141" y="150" text-anchor="middle" class="label-sub text-sub-green">(Service Binding)</text>
+
+  <rect x="413" y="108" width="252" height="56" rx="6" class="box-green"/>
+  <text x="539" y="130" text-anchor="middle" class="label-title text-green">FastAPI Routers</text>
+  <text x="539" y="150" text-anchor="middle" class="label-sub text-sub-green">API endpoint exposure</text>
+
+  <text x="340" y="130" text-anchor="middle" class="connector-label">API endpoint</text>
+  <text x="340" y="144" text-anchor="middle" class="connector-label">exposure</text>
+
+  <!-- ROW 3: Business logic -->
+  <rect x="15" y="180" width="252" height="56" rx="6" class="box-amber"/>
+  <text x="141" y="202" text-anchor="middle" class="label-title text-amber">Behavior Implementation</text>
+  <text x="141" y="222" text-anchor="middle" class="label-sub text-sub-amber">Business logic (LLMs, actions)</text>
+
+  <rect x="413" y="180" width="252" height="56" rx="6" class="box-amber"/>
+  <text x="539" y="202" text-anchor="middle" class="label-title text-amber">Agent Classes</text>
+  <text x="539" y="222" text-anchor="middle" class="label-sub text-sub-amber">Business logic (LLMs, tools)</text>
+
+  <!-- ROW 4: Abstract definition -->
+  <rect x="15" y="252" width="252" height="56" rx="6" class="box-amber"/>
+  <text x="141" y="274" text-anchor="middle" class="label-title text-amber">Behavior Definition (BDEF)</text>
+  <text x="141" y="294" text-anchor="middle" class="label-sub text-sub-amber">Operation declarations</text>
+
+  <rect x="413" y="252" width="252" height="56" rx="6" class="box-amber"/>
+  <text x="539" y="274" text-anchor="middle" class="label-title text-amber">BaseAgent (Abstract Class)</text>
+  <text x="539" y="294" text-anchor="middle" class="label-sub text-sub-amber">Re-usable core logic</text>
+
+  <text x="340" y="274" text-anchor="middle" class="connector-label">Business</text>
+  <text x="340" y="288" text-anchor="middle" class="connector-label">logic</text>
+
+  <!-- ROW 5: Global structure -->
+  <rect x="15" y="324" width="252" height="56" rx="6" class="box-blue"/>
+  <text x="141" y="346" text-anchor="middle" class="label-title text-blue">CDS Entity</text>
+  <text x="141" y="366" text-anchor="middle" class="label-sub text-sub-blue">Global structure</text>
+
+  <rect x="413" y="324" width="252" height="56" rx="6" class="box-blue"/>
+  <text x="539" y="346" text-anchor="middle" class="label-title text-blue">AgentState (TypedDict)</text>
+  <text x="539" y="366" text-anchor="middle" class="label-sub text-sub-blue">Global structure</text>
+
+  <text x="340" y="346" text-anchor="middle" class="connector-label">Global</text>
+  <text x="340" y="360" text-anchor="middle" class="connector-label">structure</text>
+
+  <!-- VS circle -->
+  <circle cx="340" cy="244" r="28" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1"/>
+  <text x="340" y="244" text-anchor="middle" dominant-baseline="central" class="vs-text">VS</text>
+
+  <!-- Footer dividers -->
+  <line x1="15" y1="400" x2="267" y2="400" stroke="#d1d5db" stroke-width="0.5"/>
+  <text x="141" y="420" text-anchor="middle" class="footer-title">Enterprise Framework</text>
+  <text x="141" y="440" text-anchor="middle" class="footer-sub">Managed business logic</text>
+
+  <line x1="413" y1="400" x2="665" y2="400" stroke="#d1d5db" stroke-width="0.5"/>
+  <text x="539" y="420" text-anchor="middle" class="footer-title">Agentic Framework</text>
+  <text x="539" y="440" text-anchor="middle" class="footer-sub">Flexible AI orchestration</text>
+</svg>
