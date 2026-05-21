@@ -1,166 +1,56 @@
-# Enterprise-to-Agentic (E2A) Architecture Framework
+# E2A: Enterprise-to-Agentic Architecture Framework
 
-> *"The patterns that make $350M financial settlement systems reliable
-> are the same patterns that make Agentic AI production-ready."*
-
----
-
-## What Is E2A?
-
-The E2A Framework is a formal methodology for translating enterprise
-distributed systems patterns into production-grade agentic AI systems.
-It is a **layered abstract class hierarchy** — not a library — that
-enforces NFRs, governance, and observability as structural contracts.
-
-**Agent = Microservice · RAG = CQRS Knowledge Layer ·
-MCP Tool = Idempotency-Aware API · Orchestration = Saga-Compensating Control Plane**
+A formal, cross-cloud architectural meta-standard designed to translate enterprise distributed systems discipline—proven at $350M+ financial settlement scale—directly into production-grade agentic AI systems.
 
 ---
 
-## The SAP RAP → Agentic AI Equivalence
+## 🏛️ Core Thesis: The Runtime Changes; The Architecture Does Not
 
-![E2A Mental Model](docs/sap-to-agentic-mental-model.svg)
+The structural layers underpinning enterprise architectures (such as SAP ABAP OOP, SAP RAP, Oracle SOA, and high-throughput transaction monitors) are expressions of pure Clean Architecture. The E2A Framework maps these exact enterprise patterns directly to modern AI-native topologies:
 
-| SAP RAP Layer | E2A / Agentic AI Layer |
-|---|---|
-| CDS View Entity | `AgentState` TypedDict |
-| Behavior Definition (BDEF) | `BaseAgent` abstract class |
-| Behavior Implementation (BIMP) | Agent class (LLM + tools) |
-| RAP Action / BOPF Action | MCP Tool (DynamoDB idempotency) |
-| Determination (auto quality gate) | `CriticAgent` (RAGAS faithfulness) |
-| OData Service Binding | FastAPI `APIRouter` |
+| Enterprise System Paradigm (SAP RAP / OOP) | What It Enforces / Structurally Solves | E2A AI Framework Equivalent |
+| :--- | :--- | :--- |
+| **OData Service Exposure** | Governed, decoupled interface boundary. | FastAPI REST Endpoints |
+| **Business Defense (BDEF Contracts)** | Invariant protection & state-transition rules. | `BaseAgent` Abstract Class Contracts |
+| **CDS Entities & Transactional State** | Structured data definitions and transactional buffer. | `AgentState` Orchestration TypedDicts |
 
 ---
 
-## Framework Architecture — 8 Abstract Classes
+## 🛠️ Framework Architecture & Core Specifications
 
-### Primary Classes (shared implementations enforce NFRs)
+E2A enforces structural non-functional requirements (NFRs)—such as idempotency, latency SLOs, token tracking, and groundedness limits—directly at the compilation layer rather than relying on loose application-level exceptions or prompt engineering.
 
-| Class | Public Method | What the base class enforces |
-|---|---|---|
-| `BaseAgent` | `run()` | Idempotency, token budget, governance, latency SLO, observability |
-| `BaseWorkflow` | `execute()` | Governance approval, intent routing, agent dispatch |
-| `BaseRAGPipeline` | `retrieve()` | Retries, latency SLO, faithfulness gate, observability |
-| `BaseToolService` | `execute()` | Governance, idempotency, auth, async HTTP, latency SLO |
+### The Single Public Entry Point Pattern
+To safeguard cross-cutting NFR internals from domain-level leakages, all communication across agent nodes follows a strict interface protocol. Application loops and external workflow nodes **never** invoke internal helpers directly. Execution is securely encapsulated via a singular, typed interface contract:
+* `run(state, config, **kwargs)`
+* `execute(payload, config, **kwargs)`
+* `retrieve(query, config, **kwargs)`
 
-### Foundation Classes (Interface pattern — environment-specific)
-
-`BaseInfraProvisioner` · `BaseObservability` · `BasePipeline` · `BaseGovernanceFramework`
-
-> Foundation classes are **Interfaces** (Python `Protocol` or pure ABC).
-> No shared implementations — cloud provider, observability vendor,
-> and CI/CD platform differ per deployment. The interface enforces
-> the contract; the subclass owns the complete implementation.
+### Encapsulated Access Modifier System
+The framework segregates execution governance from custom implementation details through explicit object-oriented boundaries:
+* **`PUBLIC` Interface Hooks:** The only exposed entry points for pipeline execution (e.g., `agent.run()`).
+* **`PROTECTED` Lifecycle Steps:** Internal hooks that subclasses must override to inject business logic (e.g., `_build_messages()`, `_evaluate_output()`).
+* **`PRIVATE` Governance Engines:** Immutable framework routines that handle logging telemetry, error-budget calculation, and token cost tracking. These cannot be overridden.
 
 ---
 
-## Cloud Portability
+## 🌐 Cross-Cloud Portability & FinOps Arbitrage
 
-The same subclass runs on any cloud by changing one config value:
+Because E2A cleanly decouples agent orchestration from proprietary vendor packages, it provides complete model and provider portability. By abstracting the core orchestration lifecycle, the identical agent subclass can execute seamlessly across **AWS Bedrock, GCP Vertex AI, Azure AI Foundry, or standalone Meta Llama** topologies.
+
+### Programmatic Workload Arbitrage
+The base configuration engine supports dynamic, time-of-day cost routing directly inside the runtime loop. Workloads can be programmatically shifted from premium frontier models to highly optimized open-source models based on real-time margin thresholds without modifying single lines of subclass code:
 
 ```python
-# AWS Bedrock — Claude 3.5 Sonnet
-agent.run(state, {'model_id': 'anthropic.claude-3-5-sonnet-20241022-v2:0'})
+# Real-time FinOps Arbitrage pattern executed via configuration adjustments
+hour = datetime.datetime.utcnow().hour
+model_id = 'meta.llama4-scout' if hour < 8 or hour > 20 else 'anthropic.claude-3-5-sonnet'
 
-# GCP Vertex AI — Gemini 2.5 Pro
-agent.run(state, {'model_id': 'gemini-2.5-pro'})
-
-# Azure AI Foundry — GPT-4o
-agent.run(state, {'model_id': 'gpt-4o', 'provider': 'azure'})
-
-# Meta Llama 4 — Bedrock or standalone
-agent.run(state, {'model_id': 'meta.llama4-maverick-17b-instruct-v1:0'})
+agent.run(state, {'model_id': model_id, **base_config})
 ```
-
 ---
+## 📦 Reference Implementations & Validation Spikes
+The practical specifications of this meta-standard are actively verified across production-ready cloud ecosystems:
 
-## Documentation
-
-### 📘 [Master Abstraction Reference](docs/E2A_Master_Abstraction_Reference.pdf)
-The complete class contract specification. Covers:
-- All 8 abstract classes with PUBLIC / PROTECTED / PRIVATE / INTERFACE / CLASS VAR access modifiers
-- Full method signatures with input/output parameter tables
-- NFR enforcement matrix (13 NFRs × BaseAgent / BaseRAG / BaseTool)
-- Universal applicability (Python · Java Spring Boot · TypeScript · Go)
-- SAP RAP to Agentic AI structural equivalence
-
-### 📗 [Implementation Playbook](docs/E2A_Implementation_Playbook.pdf)
-The hands-on guide for using the framework. Covers:
-- Complete `e2a_base.py` scaffold file — drop into `src/`, never modify
-- Config / environment variable resolution chain (`kwargs > config > env > default`)
-- Repo directory structure recommendation
-- `RefundAgent` inheritance example with every protected method shown
-- Three invocation patterns: direct call, LangGraph node, FastAPI endpoint
-- Multi-class end-to-end example (agent + RAG + tool in one workflow)
-
-### 📙 [Multi-Cloud AI Ecosystem Reference](docs/E2A_MultiCloud_Reference.pdf)
-Cloud provider mapping and decision framework. Covers:
-- AWS, GCP, Azure, and Meta Llama: 6-pillar breakdown per vendor
-- 11-step `BaseAgent.run()` → managed service mapping for all three major clouds
-- Corrected E2A-compliant code examples for all four vendors
-- Cross-cloud comparison: orchestration frameworks, anti-lock-in strategy
-- Decision matrix: 10 business scenarios × 4 providers
-- Domain-specific recommendations (Finance, SAP/ERP, Healthcare, Retail, Manufacturing)
-
----
-
-## Quick Start
-
-```bash
-# 1. Copy scaffold into your repo
-cp e2a_base.py src/
-
-# 2. Create your agent — override only what you need
-```
-
-```python
-from src.e2a_base import BaseAgent, AgentState
-
-class OrderOpsAgent(BaseAgent):
-    agent_name = 'OrderOpsAgent'   # governance key
-
-    def _build_messages(self, state, config=None, **kwargs) -> list:
-        return [{'role': 'user', 'content': [{'text': state['query']}]}]
-
-    def _validate_state(self, state, config=None, **kwargs) -> bool:
-        return 'query' in state and 'intent' in state
-
-    def _evaluate_output(self, response, state, config=None, **kwargs) -> float:
-        return 0.95  # or run RAGAS
-
-    # run() is NOT overridden — inherited from BaseAgent
-    # All NFR enforcement (idempotency, latency SLO, token budget) inherited
-```
-
-```python
-# 3. Invoke
-agent = OrderOpsAgent(config={
-    'model_id': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
-    'approved_agents': ['OrderOpsAgent'],
-    'min_confidence': 0.85,
-    'max_latency': 2.0
-}, state=state)
-
-result = await agent.run(state, agent.config)
-```
-
----
-
-## Reference Implementation
-
-The **Order-to-Cash Agentic AI Platform** is the primary E2A reference implementation:
-[github.com/subhamviky/order-to-cash-agentic-ai](https://github.com/subhamviky/order-to-cash-agentic-ai)
-
-| E2A Class | O2C Implementation |
-|---|---|
-| `BaseAgent` | `RouterAgent`, `KnowledgeAgent`, `OrderOpsAgent`, `FinanceAgent`, `CriticAgent` |
-| `BaseRAGPipeline` | `ConcreteRAGPipeline` (OpenSearch KNN + BM25 hybrid) |
-| `BaseToolService` | `CreateOrderTool`, `CheckStockTool`, `RiskScoreTool`, `OpenCaseTool` |
-| `BaseWorkflow` | `O2CWorkflow` (LangGraph StateGraph) |
-
----
-
-## Author
-
-**Subham Gupta**
-[github.com/subhamviky](https://github.com/subhamviky) · [linkedin.com/in/subhamgupta-0a05a058](https://linkedin.com/in/subhamgupta-0a05a058)
+* **Python Reference Spike:** Order-to-Cash Agentic AI Platform — A 5-agent LangGraph orchestration platform on AWS.
+* **Java Reference Spike:** Cloud-Native Financial Settlement Platform — Validating cross-runtime transactional saga patterns.
