@@ -49,6 +49,29 @@ model_id = 'meta.llama4-scout' if hour < 8 or hour > 20 else 'anthropic.claude-3
 agent.run(state, {'model_id': model_id, **base_config})
 ```
 ---
+
+## The Eight Abstract Classes
+
+| Layer | Class | Public entry point | NFRs enforced |
+|---|---|---|---|
+| Agentic Orchestration | `BaseWorkflow` | `execute()` | Governance approval, graph validation, intent routing |
+| Agentic Orchestration | `BaseAgent` | `run()` | Idempotency, latency SLO, token budget, observability, fallback |
+| Retrieval | `BaseRAGPipeline` | `retrieve()` | Chunking, embedding, search, rerank, faithfulness gate >= 0.85 |
+| Tool Services | `BaseToolService` | `execute()` | Exactly-once write, auth, retry, timeout, governance |
+| Foundation | `BaseInfraProvisioner` | Interface | VPC, compute, storage, secrets contract |
+| Foundation | `BaseObservability` | Interface | Metrics, traces, logs, SLO contract |
+| Foundation | `BasePipeline` | Interface | Tests, RAG eval gate, build, deploy contract |
+| Foundation | `BaseGovernanceFramework` | Interface | Policy, FinOps, SLO, circuit breaker contract |
+
+## A2C Extension
+
+The [A2C Framework](https://github.com/subhamviky/a2c-framework) extends E2A in one
+precise direction: it uses E2A-governed agents to *generate* enterprise-grade microservice
+code, Terraform IaC, and GitHub Actions pipelines with mandatory NFRs injected
+structurally at generation time via `_apply_policy()`.
+
+The generator agent is governed by E2A. The output is governed by E2A.
+
 ## 📦 Reference Implementations & Validation Spikes
 The practical specifications of this meta-standard are actively verified across production-ready cloud ecosystems:
 
