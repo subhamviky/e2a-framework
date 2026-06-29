@@ -77,3 +77,4 @@ The practical specifications of this meta-standard are actively verified across 
 
 * **Python Reference Spike:** Order-to-Cash Agentic AI Platform — A 5-agent LangGraph orchestration platform on AWS.
 * **Java Reference Spike:** Cloud-Native Financial Settlement Platform — Validating cross-runtime transactional saga patterns.
+* **Architecture Deep Dive:** [Framework-to-Cloud Landing Zone Reference](https://github.com/subhamviky/e2a-framework/blob/main/docs/CLOUD_LANDING_ZONE.md) — formal mapping of abstract class hierarchy to SCP governance, network topology, and environment promotion.
