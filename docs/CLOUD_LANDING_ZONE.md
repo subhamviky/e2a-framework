@@ -358,7 +358,7 @@ Vulnerability: a malformed item that passes schema validation but crashes a Tier
 # 12. Related Documents
 
 
-This document and its companions form the reference set for implementing and deploying the E2A Framework:
+This document and its companions form the reference set for implementing and deploying the E2A Framework, across both the agentic profile this document specifies and the Deterministic CQRS profile documented in its own Cloud Landing Zone and Implementation Playbook:
 
 ![Figure 5 — Document and repository relationships](images/related_docs.png)
 
