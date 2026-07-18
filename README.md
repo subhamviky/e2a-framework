@@ -31,6 +31,7 @@ The framework segregates execution governance from custom implementation details
 * **`PUBLIC` Interface Hooks:** The only exposed entry points for pipeline execution (e.g., `agent.run()`).
 * **`PROTECTED` Lifecycle Steps:** Internal hooks that subclasses must override to inject business logic (e.g., `_build_messages()`, `_evaluate_output()`).
 * **`PRIVATE` Governance Engines:** Immutable framework routines that handle logging telemetry, error-budget calculation, and token cost tracking. These cannot be overridden.
+*  **Compile-Time Enforced Foundation Classes:** `BaseObservability` and `BaseGovernanceFramework` are `ABC` subclasses with `@abstractmethod`-decorated hooks — a subclass missing a required hook (e.g. `_export_traces()`, `_verify_sandbox_profile()`) fails at instantiation, not at first call in production.
 
 ---
 
@@ -81,10 +82,6 @@ The generator agent is governed by E2A. The output is governed by E2A.
 | [docs/CQRS_IMPLEMENTATION_PLAYBOOK.md](docs/CQRS_IMPLEMENTATION_PLAYBOOK.md) | Deterministic CQRS | Class contracts and full scaffold source (`reference/e2a_cqrs_base.py`), including the CQRS-adapted `BaseObservability`/`BaseGovernanceFramework`. |
 
 ---
-
-## 📦 Reference Implementations & Validation Spikes
-
-The practical specifications of this meta-standard are actively verified across production-ready cloud ecosystems:
 
 ## 📦 Reference Implementations & Validation Spikes
 The practical specifications of this meta-standard are actively verified across production-ready cloud ecosystems:
