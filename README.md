@@ -72,6 +72,20 @@ structurally at generation time via `_apply_policy()`.
 
 The generator agent is governed by E2A. The output is governed by E2A.
 
+## 📐 Reference Documentation
+
+| Document | Profile | Description |
+|---|---|---|
+| [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic | Combined HLD/LLD — network zones, compute tiers, Saga orchestration, vendor mapping (AWS/GCP/Azure) for the BaseWorkflow/BaseAgent execution path. |
+| [docs/CQRS_CLOUD_LANDING_ZONE.md](docs/CQRS_CLOUD_LANDING_ZONE.md) | Deterministic CQRS | Same topology scope, for the BaseOrchestrator/BaseCommandService/BaseQueryService execution path — no LLM on the request path. |
+| [docs/CQRS_IMPLEMENTATION_PLAYBOOK.md](docs/CQRS_IMPLEMENTATION_PLAYBOOK.md) | Deterministic CQRS | Class contracts and full scaffold source (`reference/e2a_cqrs_base.py`), including the CQRS-adapted `BaseObservability`/`BaseGovernanceFramework`. |
+
+---
+
+## 📦 Reference Implementations & Validation Spikes
+
+The practical specifications of this meta-standard are actively verified across production-ready cloud ecosystems:
+
 ## 📦 Reference Implementations & Validation Spikes
 The practical specifications of this meta-standard are actively verified across production-ready cloud ecosystems:
 
