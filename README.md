@@ -13,6 +13,7 @@ The structural layers underpinning enterprise architectures (such as SAP ABAP OO
 | **OData Service Exposure** | Governed, decoupled interface boundary. | FastAPI REST Endpoints |
 | **Business Defense (BDEF Contracts)** | Invariant protection & state-transition rules. | `BaseAgent` Abstract Class Contracts |
 | **CDS Entities & Transactional State** | Structured data definitions and transactional buffer. | `AgentState` Orchestration TypedDicts |
+| **Abstract Peer Classes**                  | Independent contracts for orchestration paths with distinct dispatch shapes. | `BaseRAGPipeline`, `LLMOnlyAgent` |
 
 ---
 
@@ -34,6 +35,9 @@ The framework segregates execution governance from custom implementation details
 *  **Compile-Time Enforced Foundation Classes:** `BaseObservability` and `BaseGovernanceFramework` are `ABC` subclasses with `@abstractmethod`-decorated hooks — a subclass missing a required hook (e.g. `_export_traces()`, `_verify_sandbox_profile()`) fails at instantiation, not at first call in production.
 
 ---
+## 🎭 Multi-Agent Orchestration: RAG, Tool Call, and LLM-Only
+
+Every request resolves to one of four peer agents through a single `agent_registry` lookup — RAG-grounded, MCP tool call, API tool call, or LLM-only (text, speech, image, or document) — with an automatic fallback agent for anything that doesn't classify. `LLMOnlyAgent` ships as an independent abstract class beside `BaseAgent`, the same architectural move already made for `BaseRAGPipeline`, not a subclass of it. [Full writeup →](docs/multimodal-agent-orchestration.md)
 
 ## 🌐 Cross-Cloud Portability & FinOps Arbitrage
 
