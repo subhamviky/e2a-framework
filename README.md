@@ -78,6 +78,8 @@ structurally at generation time via `_apply_policy()`.
 
 The generator agent is governed by E2A. The output is governed by E2A.
 
+The composed, cloud-native version of this pipeline — deployed as a Saga-governed service a developer triggers from one UI action — is documented in [docs/AIDLC_LANDING_ZONE.md](https://github.com/subhamviky/e2a-framework/blob/main/docs/AIDLC_LANDING_ZONE.md).
+
 ## 🚀 AI-SDLC Stack Extension (G2C, P0, A2C)
 
 The framework stack operationalizes four specialized disciplines across the modern AI software development life cycle:
@@ -94,6 +96,7 @@ The framework stack operationalizes four specialized disciplines across the mode
 | [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic | Combined HLD/LLD — network zones, compute tiers, Saga orchestration, vendor mapping (AWS/GCP/Azure) for the BaseWorkflow/BaseAgent execution path. |
 | [docs/CQRS_CLOUD_LANDING_ZONE.md](docs/CQRS_CLOUD_LANDING_ZONE.md) | Deterministic CQRS | Same topology scope, for the BaseOrchestrator/BaseCommandService/BaseQueryService execution path — no LLM on the request path. |
 | [docs/CQRS_IMPLEMENTATION_PLAYBOOK.md](docs/CQRS_IMPLEMENTATION_PLAYBOOK.md) | Deterministic CQRS | Class contracts and full scaffold source (`reference/e2a_cqrs_base.py`), including the CQRS-adapted `BaseObservability`/`BaseGovernanceFramework`. |
+| [docs/AIDLC_LANDING_ZONE.md](https://github.com/subhamviky/e2a-framework/blob/main/docs/AIDLC_LANDING_ZONE.md) | AI-DLC | Composed, Saga-governed pipeline (G2C → P0 → A2C → E2A) that generates BaseWorkflow/BaseAgent and BaseOrchestrator/BaseCommandService/BaseQueryService services from a single developer-triggered UI action. |
 
 ---
 
