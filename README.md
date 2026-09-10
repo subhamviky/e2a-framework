@@ -33,6 +33,7 @@ The framework segregates execution governance from custom implementation details
 * **`PROTECTED` Lifecycle Steps:** Internal hooks that subclasses must override to inject business logic (e.g., `_build_messages()`, `_evaluate_output()`).
 * **`PRIVATE` Governance Engines:** Immutable framework routines that handle logging telemetry, error-budget calculation, and token cost tracking. These cannot be overridden.
 *  **Compile-Time Enforced Foundation Classes:** `BaseObservability` and `BaseGovernanceFramework` are `ABC` subclasses with `@abstractmethod`-decorated hooks — a subclass missing a required hook (e.g. `_export_traces()`, `_verify_sandbox_profile()`) fails at instantiation, not at first call in production.
+*  **Compile-Time Harness Engineering**: The Template Method pattern provides execution sandboxing for autonomous agents. Subclasses inherit runtime boundaries, distributed idempotency (SETNX / DynamoDB conditional writes), and transactional outboxes by construction—preventing unconstrained tool calls from mutating enterprise state.
 
 ---
 ## 🎭 Multi-Agent Orchestration: RAG, Tool Call, and LLM-Only
@@ -76,6 +77,15 @@ code, Terraform IaC, and GitHub Actions pipelines with mandatory NFRs injected
 structurally at generation time via `_apply_policy()`.
 
 The generator agent is governed by E2A. The output is governed by E2A.
+
+## 🚀 AI-SDLC Stack Extension (G2C, P0, A2C)
+
+The framework stack operationalizes four specialized disciplines across the modern AI software development life cycle:
+
+* **P0 Framework (Context Engineering):** Zero-day developer workspace bootstrap generating structured context manifests (`scaffold-config.json`) and repo directory trees in <10s to eliminate LLM context setup friction.
+* **G2C Framework (Context Compilation):** Spec-driven meta-generation substrate compiling declarative OpenAPI/OData schemas into type-safe microservice classes (FastAPI / Spring Boot), eliminating boilerplate and context drift.
+* **E2A Framework (Harness Engineering):** Model Context Protocol (MCP) execution harness providing Template Method base classes (`BaseWorkflow`, `BaseAgent`) that enforce execution sandboxing, idempotency, and transactional outbox commits.
+* **A2C Framework (Eval-Driven Development):** Enforces non-functional requirements (NFRs) at generation time. Embedded `CodeCriticAgent` harnesses validate AST structures and assert automated RAGAS faithfulness thresholds (≥ 0.85) before code reaches review.
 
 ## 📐 Reference Documentation
 
