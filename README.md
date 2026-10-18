@@ -62,6 +62,7 @@ The structural layers underpinning enterprise architectures (such as SAP ABAP OO
 | **Business Defense (BDEF Contracts)** | Invariant protection & state-transition rules. | `BaseAgent` Abstract Class Contracts |
 | **CDS Entities & Transactional State** | Structured data definitions and transactional buffer. | `AgentState` Orchestration TypedDicts |
 | **Abstract Peer Classes** | Independent contracts for orchestration paths with distinct dispatch shapes. | `BaseRAGPipeline`, `LLMOnlyAgent` |
+| **Gateway / Anti-Corruption Layer** | One governed boundary between business logic and a volatile external system. | `BaseLLMAgentService` — the single place the model is called |
 
 ---
 
@@ -74,6 +75,8 @@ To safeguard cross-cutting NFR internals from domain-level leakages, all communi
 * `run(state, config, **kwargs)`
 * `execute(payload, config, **kwargs)`
 * `retrieve(query, config, **kwargs)`
+* `ingest(documents, config, **kwargs)` — the write side of retrieval (`BaseIndexingPipeline`)
+* `process_inference(messages, config, **kwargs)` and `process_inference_stream(...)` — `BaseLLMAgentService`: one public entry per interaction mode (unary, server-streaming)
 
 ### 2. Encapsulated Access Modifier System
 The framework segregates execution governance from custom implementation details through explicit object-oriented boundaries:
@@ -99,6 +102,20 @@ class ExecutionContext:
 
 ---
 
+## 🔌 Decoupled LLM Inference Service
+
+The model call no longer lives inside agent classes. `BaseLLMAgentService` is an abstract agent-microservice class, in `e2a_base.py` beside the others, that owns every cross-cutting concern of calling a model — and is reusable by **any** agent type (`BaseAgent`, `LLMOnlyAgent`, generated A2C agents). Agents reach it through `config['llm_service']`; they never import a provider SDK.
+
+* **Vendor-neutral by construction:** the only vendor-specific code is two abstract hooks, `_dispatch_upstream_call` and `_dispatch_upstream_stream`. Bedrock, Vertex AI, Azure AI Foundry, a self-hosted Llama endpoint or any other provider is one small subclass; nothing else changes.
+* **Governance inherited, not re-implemented:** pod-level concurrency semaphore, in-memory RPM/TPM token bucket (per pod = fleet limit ÷ replicas, unused tokens refunded), context-budget management, tenant-scoped KV-cache handles, tool-schema compilation, DLP redaction (Luhn-checked cards) on unary and streamed output, and a latency SLO.
+* **Typed failure semantics:** a failed inference returns a `FAILED` payload and populates `failed_keys` instead of raising (only `DehydrationInterrupt` propagates), so the existing Saga/DLQ path applies unchanged.
+* **Config precedence:** per-call kwargs › config › environment › scaffold default, so a cheaper model for a critic or evaluator is just `model_id=...` on the call.
+* **Landing zone:** deployed as the Tier 2b Inference Gateway — dual ingress (gRPC and queue), event-driven autoscaling on in-flight requests and backlog, and an optional Redis-compatible semantic cache. See [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md).
+
+Retrieval follows the same discipline: `BaseRAGPipeline.retrieve()` now passes both `query_text` and `query_vector` to `_search_index(query_text, query_vector, config, tenant_id, **kwargs)`, making hybrid (BM25 + vector) search the default contract, weighted by `hybrid_alpha`. `BaseIndexingPipeline.ingest()` is the CDC-fed write side.
+
+---
+
 ## 🎭 Multi-Agent Orchestration: RAG, Tool Call, and LLM-Only
 
 Every request resolves to one of four peer agents through a single `agent_registry` lookup — RAG-grounded, MCP tool call, API tool call, or LLM-only (text, speech, image, or document) — with an automatic fallback agent for anything that doesn't classify. `LLMOnlyAgent` ships as an independent abstract class beside `BaseAgent`, the same architectural move already made for `BaseRAGPipeline`, not a subclass of it. [Full writeup →](docs/multimodal-agent-orchestration.md)
@@ -112,6 +129,8 @@ Because E2A cleanly decouples agent orchestration from proprietary vendor packag
 ### Programmatic Workload Arbitrage
 The base configuration engine supports dynamic, time-of-day cost routing directly inside the runtime loop. Workloads can be programmatically shifted from premium frontier models to highly optimized open-source models based on real-time margin thresholds without modifying single lines of subclass code:
 
+Because the model call is a single abstract service, switching provider is a binding change (one `_dispatch_upstream_*` subclass), not an agent change:
+
 ```python
 # Real-time FinOps Arbitrage pattern executed via configuration adjustments
 hour = datetime.datetime.utcnow().hour
@@ -122,13 +141,15 @@ agent.run(state, {'model_id': model_id, **base_config})
 
 ---
 
-## 📋 The Eight Abstract Classes
+## 📋 The Nine Abstract Classes
 
 | Layer | Class | Public Entry Point | NFRs Enforced |
 | :--- | :--- | :--- | :--- |
 | **Agentic Orchestration** | `BaseWorkflow` | `execute()` | Governance approval, graph validation, intent routing |
-| **Agentic Orchestration** | `BaseAgent` | `run()` | Idempotency, latency SLO, token budget, observability, fallback |
-| **Retrieval** | `BaseRAGPipeline` | `retrieve()` | Chunking, embedding, search, rerank, faithfulness gate $\ge 0.85$ |
+| **Agentic Orchestration** | `BaseAgent` | `run()` | Idempotency, token budget, observability, fallback (model call delegated to `BaseLLMAgentService`) |
+| **Inference** | `BaseLLMAgentService` | `process_inference()` / `process_inference_stream()` | Concurrency, RPM/TPM limits, context budget, KV cache, DLP, latency SLO, `failed_keys` on failure |
+| **Retrieval** | `BaseRAGPipeline` | `retrieve()` | Hybrid (BM25 + vector) search, rerank, faithfulness gate $\ge 0.85$ |
+| **Retrieval (write side)** | `BaseIndexingPipeline` | `ingest()` | CDC-fed chunking, embedding, index write/delete |
 | **Tool Services** | `BaseToolService` | `execute()` | Exactly-once write, auth, retry, timeout, governance |
 | **Foundation** | `BaseInfraProvisioner` | Interface | VPC, compute, storage, secrets contract |
 | **Foundation** | `BaseObservability` | Interface | Metrics, traces, logs, SLO contract |
@@ -143,7 +164,7 @@ The framework stack operationalizes four specialized disciplines across the mode
 
 * **P0 Framework (Context Engineering as CQRS Read-Model Projection):** Zero-day developer workspace bootstrap generating structured context manifests (`scaffold-config.json`) and repo directory trees in $<10\text{s}$ to eliminate LLM context setup friction and token waste.
 * **G2C Framework (Context Compilation as IDL / Contract Synthesis):** Spec-driven meta-generation substrate compiling declarative OpenAPI/OData schemas into type-safe microservice classes (FastAPI / Spring Boot), eliminating boilerplate and context drift.
-* **E2A Framework (Harness Engineering as Command Pipeline):** Model Context Protocol (MCP) execution harness providing Template Method base classes (`BaseWorkflow`, `BaseAgent`, `BaseMCPServer`) that enforce execution sandboxing, idempotency, and transactional outbox commits.
+* **E2A Framework (Harness Engineering as Command Pipeline):** Model Context Protocol (MCP) execution harness providing Template Method base classes (`BaseWorkflow`, `BaseAgent`, `BaseLLMAgentService`, `BaseMCPServer`) that enforce execution sandboxing, idempotency, and transactional outbox commits.
 * **A2C Framework (Continuous Evals as Shift-Left AST Verification):** Enforces non-functional requirements (NFRs) at generation time. Embedded `CodeCriticAgent` harnesses validate AST structures and assert automated RAGAS faithfulness thresholds ($\ge 0.85$) before code reaches review.
 
 The composed, cloud-native version of this pipeline — deployed as a Saga-governed service a developer triggers from one UI action — is documented in [docs/AIDLC_LANDING_ZONE.md](https://github.com/subhamviky/e2a-framework/blob/main/docs/AIDLC_LANDING_ZONE.md).
@@ -154,8 +175,12 @@ The composed, cloud-native version of this pipeline — deployed as a Saga-gover
 
 | Document | Architectural Profile | Core Coverage |
 | :--- | :--- | :--- |
-| [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic Landing Zone | Combined HLD/LLD — network zones, compute tiers, Saga orchestration, vendor mapping (AWS/GCP/Azure) for `BaseWorkflow`/`BaseAgent`. |
-| [docs/CQRS_CLOUD_LANDING_ZONE.md](docs/CQRS_CLOUD_LANDING_ZONE.md) | Deterministic CQRS | Same topology scope for `BaseOrchestrator`/`BaseCommandService`/`BaseQueryService` execution path — zero LLM on the transactional write path. |
+| [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic Landing Zone | Combined HLD/LLD — network zones, compute tiers (including Tier 2b Inference Gateway), Saga orchestration, vendor mapping (AWS/GCP/Azure) for `BaseWorkflow`/`BaseAgent`/`BaseLLMAgentService`. |
+| [docs/IMPLEMENTATION_PLAYBOOK.md](docs/IMPLEMENTATION_PLAYBOOK.md) | Agentic Playbook | Class contracts, design rationale and full scaffold source (`reference/e2a_base.py`), including `BaseLLMAgentService` (§2.18) and its binding examples. |
+| [docs/multimodal-agent-orchestration.md](docs/multimodal-agent-orchestration.md) | Multimodal Orchestration | RAG / MCP tool / API tool / LLM-only agent routing through one `agent_registry`. |
+| [docs/AIDLC_IMPLEMENTATION_PLAYBOOK.md](docs/AIDLC_IMPLEMENTATION_PLAYBOOK.md) | AI-DLC Playbook | Implementation contracts for the composed G2C → P0 → A2C → E2A pipeline. |
+| [docs/PLATFORM_USE_CASES.md](docs/PLATFORM_USE_CASES.md) | Use Cases | Five enterprise use cases across hyperscalers, marked implemented or directional. |
+| [docs/CQRS_CLOUD_LANDING_ZONE.md](docs/CQRS_CLOUD_LANDING_ZONE.md) | Deterministic CQRS | Same topology scope for `BaseOrchestrator`/`BaseCommandService`/`BaseQueryService` execution path — zero LLM on the transactional write path, so no inference tier is provisioned. |
 | [docs/CQRS_IMPLEMENTATION_PLAYBOOK.md](docs/CQRS_IMPLEMENTATION_PLAYBOOK.md) | CQRS Playbook | Class contracts and full scaffold source (`reference/e2a_cqrs_base.py`), including CQRS-adapted `BaseObservability`/`BaseGovernanceFramework`. |
 | [docs/AIDLC_LANDING_ZONE.md](docs/AIDLC_LANDING_ZONE.md) | AI-DLC Factory | Composed, Saga-governed pipeline (G2C → P0 → A2C → E2A) generating compliant services from a single developer-triggered action. |
 | [docs/e2a_architecture_framework_whitepaper.md](docs/e2a_architecture_framework_whitepaper.md) | Executive Whitepaper | Complete theoretical foundation: structural isomorphism, Template Method pattern, and multi-cloud industrialization. |
