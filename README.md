@@ -188,7 +188,7 @@ The composed, cloud-native version of this pipeline — deployed as a Saga-gover
 
 | Document | Architectural Profile | Core Coverage |
 | :--- | :--- | :--- |
-| [docs/config-reference.md](docs/config-reference.md) | Central Configuration | Generated table of every config key, environment variable, default and consumer, from `E2A_CONFIG` |
+| [docs/config_reference.md](docs/config-reference.md](https://github.com/subhamviky/e2a-framework/blob/84f968c2837bc52179c31bbc6270af454d1739cd/docs/config_reference.md)) | Central Configuration | Generated table of every config key, environment variable, default and consumer, from `E2A_CONFIG` |
 | [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic Landing Zone | Combined HLD/LLD — network zones, compute tiers (including Tier 2b Inference Gateway), Saga orchestration, vendor mapping (AWS/GCP/Azure) for `BaseWorkflow`/`BaseAgent`/`BaseLLMAgentService`. |
 | [docs/IMPLEMENTATION_PLAYBOOK.md](docs/IMPLEMENTATION_PLAYBOOK.md) | Agentic Playbook | Class contracts, design rationale and full scaffold source (`reference/e2a_base.py`), including `BaseLLMAgentService` (§2.18) and its binding examples. |
 | [docs/multimodal-agent-orchestration.md](docs/multimodal-agent-orchestration.md) | Multimodal Orchestration | RAG / MCP tool / API tool / LLM-only agent routing through one `agent_registry`. |
