@@ -52,6 +52,24 @@ Rather than replacing cloud-native platforms, E2A encloses model tool executions
 
 ---
 
+## 💡 Value at a Glance
+
+**The problem.** Frontier models are probabilistic; enterprise systems of record are deterministic. E2A is the governed bridge between them — it never lets an agent's narrative claim count as a completed transaction.
+
+| If you need… | E2A gives you |
+| :--- | :--- |
+| **Agents that can write to a system of record safely** | Single public entry point per class, validated and idempotent writes, OCC commit gate, saga compensation, typed `physical_success` confirmation |
+| **To keep the core untouched** | A sidecar pattern: existing APIs wrapped as MCP/tool services, agents reason outside the core |
+| **No vendor or cloud lock-in** | Model, storage, lock, cache and queue are ports; switching is a binding plus a config value |
+| **One standard for four project types** | Agentic apps, deterministic CQRS services, hybrids of the two, and AI-assisted SDLC — same classes and propagation contract |
+| **Predictable operations and cost** | One inference gateway tier with RPM/TPM quota, pod concurrency and context budgets; one central configuration registry |
+| **A path from prototype to production** | Harvest a playground prototype's schemas, generate governed classes and landing-zone code, gate merges in CI |
+| **Start small, scale later** | Run every class in one process on day one; extract any class into its own service later without changing business logic |
+
+➡️ **Read the two-page summary:** [docs/E2A_STRATEGIC_OVERVIEW.md](docs/E2A_STRATEGIC_OVERVIEW.md) — capabilities, the four archetypes, use cases (implemented vs directional), and role-by-role value, each linked to the document that explains *how*.
+
+---
+
 ## 🏛️ Core Thesis: The Runtime Changes; The Architecture Does Not
 
 The structural layers underpinning enterprise architectures (such as SAP ABAP OOP, SAP RAP, Oracle SOA, and high-throughput transaction monitors) are expressions of pure Clean Architecture. Proven across $\$350\text{M}+$ financial settlement workloads, the E2A Framework maps these exact enterprise patterns directly to modern AI-native topologies:
@@ -126,7 +144,7 @@ value = resolve_config('max_latency', config, kwargs)   # kwargs > config > envi
 
 * **No class reads `os.getenv()` or hardcodes a default.** Per-class behaviour (for example, a 5.0 s tool-call latency SLO versus 2.0 s for agents and 1.0 s on the CQRS profile) is a scoped default inside the registry.
 * **Projects extend, never edit.** Add your own keys with `register_config_key(ConfigKey(...))` in `src/settings.py`; `unknown_config_keys(config)` catches misspelled keys at start-up.
-* **Generated, never hand-written.** `.env.example` ([`reference/.env.example`](reference/.env.example)) and the configuration table ([`docs/config-reference.md`](docs/config-reference.md), also Section 5 of the Implementation Playbook) are produced from the registry by `env_example()` and `config_reference_markdown()`, so documentation cannot drift from code.
+* **Generated, never hand-written.** `.env.example` ([`reference/.env.example`](reference/env.example)) and the configuration table ([`docs/config-reference.md`](docs/config_reference.md), also Section 5 of the Implementation Playbook) are produced from the registry by `env_example()` and `config_reference_markdown()`, so documentation cannot drift from code.
 * **Secrets and objects stay out of files.** `auth_token` and `signing_secret` are emitted empty; `llm_service`, `governance_engine` and `observability_engine` are object references passed in the config dict.
 
 ## 🎭 Multi-Agent Orchestration: RAG, Tool Call, and LLM-Only
@@ -188,7 +206,8 @@ The composed, cloud-native version of this pipeline — deployed as a Saga-gover
 
 | Document | Architectural Profile | Core Coverage |
 | :--- | :--- | :--- |
-| [docs/config-reference.md](docs/config_reference.md) | Central Configuration | Generated table of every config key, environment variable, default and consumer, from `E2A_CONFIG` |
+| [docs/E2A_STRATEGIC_OVERVIEW.md](docs/E2A_STRATEGIC_OVERVIEW.md) | Strategic Overview | Two-page summary of value, capabilities, the four project archetypes, use cases and role-by-role benefits |
+| [docs/config-reference.md](docs/config-reference.md) | Central Configuration | Generated table of every config key, environment variable, default and consumer, from `E2A_CONFIG` |
 | [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic Landing Zone | Combined HLD/LLD — network zones, compute tiers (including Tier 2b Inference Gateway), Saga orchestration, vendor mapping (AWS/GCP/Azure) for `BaseWorkflow`/`BaseAgent`/`BaseLLMAgentService`. |
 | [docs/IMPLEMENTATION_PLAYBOOK.md](docs/IMPLEMENTATION_PLAYBOOK.md) | Agentic Playbook | Class contracts, design rationale and full scaffold source (`reference/e2a_base.py`), including `BaseLLMAgentService` (§2.18) and its binding examples. |
 | [docs/multimodal-agent-orchestration.md](docs/multimodal-agent-orchestration.md) | Multimodal Orchestration | RAG / MCP tool / API tool / LLM-only agent routing through one `agent_registry`. |
