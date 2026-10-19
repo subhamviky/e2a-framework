@@ -109,12 +109,25 @@ The model call no longer lives inside agent classes. `BaseLLMAgentService` is an
 * **Vendor-neutral by construction:** the only vendor-specific code is two abstract hooks, `_dispatch_upstream_call` and `_dispatch_upstream_stream`. Bedrock, Vertex AI, Azure AI Foundry, a self-hosted Llama endpoint or any other provider is one small subclass; nothing else changes.
 * **Governance inherited, not re-implemented:** pod-level concurrency semaphore, in-memory RPM/TPM token bucket (per pod = fleet limit ÷ replicas, unused tokens refunded), context-budget management, tenant-scoped KV-cache handles, tool-schema compilation, DLP redaction (Luhn-checked cards) on unary and streamed output, and a latency SLO.
 * **Typed failure semantics:** a failed inference returns a `FAILED` payload and populates `failed_keys` instead of raising (only `DehydrationInterrupt` propagates), so the existing Saga/DLQ path applies unchanged.
-* **Config precedence:** per-call kwargs › config › environment › scaffold default, so a cheaper model for a critic or evaluator is just `model_id=...` on the call.
+* **Config precedence:** per-call kwargs › config › environment › registered default (all declared in the central `E2A_CONFIG` registry), so a cheaper model for a critic or evaluator is just `model_id=...` on the call.
 * **Landing zone:** deployed as the Tier 2b Inference Gateway — dual ingress (gRPC and queue), event-driven autoscaling on in-flight requests and backlog, and an optional Redis-compatible semantic cache. See [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md).
 
 Retrieval follows the same discipline: `BaseRAGPipeline.retrieve()` now passes both `query_text` and `query_vector` to `_search_index(query_text, query_vector, config, tenant_id, **kwargs)`, making hybrid (BM25 + vector) search the default contract, weighted by `hybrid_alpha`. `BaseIndexingPipeline.ingest()` is the CDC-fed write side.
 
 ---
+
+## ⚙️ Central Configuration — One Registry for the Whole Framework
+
+Every configuration key and environment variable used by every agent, workflow, RAG, tool, MCP, LLM-service and pipeline class is declared **once**, in the `E2A_CONFIG` registry at the top of [`reference/e2a_base.py`](reference/e2a_base.py), and resolved by a single function:
+
+```python
+value = resolve_config('max_latency', config, kwargs)   # kwargs > config > environment variable > registered default
+```
+
+* **No class reads `os.getenv()` or hardcodes a default.** Per-class behaviour (for example, a 5.0 s tool-call latency SLO versus 2.0 s for agents and 1.0 s on the CQRS profile) is a scoped default inside the registry.
+* **Projects extend, never edit.** Add your own keys with `register_config_key(ConfigKey(...))` in `src/settings.py`; `unknown_config_keys(config)` catches misspelled keys at start-up.
+* **Generated, never hand-written.** `.env.example` ([`reference/.env.example`](reference/.env.example)) and the configuration table ([`docs/config-reference.md`](docs/config-reference.md), also Section 5 of the Implementation Playbook) are produced from the registry by `env_example()` and `config_reference_markdown()`, so documentation cannot drift from code.
+* **Secrets and objects stay out of files.** `auth_token` and `signing_secret` are emitted empty; `llm_service`, `governance_engine` and `observability_engine` are object references passed in the config dict.
 
 ## 🎭 Multi-Agent Orchestration: RAG, Tool Call, and LLM-Only
 
@@ -175,6 +188,7 @@ The composed, cloud-native version of this pipeline — deployed as a Saga-gover
 
 | Document | Architectural Profile | Core Coverage |
 | :--- | :--- | :--- |
+| [docs/config-reference.md](docs/config-reference.md) | Central Configuration | Generated table of every config key, environment variable, default and consumer, from `E2A_CONFIG` |
 | [docs/CLOUD_LANDING_ZONE.md](docs/CLOUD_LANDING_ZONE.md) | Agentic Landing Zone | Combined HLD/LLD — network zones, compute tiers (including Tier 2b Inference Gateway), Saga orchestration, vendor mapping (AWS/GCP/Azure) for `BaseWorkflow`/`BaseAgent`/`BaseLLMAgentService`. |
 | [docs/IMPLEMENTATION_PLAYBOOK.md](docs/IMPLEMENTATION_PLAYBOOK.md) | Agentic Playbook | Class contracts, design rationale and full scaffold source (`reference/e2a_base.py`), including `BaseLLMAgentService` (§2.18) and its binding examples. |
 | [docs/multimodal-agent-orchestration.md](docs/multimodal-agent-orchestration.md) | Multimodal Orchestration | RAG / MCP tool / API tool / LLM-only agent routing through one `agent_registry`. |
