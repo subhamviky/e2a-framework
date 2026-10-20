@@ -325,7 +325,20 @@ BaseLLMAgentService is deployed as its own tier between Agent Compute and the mo
 
 Rate limits are held in memory per pod (fleet limit ÷ replica count, unused tokens refunded). A Redis-compatible shared quota (keyspace C) is an optional hook for fleets that need a fleet-wide hard cap.
 
-### 8.1.2 Autoscaling
+### 8.1.2 Saga Orchestration Edge (Tier 5) — Commit or Compensate
+
+![Distributed Saga Engine — decision flow](images/saga_flow.png)
+
+*Saga decision flow. Tier 5 evaluates `failed_keys` and either commits the batch or splits it into three parallel tracks.*
+
+Tier 5 is fed from the Task Queue in Tier 3 and sits in the Private VPC. It evaluates the `failed_keys` list accumulated during the request and chooses one of two paths:
+
+- **`failed_keys` empty:** a standard database commit, then the webhook returns HTTP 200.
+- **`failed_keys` populated:** the batch is isolated and split into three parallel tracks. Track 1 commits the successful items, Track 2 runs the compensating rollback, and Track 3 routes the failed items to the DLQ. The webhook then returns HTTP 270 Partial Content.
+
+Inference failures reach this edge as data, not exceptions. When Tier 2b cannot complete a call it returns a `FAILED` payload and appends the item's key to `failed_keys`; only `DehydrationInterrupt` propagates. A failed model call therefore takes the same commit-or-compensate path as any other failed item. The vendor-neutral edge maps to AWS Step Functions, GCP Workflows or Azure Logic Apps; the Implementation Playbook holds the state-machine skeleton.
+
+### 8.1.3 Autoscaling
 
 The tier scales on load that is actually visible to it, not CPU: in-flight gRPC requests per pod and queue backlog.
 
@@ -351,7 +364,7 @@ spec:
         queueLength: '100'      # backlog per replica
 ```
 
-### 8.1.3 Polyglot Persistence, CDC and the Cache Layer
+### 8.1.4 Polyglot Persistence, CDC and the Cache Layer
 
 ```
  Agent application ──writes──▶ System of record (Aurora/Cloud SQL PostgreSQL)
@@ -435,6 +448,12 @@ The intake bucket sits in the Data & Messaging Perimeter (Tier 3), matching how 
 - Environment promotion is expressed as a configuration change on the same abstract class, not as a fork of infrastructure code. DEV → QA → PROD differences are captured in protected method overrides and config files, not in duplicate Terraform stacks.
 
 - The complete platform is auditable from a single source of truth: GeneratorRequest → ScaffoldResult → DevRequest → GeneratorResult → cloud resources. Every step has a trace_id and structured log entries. CloudTrail captures the cloud resource creation. The full lineage from specification to deployed infrastructure is traceable.
+
+## 9.3 Document and Repository Map
+
+![E2A document and repository relationships across the three execution profiles](images/related_docs.png)
+
+*Document and repository relationships across the three E2A execution profiles: Agentic, Deterministic CQRS and AI-DLC.*
 
 # 10. Portfolio Application — Three Projects on This Architecture
 

@@ -168,8 +168,13 @@ Each P99 target above is an aspirational ceiling, not a self-enforcing one — t
 
 ## 11. Related Documents
 
+![E2A document and repository relationships across the three execution profiles](images/related_docs.png)
+
+*Document and repository relationships across the three E2A execution profiles: Agentic, Deterministic CQRS and AI-DLC.*
+
 - [CQRS_IMPLEMENTATION_PLAYBOOK.md](CQRS_IMPLEMENTATION_PLAYBOOK.md) — class contracts and full scaffold source for `BaseOrchestrator`, `BaseCommandService`, `BaseQueryService`, and the abstract Observability/Governance integration.
 - [CLOUD_LANDING_ZONE.md](CLOUD_LANDING_ZONE.md) — the agentic profile this document is a companion to.
+- [AIDLC_LANDING_ZONE.md](AIDLC_LANDING_ZONE.md) + [AIDLC_IMPLEMENTATION_PLAYBOOK.md](AIDLC_IMPLEMENTATION_PLAYBOOK.md) — the AI-DLC profile, which reuses the same tier numbering and propagation contract.
 - Implementation Playbook (agentic) — method signatures and scaffold code for the classes both profiles share (`BaseValidationService`, `BaseObservability`, `BaseGovernanceFramework`).
 
 ---

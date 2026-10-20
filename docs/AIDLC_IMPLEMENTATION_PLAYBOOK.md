@@ -500,6 +500,10 @@ The one branch that is specific to this profile is in the `finally` block: whene
 
 ## 12. Related Documents
 
+![E2A document and repository relationships across the three execution profiles](images/related_docs.png)
+
+*Document and repository relationships across the three E2A execution profiles: Agentic, Deterministic CQRS and AI-DLC.*
+
 - [AIDLC_LANDING_ZONE.md](https://github.com/subhamviky/e2a-framework/blob/main/docs/AIDLC_LANDING_ZONE.md) — the HLD this Playbook is the LLD companion to; Sections 4–8 there map directly onto Sections 5–7 here.
 - `G2C_Framework_Reference.md` — `DeveloperPlatformWorkflow`, `GeneratorRequest`, `GeneratorCriticAgent` — Phase A.
 - `P0_ProjectBootstrap_Framework_Reference.md` — `BaseProjectBootstrapper`, `ScaffoldRequest`, the `a2c` config block and the `dev_request` field on `ScaffoldResult` — Phase A/B boundary.

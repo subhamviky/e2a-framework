@@ -192,6 +192,10 @@ LLM capacity is sized at Tier 2b, not per phase service: pod count = peak in-fli
 
 ## 10. Related Documents
 
+![E2A document and repository relationships across the three execution profiles](images/related_docs.png)
+
+*Document and repository relationships across the three E2A execution profiles: Agentic, Deterministic CQRS and AI-DLC.*
+
 - [CLOUD_LANDING_ZONE.md](CLOUD_LANDING_ZONE.md) — the Agentic profile this document is a companion to; Sections 6–7 there sketch the conceptual G2C→P0→A2C relationship this document operationalizes.
 - [CQRS_CLOUD_LANDING_ZONE.md](CQRS_CLOUD_LANDING_ZONE.md) + [CQRS_IMPLEMENTATION_PLAYBOOK.md](CQRS_IMPLEMENTATION_PLAYBOOK.md) — the Deterministic CQRS profile; source of the tier-numbering and propagation-contract conventions this document reuses.
 - G2C_Framework_Reference.md — `DeveloperPlatformWorkflow`, `GeneratorRequest`, `GeneratorCriticAgent` — Phase A.
