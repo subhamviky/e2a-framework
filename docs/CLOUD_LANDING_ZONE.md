@@ -30,6 +30,10 @@ This is not metaphor. The structural relationships are isomorphic: every archite
 
 Every E2A framework class follows an identical three-tier method access pattern. This pattern is not stylistic convention — it is a structural governance contract that determines what is changeable, what is overridable, and what is fixed by infrastructure. The same three-tier contract defines the layers of a well-governed cloud landing zone.
 
+![Class-to-zone isomorphism between the E2A class hierarchy and the cloud landing zone](images/isomorphism.png)
+
+*Class-to-zone isomorphism. The inference service class (`BaseLLMAgentService`) maps to the Inference Gateway tier (Tier 2b), the only egress to the model provider.*
+
 |               |                                                                                                                                    |                                                                                                                                |                                                                                |
 |---------------|------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
 | **Layer**     | **Framework Contract**                                                                                                             | **Cloud Landing Zone Equivalent**                                                                                              | **Governance Rule**                                                            |
@@ -280,6 +284,10 @@ The seven-phase E2A/G2C/A2C/P0 pipeline (from the End-to-End Flow reference docu
 ## 8.1 Landing Zone Network Topology
 
 Combining all four frameworks, the complete cloud-native landing zone implements the following network topology. Each tier corresponds directly to a framework layer.
+
+![E2A Cloud Landing Zone high-level design flow](images/hld_flow.png)
+
+*High-level design flow. `BaseLLMAgentService` runs as Tier 2b (Inference Gateway) in the Private VPC, between Orchestration Compute (Tier 2) and the model provider, with dual ingress (gRPC from Tier 2, queue from Tier 3). Model traffic leaves the VPC only from Tier 2b.*
 
 |                         |                                                                  |                                          |                                                                                                                                          |
 |-------------------------|------------------------------------------------------------------|------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
