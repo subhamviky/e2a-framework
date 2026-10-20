@@ -24,7 +24,7 @@ Where the Agentic profile answers "how does a single governed agent run in the c
 
 ![Figure 1 (AI-DLC) — Structural composition of the four chained phase services inside Tier 2](images/aidlc_sequence_flow.png)
 
-*Figure 1 (AI-DLC) — Full request sequence: Tier 0/1 ingress through the Tier 2 phase chain (G2C+P0 → A2C → E2A verify) to Tier 5 Saga evaluation*
+*Figure 1 (AI-DLC) — Full request sequence: Tier 0/1 ingress through the Tier 2 phase chain (G2C+P0 → A2C → E2A verify) to Tier 5 Saga evaluation. Every phase LLM call is served by the Tier 2b Inference Gateway*
 
 ## 2. High-Level Design: Cloud Landing Zone Substrate
 
@@ -32,7 +32,7 @@ The topology reuses the three network zones and the tier-numbering convention fr
 
 ![Figure 2 (AI-DLC) — Zones and trust boundaries for the AI-DLC pipeline](images/aidlc_zones_trust.png)
 
-*Figure 2 (AI-DLC) — Zones and trust boundaries: Public VPC/DMZ → Data & Messaging Perimeter → Private VPC (Application)*
+*Figure 2 (AI-DLC) — Zones and trust boundaries: Public VPC/DMZ → Data & Messaging Perimeter → Private VPC (Application), with Tier 2b as the only egress to the LLM provider*
 
 ### 2.1 Zones and Trust Boundaries
 
@@ -40,7 +40,7 @@ The topology reuses the three network zones and the tier-numbering convention fr
 |---|---|---|
 | Public VPC / DMZ | Tier 0 (API Gateway & WAF), Tier 1 (Ingress Validation) | Only zone with a direct internet route. No generated source code, no tenant repository content, no model credentials at rest — schema/entitlement checks only. |
 | Data & Messaging Perimeter | Tier 3: Intake Topic, Pipeline State/Outbox Table, Artifact & Context Object Store, Idempotency & Lock Cache | No direct route from the Public VPC or the internet. Reachable only from inside the perimeter via private connectivity. |
-| Private VPC (Application) | Tier 2 (AIDLCPipelineOrchestrator + four chained phase services), Tier 4 (Fan-Out Consumers), Tier 5 (Saga Edge) | No inbound route from the internet. Inbound only via push (Tier 2) or pull (Tier 4) delivery; outbound to LLM provider endpoints and the generated repository's Git remote via NAT/egress. |
+| Private VPC (Application) | Tier 2 (AIDLCPipelineOrchestrator + four chained phase services), Tier 2b (Inference Gateway, `BaseLLMAgentService`), Tier 4 (Fan-Out Consumers), Tier 5 (Saga Edge) | No inbound route from the internet. Inbound only via push (Tier 2) or pull (Tier 4) delivery; outbound to LLM provider endpoints only from Tier 2b, and to the generated repository's Git remote from Tier 5, via NAT/egress. |
 
 ### 2.2 Tier-by-Tier Design
 
@@ -80,7 +80,7 @@ The topology reuses the three network zones and the tier-numbering convention fr
 |---|---|---|
 | Public VPC / DMZ | Tier 0, Tier 1 | Internet-reachable; holds no repository content, no LLM credentials, and runs no code generation — exposure risk is bounded regardless of pipeline phase. |
 | Data & Messaging Perimeter | Tier 3 | No route from the Public VPC or the internet — stops exfiltration of generated source, Terraform, or CI/CD secrets even if a Public VPC credential were compromised. |
-| Private VPC (Application) | Tier 2, Tier 4, Tier 5 | No public route; invoked only via push (Tier 2) or pull (Tier 4) delivery from Tier 3. Outbound egress to the LLM provider and the developer's Git remote is the only external connectivity, and both are scoped by NAT allow-lists. |
+| Private VPC (Application) | Tier 2, Tier 2b, Tier 4, Tier 5 | No public route; invoked only via push (Tier 2) or pull (Tier 4) delivery from Tier 3. Outbound egress to the LLM provider (from Tier 2b only) and the developer's Git remote (from Tier 5) is the only external connectivity, and both are scoped by NAT allow-lists. |
 
 ## 4. The AIDLCPipelineOrchestrator — Composing G2C, P0, A2C, E2A
 
