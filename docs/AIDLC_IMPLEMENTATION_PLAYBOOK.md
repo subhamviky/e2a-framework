@@ -536,7 +536,7 @@ import time
 import logging
 from typing import Any, Dict, List, Optional, TypedDict
 
-from e2a_base import BasePipeline
+from e2a_base import BasePipeline, resolve_config
 from developer_platform_workflow import DeveloperPlatformWorkflow
 from a2c_base import SDLCWorkflow
 
