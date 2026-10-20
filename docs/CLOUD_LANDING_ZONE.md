@@ -115,6 +115,10 @@ E2A uses an abstract base class (BaseAgent) extended by concrete domain classes 
 | Same class, QA config       | QA Environment Account       | Child module: RAGAS gate enforced, integration test fixtures    | Quality gates stricter, test data isolation      |
 | Same class, PROD config     | PROD Environment Account     | Child module: full SCP, WAF on, FinOps routing active           | Full governance, production model, cost controls |
 
+![CI/CD and deployment topology](images/cicd_topology.png)
+
+*CI/CD and deployment topology. A push or PR merge runs the pipeline (build, unit tests, RAGAS eval gate, image build); versioned images land in the artifact registry and roll out to the multi-region compute clusters. Region A serves primary traffic (Tier 2 / Tier 4 compute, Tier 3 state as source of truth); Region B is the failover target with a cross-region Tier 3 replica.*
+
 ## 3.3 E2A Multi-Class Architecture — The Full Landing Zone Topology
 
 E2A defines five core abstract classes: BaseAgent, BaseWorkflow, BaseRAGPipeline, BaseToolService and BaseLLMAgentService (plus the foundation classes). Together they form a complete distributed system architecture. Each class maps to a distinct zone tier with defined network boundaries.
