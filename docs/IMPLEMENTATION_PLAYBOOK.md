@@ -34,6 +34,16 @@ The document is structured in four parts:
 
 *Source Note: Implementation examples and the categorical breakdown of cloud-native primitives in this playbook align with the AWS AI Ecosystem architectural map by Prashant Rathi.*
 
+## 1.1 Related Documents
+
+![E2A document and repository relationships across the three execution profiles](images/related_docs.png)
+
+*Document and repository relationships across the three E2A execution profiles: Agentic, Deterministic CQRS and AI-DLC.*
+
+- [CLOUD_LANDING_ZONE.md](CLOUD_LANDING_ZONE.md) — the HLD/LLD this playbook implements: network zones, compute tiers (including the Tier 2b Inference Gateway) and the Saga edge.
+- [CQRS_IMPLEMENTATION_PLAYBOOK.md](CQRS_IMPLEMENTATION_PLAYBOOK.md) and [CQRS_CLOUD_LANDING_ZONE.md](CQRS_CLOUD_LANDING_ZONE.md) — the Deterministic CQRS profile.
+- [AIDLC_IMPLEMENTATION_PLAYBOOK.md](AIDLC_IMPLEMENTATION_PLAYBOOK.md) and [AIDLC_LANDING_ZONE.md](AIDLC_LANDING_ZONE.md) — the AI-DLC profile.
+
 # 2. Class Contract Specifications
 
 This section specifies the complete method contracts for each abstract class — access modifier, signature, accepted config/kwargs keys, and purpose. The config parameter and **kwargs together provide full flexibility: pass explicit values at call time, or rely on config dict defaults, or fall back to environment variables. The resolution order is always: kwargs override → config dict → environment variable → hardcoded default.
