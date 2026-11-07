@@ -551,6 +551,7 @@ The project history includes discovery-oriented architectural spikes as well as 
 | [Financial Settlement Platform](https://github.com/subhamviky/financial-settlement-platform) | Java / Spring Boot / Kafka / Redis / PostgreSQL | Saga, idempotency, financial-integrity, distributed messaging |
 | [Order-to-Cash Agentic AI](https://github.com/subhamviky/order-to-cash-agentic-ai) | Python / LangGraph / Bedrock / OpenSearch / Terraform | Multi-agent orchestration, RAG, policy controls, NFR-first delivery |
 | [Payment Reconciliation Engine](https://github.com/subhamviky/aws-reconciliation-engine) | Python / FastAPI / Lambda / SQS / DynamoDB / Bedrock | Serverless idempotency, asynchronous processing, DLQ, agent routing |
+| [Capability-Oriented DSA](https://github.com/subhamviky/capability-oriented-dsa) | Python (no runtime dependencies) | Single governed entry point, declared operations, ordered configuration, request-scoped identifiers at small scale; replay protection for sequential retries only |
 
 > **Evidence discipline:** These projects are architecture R&D and reference implementations. They demonstrate architectural feasibility and implementation patterns; they should not be described as production validation unless a specific repository provides explicit evidence of that status.
 
