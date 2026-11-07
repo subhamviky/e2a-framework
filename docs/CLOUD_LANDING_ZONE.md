@@ -38,7 +38,7 @@ Every E2A framework class follows an identical three-tier method access pattern.
 |---------------|------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
 | **Layer**     | **Framework Contract**                                                                                                             | **Cloud Landing Zone Equivalent**                                                                                              | **Governance Rule**                                                            |
 | **PUBLIC**    | Single entry point — run() / execute() / bootstrap(). Orchestrates full lifecycle. Never overridden.                               | API Gateway / Application Load Balancer — single ingress, traffic governance, auth enforcement, rate limiting.                 | One door in. Governance enforced at the boundary.                              |
-| **PROTECTED** | Abstract domain hooks — _validate_state(), _build_messages(), _apply_policy(). Subclass overrides for domain logic.             | Business Logic Tier — ECS/EKS microservices, Lambda functions, LangGraph agents. Domain-specific; replaceable per environment. | Domain changes here. Infrastructure constraints enforced by abstract contract. |
+| **PROTECTED** | Abstract domain hooks — _build_messages(), _apply_policy(), _evaluate_output(). Subclass overrides for domain logic.             | Business Logic Tier — ECS/EKS microservices, Lambda functions, LangGraph agents. Domain-specific; replaceable per environment. | Domain changes here. Infrastructure constraints enforced by abstract contract. |
 | **PRIVATE**   | Infrastructure helpers — __write_file(), __ensure_idempotency(), __track_usage(). Fixed mechanics. Never touched by subclasses. (The model call itself is delegated to BaseLLMAgentService.) | Data & Infrastructure Tier — RDS/DynamoDB, S3, SQS, Secrets Manager, VPC internals. Shared; never directly exposed.            | No direct access. Infrastructure as immutable contract.                        |
 
 ## 2.2 The Complete Class-to-Zone Mapping
@@ -55,7 +55,7 @@ The table below establishes the full structural isomorphism. Every framework con
 | **Private Method**         | RDS / DynamoDB / SQS / Secrets Manager                       | Security Group: no ingress from public tier; app tier only                             |
 | **@abstractmethod**        | Required NFR contract (Health Check, Observability endpoint) | ECS task definition enforces /health endpoint; deploy fails without it                 |
 | **_apply_policy()**       | Service Control Policy (SCP) + OPA Policy Gate               | Runs before business logic; blocks non-compliant resource creation                     |
-| **_validate_state()**     | WAF + Input Schema Validation at API Gateway                 | Rejects malformed requests before compute is invoked                                   |
+| **BaseValidationService.validate()** | WAF + Input Schema Validation at API Gateway (Tier 1, before any agent is instantiated) | Rejects malformed requests before compute is invoked; per-agent `_validate_<agent_name>` validators live on the service, not on `BaseAgent` |
 | **CriticAgent**            | RAGAS CI/CD Gate + CloudWatch SLO Alarm                      | Deployment blocked if quality score < 0.85; auto-rollback triggered                   |
 | **_fallback()**           | Circuit Breaker + Dead Letter Queue (DLQ)                    | pybreaker / AWS SQS DLQ — degraded path activated on failure                           |
 | **_handle_error()**       | Centralized Error Bus — EventBridge + SNS                    | Structured error events routed to ops topic; PagerDuty integration                     |
@@ -79,7 +79,7 @@ BaseAgent.run() is the sole public entry point. It cannot be overridden. It enfo
 |-------------------------------------|--------------------------------------------------|----------------------------------------------------------|
 | **BaseAgent.run() Step**            | **API Gateway Equivalent**                       | **AWS Implementation**                                   |
 | __ensure_idempotency()            | Idempotency Key validation on request header     | API GW + DynamoDB conditional write (SETNX pattern)      |
-| _validate_state()                  | WAF + Request Schema Validation                  | API GW model validation + WAF WebACL rule group          |
+| BaseValidationService.validate() (runs before run()) | WAF + Request Schema Validation                  | API GW model validation + WAF WebACL rule group; the validation tier returns a 400 body on failure |
 | _apply_policy()                    | SCP + OPA Policy Gate (pre-compute)              | Lambda Authorizer + OPA sidecar evaluated before routing |
 | _build_messages() + _infer()      | Route to Compute (ECS / Lambda), then to Inference Gateway | ALB target group → ECS task; gRPC/queue call to the Inference Gateway tier |
 | _evaluate_output()                 | Response Validation + SLO Check                  | CloudWatch metric → SLO alarm → auto-rollback on breach  |
@@ -143,7 +143,7 @@ This mechanism is structurally identical to AWS Service Control Policy (SCP): a 
 
 >
 >
-> A2C: DevRequest → _validate_state() → _apply_policy() [inject NFRs] → LLM call → generated code
+> A2C: DevRequest → BaseValidationService.validate() (Tier 1) → _apply_policy() [inject NFRs] → LLM call → generated code
 >
 > SCP: API call → IAM eval → SCP eval [inject deny conditions] → resource provisioned
 >
@@ -169,7 +169,7 @@ A2C injects six mandatory NFRs into every generated service. Each NFR maps to a 
 |                       |                                                  |                                                            |                                                     |
 |-----------------------|--------------------------------------------------|------------------------------------------------------------|-----------------------------------------------------|
 | **A2C Mandatory NFR** | **Generated Code Pattern**                       | **Cloud Infrastructure Equivalent**                        | **Landing Zone Control**                            |
-| **Idempotency**       | DynamoDB conditional write + X-Idempotency-Key   | SQS exactly-once + API GW idempotency header enforcement   | SCP: deny SQS queues without redrive policy         |
+| **Idempotency**       | DynamoDB conditional write + X-Idempotency-Key   | SQS FIFO deduplication (time-bounded window; delivery stays at-least-once) + API GW idempotency header enforcement   | SCP: deny SQS queues without redrive policy         |
 | Observability         | structlog JSON + OTel + CloudWatch PutMetricData | CloudWatch Log Group + X-Ray tracing + Dashboards          | SCP: deny ECS task defs without log configuration   |
 | CircuitBreaker        | pybreaker per downstream service                 | ALB target group health checks + connection draining       | ECS: required health check in task definition       |
 | RetryWithBackoff      | tenacity decorator with jitter                   | SQS message visibility timeout + exponential backoff retry | DLQ required on all SQS queues (SCP enforced)       |
@@ -303,7 +303,7 @@ Combining all four frameworks, the complete cloud-native landing zone implements
 | **Integration (Tools)** | BaseToolService                                                  | Private subnet                           | Internal ALB + ECS microservices (create_order, check_stock, risk_score). Accessible from Compute tier SG only. No public ALB.           |
 | **Inference Gateway**   | BaseLLMAgentService (process_inference / process_inference_stream) | Private subnet                | Dual-ingress pods (gRPC + queue worker). In-memory pod semaphore and RPM/TPM token bucket. Event-driven autoscaler. Egress only via private endpoint to model endpoints; the only tier holding provider credentials. |
 | **Data**                | Private methods (__ensure_idempotency, __track_usage); CDC-fed index writes | Isolated subnet (data)                   | DynamoDB (locks; no public endpoint). RDS/Aurora PostgreSQL (OLTP, SG: app tier only). CDC engine (AWS DMS / Datastream) → event broker → ingestion worker → vector index. SQS (VPC endpoint). Secrets Manager (VPC endpoint). Redis-compatible cache (keyspaces A/B/C below). |
-| **Governance**          | _apply_policy / CriticAgent / _validate_state                  | Cross-cutting (no subnet — SCP + Lambda) | SCP (org-level). OPA policy sidecar. RAGAS eval Lambda. CloudWatch SLO alarms. Auto-rollback on SLO breach. X-Ray trace correlation.     |
+| **Governance**          | _apply_policy / CriticAgent / BaseValidationService                  | Cross-cutting (no subnet — SCP + Lambda) | SCP (org-level). OPA policy sidecar. RAGAS eval Lambda. CloudWatch SLO alarms. Auto-rollback on SLO breach. X-Ray trace correlation.     |
 
 ### 8.1.1 Inference Gateway Tier (Tier 2b) — Dual Ingress
 
@@ -449,7 +449,7 @@ The abstract contracts in E2A/A2C/P0 generate specific SCP (Service Control Poli
 |                                                     |                                                                               |                                                                              |
 |-----------------------------------------------------|-------------------------------------------------------------------------------|------------------------------------------------------------------------------|
 | **Abstract Contract**                               | **SCP Rule Derived**                                                          | **Effect on Non-Compliant Resource**                                         |
-| _validate_state() — required abstract              | Deny ECS task creation without /health endpoint defined in task definition    | ECS task definition rejected at registration time                            |
+| _validate_<agent_name>() — registered per agent on BaseValidationService | Deny ECS task creation without /health endpoint defined in task definition    | ECS task definition rejected at registration time                            |
 | _apply_policy() — governance before business logic | Deny Lambda creation without resource-based policy tagging owner + costcenter | Lambda function creation blocked; deploy pipeline fails                      |
 | __ensure_idempotency() — fixed private            | Deny SQS queue creation without redrive policy (DLQ required)                 | SQS queue creation rejected in all workload accounts                         |
 | _evaluate_output() — quality gate                  | Deny ECS service update if CloudWatch SLO alarm is in ALARM state             | Blue/green deployment blocked until SLO recovers                             |
