@@ -20,9 +20,9 @@ Where the Agentic profile answers "how does a single governed agent run in the c
 
 > **What Changes in This Profile**
 >
-> Only Tier 2's internal composition changes. Tier 2 is no longer one request-scoped `BaseAgent.run()` call (Agentic profile) or a Command/Query split (CQRS profile) — it is a multi-phase, long-running Saga composed of four chained, independently scaled microservices: a G2C metaclass phase, a P0 scaffold phase, an A2C multi-agent code-generation phase, and a static E2A compliance-verification phase. `BaseValidationService`, `BaseObservability`, and `BaseGovernanceFramework` are reused unmodified in their Agentic-profile form, because this pipeline calls LLMs on every phase — unlike the CQRS profile, which reuses the same abstract-class contract but swaps out the concerns each hook enforces.
+> Only Tier 2's internal composition changes. Tier 2 is no longer one request-scoped `BaseAgent.run()` call (Agentic profile) or a Command/Query split (CQRS profile) — it is a multi-phase, long-running Saga whose three phases run in sequence inside one orchestrator: Phase A (G2C and P0, through `DeveloperPlatformWorkflow`), Phase B (A2C multi-agent code generation, through `SDLCWorkflow`) and Phase C (static E2A compliance verification). `BaseValidationService`, `BaseObservability`, and `BaseGovernanceFramework` are reused unmodified in their Agentic-profile form, because this pipeline calls LLMs on every phase — unlike the CQRS profile, which reuses the same abstract-class contract but swaps out the concerns each hook enforces.
 
-![Figure 1 (AI-DLC) — Structural composition of the four chained phase services inside Tier 2](images/aidlc_sequence_flow.png)
+![Figure 1 (AI-DLC) — Structural composition of the Tier 2 phase chain](images/aidlc_sequence_flow.png)
 
 *Figure 1 (AI-DLC) — Full request sequence: Tier 0/1 ingress through the Tier 2 phase chain (G2C+P0 → A2C → E2A verify) to Tier 5 Saga evaluation. Every phase LLM call is served by the Tier 2b Inference Gateway*
 
@@ -40,7 +40,7 @@ The topology reuses the three network zones and the tier-numbering convention fr
 |---|---|---|
 | Public VPC / DMZ | Tier 0 (API Gateway & WAF), Tier 1 (Ingress Validation) | Only zone with a direct internet route. No generated source code, no tenant repository content, no model credentials at rest — schema/entitlement checks only. |
 | Data & Messaging Perimeter | Tier 3: Intake Topic, Pipeline State/Outbox Table, Artifact & Context Object Store, Idempotency & Lock Cache | No direct route from the Public VPC or the internet. Reachable only from inside the perimeter via private connectivity. |
-| Private VPC (Application) | Tier 2 (AIDLCPipelineOrchestrator + four chained phase services), Tier 2b (Inference Gateway, `BaseLLMAgentService`), Tier 4 (Fan-Out Consumers), Tier 5 (Saga Edge) | No inbound route from the internet. Inbound only via push (Tier 2) or pull (Tier 4) delivery; outbound to LLM provider endpoints only from Tier 2b, and to the generated repository's Git remote from Tier 5, via NAT/egress. |
+| Private VPC (Application) | Tier 2 (AIDLCPipelineOrchestrator running Phases A–C), Tier 2b (Inference Gateway, `BaseLLMAgentService`), Tier 4 (Fan-Out Consumers), Tier 5 (Saga Edge) | No inbound route from the internet. Inbound only via push (Tier 2) or pull (Tier 4) delivery; outbound to LLM provider endpoints only from Tier 2b, and to the generated repository's Git remote from Tier 5, via NAT/egress. |
 
 ### 2.2 Tier-by-Tier Design
 
@@ -48,16 +48,16 @@ The topology reuses the three network zones and the tier-numbering convention fr
 
 **Tier 1 — Ingress Validation Service (Public VPC).** Runs `BaseValidationService.validate('AIDLCPipelineRequest', state)` unmodified (Implementation Playbook Section 2.2). Validates the unified `AIDLCPipelineRequest` payload the UI collects across its three input panels (Section 4.3). On success, runs `_enforce_entitlement_gate()` (does this developer have create-repository rights in the target tenant/org?), publishes to the Tier 3 Intake Topic, and returns HTTP 202 Accepted with `correlation_id`. This is a multi-minute pipeline — unlike the CQRS profile's Query path, there is no synchronous invoke of Tier 2 from here under any circumstance.
 
-**Tier 2 — Pipeline Compute (Private VPC).** Hosts `AIDLCPipelineOrchestrator` (Section 3) and the four phase services it chains: `G2CPhaseService`, `P0PhaseService`, `A2CPhaseService`, and `E2AActivationPhaseService`. All four run in the same private subnet group but as independently deployable containers with different scaling profiles — G2C and A2C are LLM-bound and bursty, P0 is CPU/IO-bound and fast, E2A activation is a short static-check job. This is the Progressive Decomposition pattern from Implementation Playbook Section 2.14: different scaling profiles and different failure blast radius are both true here, which is exactly the recognition signal that document names for justifying a split into separate deployables.
+**Tier 2 — Pipeline Compute (Private VPC).** Hosts `AIDLCPipelineOrchestrator` (Section 3), which runs Phases A, B and C in sequence inside one process. It calls `DeveloperPlatformWorkflow.generate()` and `SDLCWorkflow.execute()` directly — there are no phase-service wrapper classes between them — and runs `AIDLCStaticPipeline` (a `BasePipeline` subclass) for Phase C. It is one deployable, scaled by the number of concurrent builds per instance (the build admission limits), not by phase. The bursty, LLM-bound load does not scale this tier; the inference gateway (Tier 2b) absorbs it. Splitting the phases into separately deployed services (Implementation Playbook Section 2.14, Progressive Decomposition) would be justified only if they came to need different scaling profiles; this design does not make that split.
 
-**Tier 2b — Inference Gateway (Private VPC).** Hosts the `BaseLLMAgentService` binding (Implementation Playbook Section 2.18). Every LLM call from `G2CPhaseService`, `A2CPhaseService` and `CodeCriticAgent` goes through it; phase services never hold provider credentials or call the provider directly. It enforces the per-pod concurrency semaphore, RPM/TPM token bucket, DLP redaction and `failed_keys` semantics, accepts calls over gRPC or the queue, and scales on in-flight requests and backlog rather than CPU. Because G2C and A2C are LLM-bound and bursty, this is the tier that absorbs the burst.
+**Tier 2b — Inference Gateway (Private VPC).** Hosts the `BaseLLMAgentService` binding (Implementation Playbook Section 2.18). Every LLM call from `DeveloperPlatformWorkflow`, `SDLCWorkflow` and `CodeCriticAgent` goes through it; the orchestrator and its phases never hold provider credentials or call the provider directly. It enforces the per-pod concurrency semaphore, RPM/TPM token bucket, DLP redaction and `failed_keys` semantics, accepts calls over gRPC or the queue, and scales on in-flight requests and backlog rather than CPU. Because G2C and A2C are LLM-bound and bursty, this is the tier that absorbs the burst.
 
 **Tier 3 — Data & Messaging Perimeter.** Four component groups, one tier:
 
 - Intake Topic (SNS/SQS FIFO or Pub/Sub, ordering key = `tenant_id`) — buffers the validated `AIDLCPipelineRequest` for push-invoke of Tier 2.
-- Pipeline State/Outbox Table (`BaseTransactionalStore`) — one row per `correlation_id`, tracking phase completion as an enum: `QUEUED` → `G2C_DONE` → `P0_DONE` → `A2C_DONE` → `E2A_VERIFIED` → `COMMITTED`, or `FAILED_<phase>`.
+- Pipeline State/Outbox Table (`BaseTransactionalStore`) — one row per `correlation_id`, tracking phase completion as an enum: `QUEUED` → `G2C_P0_DONE` → `A2C_DONE` → `E2A_VERIFIED` → `COMMITTED`, or `FAILED_<phase>` (for example `FAILED_G2C_P0`), or `REJECTED_OVERLOAD` when build admission refuses the request. Phase A's G2C and P0 work share one state value because P0 runs inline inside the inherited-class generator.
 - Artifact & Context Object Store (S3 / GCS / Blob, addressed via `BaseTransactionalStore`'s `put()`/`get()` contract pointed at object storage instead of a row store) — holds every generated file: `common/e2a_base.py`, the ScaffoldResult file set, the inherited-class source, the A2C-generated Terraform and CI/CD YAML, keyed by `generator_key` / `scaffold_key`.
-- Idempotency & Lock Cache (Redis/Memorystore, backing `BaseIdempotencyStore` and `BaseDistributedLock`) — prevents two identical `AIDLCPipelineRequest`s (same `generator_key`) from double-triggering a build, and backs the mutex around the shared `common/e2a_base.py` write path when two inherited-class builds race to generate the same abstract class.
+- Idempotency & Lock Cache (Redis/Memorystore, backing `BaseIdempotencyStore` for claims and `BaseDistributedLock` for the leases that scheduled repair holds) — prevents two identical `AIDLCPipelineRequest`s (same `generator_key`) from double-triggering a build through an atomic claim: exactly one caller wins the key, and every other caller gets a typed outcome with no side effect. When two inherited-class builds race to generate the same abstract class, ownership of `common/e2a_base.py` is a compare-and-set record in the artifact store (`artifact:<path>` → references and creator), not a mutex: a reference can never be lost, and only one compensation can delete the shared artifact.
 
 **Tier 4 — Fan-Out Consumers (Private VPC).** Pull-based, horizontally autoscaled workers, one per bounded concern: (a) Telemetry/Status Fan-Out — streams `message_log` entries to the developer's UI over WebSocket/SSE as each phase completes, giving the "live build console" experience; (b) Webhook Dispatch (`BaseWebhookDispatcher`) — notifies external systems (chat ops, ticketing, a service catalog) on pipeline completion; (c) Domain Event Consumers for any downstream system subscribed to a "new service scaffolded" event.
 
@@ -67,12 +67,33 @@ The topology reuses the three network zones and the tier-numbering convention fr
 
 1. Tier 0/1: Developer submits the unified `AIDLCPipelineRequest` from the UI (context + harness + prompt panels); request validated; `correlation_id` minted; HTTP 202 returned; developer's UI subscribes to the Tier 4 status stream.
 2. Tier 1 → Tier 3: validated payload published to the Intake Topic; Pipeline State row created (`QUEUED`).
-3. Tier 3 → Tier 2: push-invoke of `AIDLCPipelineOrchestrator.execute_pipeline()`.
-4. Tier 2, Phase A (G2C + P0): `DeveloperPlatformWorkflow.generate()` resolves/generates the E2A (and, if `generator_type='a2c_inherited'`, A2C) abstract class, then generates the inherited class — P0's `bootstrap()` runs inline as that generator's phase 7–8. Both artifacts written to the Tier 3 object store. State row → `P0_DONE`.
-5. Tier 2, Phase B (A2C, conditional on `harness.a2c_sdlc.enabled`): `AIDLCPipelineOrchestrator` passes the `dev_request` P0 already built via `__build_dev_request()` into `A2CSDLCWorkflow.execute(dev_request, config)` — RequirementsAgent → CodeGenAgent → IaCAgent → CICDAgent → CodeCriticAgent. Generated Terraform, CI/CD YAML, and business-logic source written to the object store; commit staged on an ephemeral branch. State row → `A2C_DONE`.
+3. Tier 3 → Tier 2: push-invoke of `AIDLCPipelineOrchestrator.execute_pipeline()`, which wins the atomic claim on `generator_key` (a duplicate returns a typed outcome here) and is admitted by the build admission limits (an over-limit build is rejected as retryable overload here).
+4. Tier 2, Phase A (G2C + P0): `DeveloperPlatformWorkflow.generate()` resolves/generates the E2A (and, if `generator_type='a2c_inherited'`, A2C) abstract class, then generates the inherited class — P0's `bootstrap()` runs inline as that generator's phase 7–8. Both artifacts written to the Tier 3 object store. State row → `G2C_P0_DONE`.
+5. Tier 2, Phase B (A2C, conditional on `harness.a2c_sdlc.enabled`): `AIDLCPipelineOrchestrator` reads the `dev_request` that P0's `bootstrap()` already built inline (it arrives as `scaffold_result.dev_request` on Phase A's result) and passes it to `SDLCWorkflow.execute(dev_request, config)` — RequirementsAgent → CodeGenAgent → IaCAgent → CICDAgent → CodeCriticAgent. Generated Terraform, CI/CD YAML, and business-logic source written to the object store; commit staged on an ephemeral branch. State row → `A2C_DONE`.
 6. Tier 2, Phase C (E2A static verification): `BasePipeline`'s first three stages run against the full repository in a build container — no live deploy. State row → `E2A_VERIFIED` on pass.
 7. Tier 3 → Tier 5: Task Queue feeds the Saga edge, which evaluates `failed_keys` accumulated across all three phases and performs commit or compensate.
 8. Tier 3 → Tier 4: on commit, the CDC sweeper fans a "pipeline completed" domain event out to Tier 4 consumers — status stream closes, webhook fires, service-catalog event publishes.
+
+### 2.4 Capacity, Admission and Durable State
+
+A build is minutes long and spends model, compute and repository resources, so this profile's concurrency risks are duplicate builds, two builds racing on one repository or shared artifact, one tenant monopolizing build capacity, and a half-built result being cleaned up while a sibling build still needs it. Tier numbers and zones are unchanged; the figure adds the capacity view.
+
+![E2A AI-DLC build admission, capacity and durable state](images/aidlc_capacity_admission.png)
+
+*Build admission, capacity and durable state. The Intake Topic is the durable build queue; admission in Tier 2 is a synchronous bounded wait; phase state, idempotency and artifact ownership are durable in Tier 3; model quota is shared across every build at Tier 2b.*
+
+| Concern | Tier and mechanism | Bound | When saturated |
+|---|---|---|---|
+| Build queue | Tier 3 Intake Topic (durable backlog, DLQ, ordering key `tenant_id`) | Topic retention; consumer concurrency | Builds wait durably; the caller already has its 202 |
+| Build admission | Tier 2, `_BuildAdmission` — a synchronous bounded wait | `build_max_inflight` per instance, `tenant_build_max_inflight` per tenant, `permit_timeout`, capped by the deadline | The build is rejected as retryable overload (`REJECTED_OVERLOAD`) — not queued without bound, not compensated, not dead-lettered; its claim is released |
+| Isolated worker capacity | Tier 2 phase compute; the build container for Phase C | Instances × `build_max_inflight`; container size per phase | A busy fleet admits fewer builds; other tenants keep their own slots |
+| Duplicate builds | Tier 3 idempotency store, atomic claim on `generator_key` | `idempotency_lease_seconds` | Duplicates return `SKIPPED_IDEMPOTENT`, `SKIPPED_IN_PROGRESS`, `REJECTED_CONFLICT`, `RECOVERY_REQUIRED` or `FAILED_FINAL` with no side effect |
+| Durable phase state | Tier 3 Pipeline State table, conditional commit per phase | One record per `correlation_id` | A concurrent writer gets a typed conflict instead of overwriting; the last phase reached survives a lost worker |
+| Artifact-store concurrency | Tier 3 artifact store, compare-and-set ownership record per shared artifact | Bounded compare-and-set retries | The record is never lost; one compensation deletes a shared artifact, once, and only when no build still references it |
+| Shared model quota | Tier 2b Inference Gateway: tenant-and-pod permit, token quota, upstream call | `permit_timeout`, `quota_timeout`, `min(llm_max_latency, deadline)`, circuit breaker | Bounded rejection; quota refunded on failure and cancellation; admitted builds never hold a slot waiting on quota beyond the bound |
+| Completion delivery | Tier 4 webhook and status fan-out, fed after commit through the outbox | At-least-once delivery | A receiver that sees a delivery twice dedupes on `correlation_id`; a failed delivery retries without re-running the build |
+
+Phases A, B and C are sequential because each consumes the previous one's output, so there is no per-build fan-out to bound; concurrency is across builds, and admission is its bound. The deadline is checked between phases, and a phase already running is bounded by the gateway's limits, not interrupted by the orchestrator. The claim is settled only after compensation, so a key is never claimable while its half-built artifacts are still being removed.
 
 ## 3. Network Placement Reasoning
 
@@ -86,9 +107,9 @@ The topology reuses the three network zones and the tier-numbering convention fr
 
 ### 4.1 Why a New Composing Class Is Needed
 
-`DeveloperPlatformWorkflow.generate()` (G2C_Framework_Reference.md Section 10.2) already chains E2A-abstract-class generation into P0-scaffold into one inherited-class file. It stops there by design — G2C's contract is to produce classes, not the surrounding infrastructure and pipeline artifacts (G2C_Framework_Reference.md Section 1: "G2C always produces a Python class file — never Terraform or YAML directly"). A2C's SDLCWorkflow is what produces Terraform, CI/CD YAML, and the remaining business-logic files, but it consumes a `DevRequest`, not a `GeneratorRequest` — and P0 already knows how to build that `DevRequest` (via `__build_dev_request()`, P0 Section 3.2/9.2) whenever its config carries an `a2c` block with `enabled=True`.
+`DeveloperPlatformWorkflow.generate()` (G2C_Framework_Reference.md Section 10.2) already chains E2A-abstract-class generation into P0-scaffold into one inherited-class file. It stops there by design — G2C's contract is to produce classes, not the surrounding infrastructure and pipeline artifacts (G2C Framework Reference, Sections 1 and 2.1: every G2C generator writes class and scaffold files, and none writes Terraform or CI/CD YAML). A2C's SDLCWorkflow is what produces Terraform, CI/CD YAML, and the remaining business-logic files, but it consumes a `DevRequest`, not a `GeneratorRequest` — and P0 already knows how to build that `DevRequest` (via `__build_dev_request()`, P0 Section 3.2/9.2) whenever its config carries an `a2c` block with `enabled=True`.
 
-`AIDLCPipelineOrchestrator` is the class that closes this gap: it calls `DeveloperPlatformWorkflow.generate()` for Phase A, then — only if the request's `harness.a2c_sdlc.enabled` flag is set — passes the resulting `dev_request` into `A2CSDLCWorkflow.execute()` for Phase B, then runs the static E2A verification stages for Phase C. This mirrors, at the cloud-landing-zone layer, exactly what P0's own `BootstrapAndGenerateWorkflow` already does at the framework layer for the simpler P0→A2C-only case (P0 Section 9) — `AIDLCPipelineOrchestrator` is the G2C-inclusive superset of that same composition pattern.
+`AIDLCPipelineOrchestrator` is the class that closes this gap: it calls `DeveloperPlatformWorkflow.generate()` for Phase A, then — only if the request's `harness.a2c_sdlc.enabled` flag is set — passes the resulting `dev_request` into `SDLCWorkflow.execute()` for Phase B, then runs the static E2A verification stages for Phase C. This mirrors, at the cloud-landing-zone layer, exactly what P0's own `BootstrapAndGenerateWorkflow` already does at the framework layer for the simpler P0→A2C-only case (P0 Section 9) — `AIDLCPipelineOrchestrator` is the G2C-inclusive superset of that same composition pattern.
 
 ### 4.2 Method Contract
 
@@ -98,7 +119,7 @@ The topology reuses the three network zones and the tier-numbering convention fr
 | Sequence 1 | Governance gate | `BaseGovernanceFramework.enforce_governance_gate()` — capacity/dependency-health check, per-tenant build-quota check, semantic firewall on the prompt panel fields. |
 | Sequence 2 | Idempotency check | `__ensure_idempotency()` on `generator_key` (`name:generator_type:runtime:platform`). Skips re-execution if an identical request already completed and `idempotency=True`. |
 | Sequence 3 | Phase A — G2C + P0 | `DeveloperPlatformWorkflow.generate(request.harness ∪ request.context)`. Aborts the pipeline (no Phase B/C) on failure; `failed_keys` gets `generator_key`. |
-| Sequence 4 | Phase B — A2C (conditional) | If `request.harness.a2c_sdlc.enabled`: `A2CSDLCWorkflow.execute(dev_request, config)` using the `dev_request` P0's `__build_dev_request()` already produced in Phase A. Skipped entirely, not failed, if the flag is absent — a G2C-only or P0-only request is a valid, smaller pipeline. |
+| Sequence 4 | Phase B — A2C (conditional) | If `request.harness.a2c_sdlc.enabled`: `SDLCWorkflow.execute(dev_request, config)` using the `dev_request` P0's `bootstrap()` already produced in Phase A (read from `scaffold_result.dev_request`; the orchestrator does not rebuild it). Skipped entirely, not failed, if the flag is absent — a G2C-only or P0-only request is a valid, smaller pipeline. |
 | Sequence 5 | Phase C — E2A static verification | `BasePipeline`'s `_run_static_security_scans()`, `_execute_test_suite()`, `_verify_scaffold_contracts()` against the full repository content in the object store. No deploy, no artifact compile. |
 | Sequence 6 | Saga evaluation | Hands `failed_keys` to Tier 5 (Section 5). |
 | Sequence 7 | Observability flush | `BaseObservability.record_telemetry()` ships the accumulated `message_log` across all three phases under one `correlation_id`. |
@@ -122,7 +143,7 @@ The three UI input panels the developer fills in before clicking Execute map dir
 |---|---|---|---|---|
 | A | G2C | `DeveloperPlatformWorkflow.generate()` | GeneratorCriticAgent ≥ 0.75 (structural: access modifiers, required abstract methods, inheritance) | `common/e2a_base.py` (or `a2c_base.py`) if generated; inherited agent/workflow class file |
 | A | P0 | `BaseProjectBootstrapper.bootstrap()` (invoked inline by G2C's inherited-class generator, phases 7–8) | `_validate_output()` — manifest + README + Docker + Makefile presence | `pyproject.toml`/`pom.xml`, directory tree, Dockerfile, Makefile, `.env.example`, `.gitignore` |
-| B | A2C | `A2CSDLCWorkflow.execute(dev_request)` — conditional on `harness.a2c_sdlc.enabled` | CodeCriticAgent ≥ 0.75 (structural: mandatory NFR patterns present in code, not comments) | Terraform IaC, GitHub Actions CI/CD workflow, remaining Clean Architecture business-logic source |
+| B | A2C | `SDLCWorkflow.execute(dev_request)` — conditional on `harness.a2c_sdlc.enabled` | CodeCriticAgent ≥ 0.75 (structural: mandatory NFR patterns present in code, not comments) | Terraform IaC, GitHub Actions CI/CD workflow, remaining Clean Architecture business-logic source |
 | C | E2A | `BasePipeline` — first 3 of 7 stages only | Each stage is itself a pass/fail gate; any failure aborts before compile/deploy stages are ever reached | Static-scan report, test results, scaffold-contract compliance report |
 
 ## 6. Cross-Class State Propagation Fields
@@ -173,12 +194,16 @@ The Tier 5 Saga evaluates `failed_keys` once the chain reaches a terminal state.
 | Tier 5: Dead Letter Queue | SQS DLQ | Pub/Sub DLQ | Service Bus DLQ |
 | CI/CD target (generated by CICDAgent) | GitHub Actions + OIDC → ECR/ECS | GitHub Actions + OIDC → Artifact Registry/Cloud Run | GitHub Actions + OIDC → ACR/AKS |
 | Observability (`BaseObservability`) | CloudWatch + X-Ray | Cloud Monitoring + Cloud Trace | Azure Monitor + App Insights |
+| Build admission and durable build queue | Intake Topic (SQS FIFO) with per-instance and per-tenant build caps in Tier 2 | Pub/Sub with the same caps | Service Bus queue with the same caps |
+| Atomic claim and conditional phase-state commit | DynamoDB conditional writes (single-item) | Firestore create-if-absent and preconditions | Cosmos DB create item and ETag `If-Match` |
+| Artifact ownership compare-and-set | S3 object (or DynamoDB item) with conditional write | GCS object generation precondition | Blob ETag condition |
+| Quota refund and shared model quota | Tier 2b with Bedrock per-model quota | Tier 2b with Vertex AI quota | Tier 2b with Azure OpenAI TPM/RPM (`max_tokens` accounting not settled here) |
 
 ## 9. NFR Sizing
 
 This profile's latency budget is fundamentally different from the Agentic profile (single sub-2s agent call) or the CQRS profile (sub-25ms cache-hit reads). A full AI-DLC build is a multi-minute, multi-LLM-call pipeline — the correct SLO is a wall-clock ceiling on the whole Saga, with per-phase sub-budgets, not a single request-level `max_latency`.
 
-LLM capacity is sized at Tier 2b, not per phase service: pod count = peak in-flight LLM calls ÷ per-pod semaphore (Little's Law), with per-pod RPM/TPM set to fleet limit ÷ replica count. Autoscale triggers are in-flight > 25 or backlog > 100 (min 3, max 60).
+LLM capacity is sized at Tier 2b, not per phase: pod count = peak in-flight LLM calls ÷ per-pod semaphore (Little's Law), with per-pod RPM/TPM set to fleet limit ÷ replica count. Autoscale triggers are in-flight > 25 or backlog > 100 (min 3, max 60).
 
 | Budget | Target | Notes |
 |---|---|---|
@@ -189,6 +214,8 @@ LLM capacity is sized at Tier 2b, not per phase service: pod count = peak in-fli
 | Full pipeline, G2C+P0 only | < 4 min end-to-end (p95) | The minimum-viable request from Section 4.3. |
 | Full pipeline, all phases | < 10 min end-to-end (p95) | Includes one CodeCriticAgent retry as the expected case, not the worst case. |
 | Critic retry ceiling | 2 retries per gate (G2C and A2C each) | Matches GeneratorCriticAgent's and CodeCriticAgent's existing retry contracts — not widened for this profile. |
+
+Concurrency adds three sizing rules. (1) Fleet build capacity is instances × `build_max_inflight`, and per-tenant capacity is `tenant_build_max_inflight`; size them against the peak number of simultaneous builds the platform must absorb, not against request rate. (2) `idempotency_lease_seconds` must be longer than the longest expected build — the full pipeline's p95 is under 10 minutes, so the 300-second default is too short for this profile and should be raised (or the claim renewed) so a healthy long build is not mistaken for a lost one. (3) Admitted builds multiply into model calls: size `build_max_inflight` × the concurrent model calls one build makes against the gateway's `pod_concurrency` and the provider's quota, because the quota is shared across all builds.
 
 ## 10. Related Documents
 

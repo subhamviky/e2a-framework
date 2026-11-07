@@ -329,6 +329,8 @@ BaseLLMAgentService is deployed as its own tier between Agent Compute and the mo
 
 Rate limits are held in memory per pod (fleet limit ÷ replica count, unused tokens refunded). A Redis-compatible shared quota (keyspace C) is an optional hook for fleets that need a fleet-wide hard cap.
 
+Admission at this tier has a fixed order, and every wait in it is bounded. A request first takes a tenant-and-pod permit (`permit_timeout`); then, inside the permit, it waits for token quota (`quota_timeout`); only then does the upstream call run, limited to the lesser of `llm_max_latency` and the request's remaining deadline. A wait that expires is a typed rejection, never an unbounded queue. Quota is an estimate taken before the call and refunded to actual usage on completion, failure and cancellation. The provider's own quota is a separate, outer limit: the framework's per-pod share (fleet limit ÷ replicas) must sit below it, and `validate_capacity()` checks that fleet model concurrency, including the retry budget, fits the model's limit.
+
 ### 8.1.2 Saga Orchestration Edge (Tier 5) — Commit or Compensate
 
 ![Distributed Saga Engine — decision flow](images/saga_flow.png)
@@ -383,7 +385,62 @@ spec:
  Redis-compatible cache:  A session state (TTL 24h) · B semantic cache (τ ≥ 0.95, TTL 7d) · C optional shared quota
 ```
 
-The write side is fed by CDC, never by agents; the read side (`BaseRAGPipeline.retrieve()`) passes both `query_text` and `query_vector` so the index can run hybrid search. Cache keys in A and B are tenant-scoped.
+The write side is fed by CDC, never by agents; the read side (`BaseRAGPipeline.retrieve()`) passes both `query_text` and `query_vector` so the index can run hybrid search. Cache keys in A and B are tenant-scoped. A cache fill is single-flight per key (`BaseCacheStore.get_or_load`): concurrent misses share one load, so a cold hot key costs one database or index read instead of one per caller. Cache correctness never depends on key presence or provider TTL, because TTL deletion can lag the stated expiry on AWS and GCP; freshness is decided by an explicit expiry carried with the value.
+
+### 8.1.5 Capacity and Backpressure at Tier Boundaries
+
+Every boundary between tiers is either a **synchronous bounded wait** — the caller holds a request open, the wait has a timeout and the deadline caps it, and a timeout is a typed rejection — or a **durable asynchronous backlog** — the work is accepted into a queue that survives a restart, redelivers on failure and dead-letters after a maximum number of attempts. Mixing the two is what turns a slow dependency into an outage: a synchronous wait with no bound becomes a thread pile-up, and a backlog with no dead-letter policy becomes a poison-message stall. The figure marks each boundary; the table gives its bound and what happens at saturation.
+
+![E2A capacity and backpressure at tier boundaries](images/capacity_backpressure.png)
+
+*Capacity and backpressure at tier boundaries. Solid arrows are synchronous waits that are bounded and rejected on timeout; dashed arrows are durable backlogs with redelivery and a dead-letter queue. A flag marks a domain that saturates independently behind its own bulkhead. Tier numbering and zones are unchanged from the high-level design flow above.*
+
+| Boundary | Wait type | Bound (config key) | When saturated |
+|---|---|---|---|
+| Tier 0 → Tier 1 | Synchronous | Per-tenant rate limit at the gateway | HTTP 429 at the edge; nothing reaches Tier 2 |
+| Tier 1 → Intake Topic | Durable backlog | Topic retention; consumer concurrency | Request is accepted (202); latency moves to the backlog, not the caller |
+| Intake Topic → Tier 2 | Durable backlog | `worker_concurrency` (≤ `db_pool_size`), `worker_prefetch` | In-flight stays bounded; excess waits in the topic; poison goes to the DLQ |
+| Tier 2 → Tier 3 state and cache | Synchronous | `db_pool_size`, request `deadline` | Pool wait is bounded by the deadline; claim and commit conflicts are typed outcomes |
+| Tier 2 → Tier 2b | Synchronous | `permit_timeout`, then `quota_timeout`; `tenant_concurrency` ≤ `pod_concurrency` | `AdmissionTimeout` rejects early; one tenant cannot hold every permit |
+| Tier 2b → model provider | Synchronous | `min(llm_max_latency, deadline)`; circuit breaker; quota refunded | Typed failure; no retry storm (retries come from a shared budget) |
+| Tier 2 → Tier 4 tool and RAG services | Synchronous | Per-dependency bulkhead (`bulkhead_max_concurrent`, `bulkhead_acquire_timeout`), circuit, retry budget | `BulkheadFullError` or open circuit fails fast; a timed-out write is `UNKNOWN`, not retried |
+| Task Queue → Tier 4 | Durable backlog | Autoscale on queue depth; `worker_concurrency` | Backlog grows and scales out; consumers stay within pool limits |
+| Tier 4 → Tier 5 | Durable backlog | Saga edge concurrency | `failed_keys` wait durably; commit, compensate and DLQ run once per item |
+
+An autoscaler raises capacity only up to what the next tier can absorb: `maxReplicaCount × per-pod cap` must not exceed the downstream pool, quota or database connection limit, and `validate_capacity()` is the scaffold-compliance check for exactly that. Scaling out a tier whose dependency is already saturated moves the failure, it does not fix it.
+
+### 8.1.6 Concurrency Primitives — Neutral Label First, Provider Example Second
+
+The framework asks each store, queue and scheduler for an invariant, not for a product. The first column is the neutral label the code and the Playbooks use; the provider columns are examples of a service that can carry it. The last column states where the semantics differ, because naming a service does not make two services equivalent.
+
+| Neutral label (framework contract) | AWS example | GCP example | Azure example | Where semantics differ |
+|---|---|---|---|---|
+| Atomic claim store (`BaseIdempotencyStore.claim`) — one winner per key | DynamoDB conditional put | Firestore create-if-absent / transaction | Cosmos DB create item (conflict on duplicate) | Scope is one item or one partition. Expiry must be an explicit field checked on read: TTL deletion is delayed on AWS and GCP, while Cosmos DB hides expired items immediately. TTL is garbage collection only. |
+| Conditional commit (`BaseTransactionalStore.put_if_version`) | DynamoDB condition expression on a version attribute | Firestore update-time precondition / transaction | Cosmos DB ETag with `If-Match` | DynamoDB conditional writes are single-item; an invariant across items needs a transaction or must be confined to one item. Cosmos DB transactional batches are limited to one logical partition. |
+| Lease with fencing token (`BaseDistributedLock` → `LeaseHandle`) | Versioned lease item with expiry attribute | Versioned document, or object generation precondition | Blob lease (fixed 15–60 s or infinite), or versioned item | No provider offers a native monotonic fencing token. The adapter supplies it from its own counter or version, and the store receiving the write must reject an older token. |
+| Durable work queue with redelivery and DLQ | SQS (visibility timeout, redrive policy) | Pub/Sub (ack deadline, dead-letter topic) | Service Bus (peek-lock, max delivery count) | Delivery is at-least-once on all three; duplicate-suppression windows differ and are not relied on. |
+| Ordered partition | SQS FIFO message group | Pub/Sub ordering key | Service Bus session | A poison message blocks its group on SQS FIFO until it moves to the DLQ; on Pub/Sub the ordering key's tail is redelivered; Service Bus dead-letters it and moves on. |
+| Model quota | Per-model, per-region RPM/TPM limits | Per-model quota or provisioned throughput | Per-deployment TPM/RPM | The framework's quota is an estimate refunded to actual usage. How Azure OpenAI counts `max_tokens` against TPM (reserved up front or actual) is not settled here; no vendor-specific rule is assumed. |
+| Bounded compute and scale-out | ECS service auto scaling | Cloud Run concurrency and max instances | Container Apps replicas with KEDA | Scale signals differ; the in-flight and backlog signals are the portable ones. |
+| Queue depth and age metric | SQS oldest-message age | Pub/Sub oldest unacked message age | Service Bus has no native oldest-message-age metric; derive it from the enqueue time of a peeked message | Alarm on age where it exists, on depth and derived age where it does not. |
+| Termination grace (drain bound) | ECS 30 s default, configurable up to 120 s | Cloud Run about 10 s | Container Apps 30 s | `drain_timeout_seconds` must be shorter than the platform's grace; set the grace per platform. |
+
+### 8.1.7 Failure and Blast-Radius Annotations
+
+| What saturates | Protected by | What is not affected |
+|---|---|---|
+| One tenant's burst | Per-tenant rate limit, `tenant_concurrency` permit, per-tenant quota | Other tenants' requests; their permits remain available |
+| Model provider throttling | Tier 2b circuit, bounded permit and quota waits, refund on failure | Work that does not call the model (deterministic tool calls, cache hits) |
+| One tool or MCP dependency | That dependency's bulkhead, circuit and retry budget | Other tool dependencies, RAG and LLM-only paths |
+| Vector index or RAG pool | Pool bound and single-flight on identical retrievals | Tool and LLM-only paths |
+| System-of-record database | Not isolated — shared by design. Protected by caps: `worker_concurrency ≤ db_pool_size`, fleet connections ≤ the database's connection limit | Nothing is independent here; this is the one saturation point to size explicitly |
+| Preprocessing burst (audio, documents) | Separate preprocessing capacity and input size limits | Text requests, which hold no preprocessing slot and no inference permit while a transcription runs |
+| One poison message in an ordered partition | Max delivery count, DLQ, immediate `FAILED_FINAL` for deterministic errors | Other partitions; ordering within the stalled partition is the cost |
+| Scheduled repair (sweeper, reconciler) | Single leader by lease; repair pauses if the leader is lost | Live request traffic; only stuck outbox entries and parked outcomes wait |
+
+### 8.1.8 Graceful Shutdown
+
+Scale-in and deploys send a termination signal, and the platform kills the process after a fixed grace period. A tier drains in that window: it stops accepting work, lets in-flight work finish for at most `drain_timeout_seconds`, flips readiness so the load balancer stops routing, and returns unfinished queue messages. The in-flight work at kill time is what lease expiry and reconciliation recover, so the drain bound must be shorter than the grace period on each platform (table in 8.1.6).
 
 ## 8.2 Governance Matrix — SCP Rules Derived from Abstract Contracts
 
@@ -404,6 +461,7 @@ The abstract contracts in E2A/A2C/P0 generate specific SCP (Service Control Poli
 | _apply_kv_caching — tenant-scoped handle | Require cache and KV handles to be tagged and keyed by tenant_id | KMS key policy + IAM condition keys on cache handles |
 | __admit_quota — rate limiting | Deny model-provider credentials to any role other than the Inference Gateway task role | IAM role boundary + security-group egress lockdown |
 | Semantic cache keyspace B | Deny cache clusters without encryption in transit/at rest and tenant-scoped keyspaces | SCP + parameter-group policy |
+| validate_capacity() — scaffold-compliance gate | Deny promotion of a deployment whose pool, concurrency, lease or drain settings violate the capacity equations | CI/CD gate on the scaffold-compliance stage; the pipeline fails before deploy |
 
 ## 8.3 Multimodal Ingestion Tier — Speech, Document, and Vision Model Routing
 
@@ -421,7 +479,7 @@ The LLM-only path (3.1.4) accepts audio, document, and image input in addition t
 
 ### 8.3.2 Placement in the Landing Zone
 
-The intake bucket sits in the Data & Messaging Perimeter (Tier 3), matching how tool payloads are already isolated (3.1.3). The preprocessing step and model routing both run in the Private VPC (Tier 2) — the same subnet as BaseAgent, BaseRAGPipeline, and the Semantic Router/Firewall. No new network zone, IAM boundary, or SCP rule is required — this is a new compute role inside an existing tier, provisioned the same way the Knowledge Tier already is (3.1.3). The fallback path (3.1.4) needs nothing here — it never leaves Tier 2.
+The intake bucket sits in the Data & Messaging Perimeter (Tier 3), matching how tool payloads are already isolated (3.1.3). The preprocessing step and model routing both run in the Private VPC (Tier 2) — the same subnet as BaseAgent, BaseRAGPipeline, and the Semantic Router/Firewall. No new network zone, IAM boundary, or SCP rule is required — this is a new compute role inside an existing tier, provisioned the same way the Knowledge Tier already is (3.1.3). The fallback path (3.1.4) needs nothing here — it never leaves Tier 2. Preprocessing has its own capacity: it runs on a worker pool sized apart from the Inference Gateway's permits, bounded by the duration and page limits above, so a burst of large audio or documents saturates preprocessing first and never consumes the permits that text requests need.
 
 # 9. Architectural Principles — The Mapping Codified
 

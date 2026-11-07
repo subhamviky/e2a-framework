@@ -18,6 +18,8 @@ This edition folds two sets of content that earlier revisions carried as separat
 
 - State validation is no longer a method each BaseAgent subclass implements on itself. It is now a separate class, BaseValidationService (Section 2.2), invoked before BaseWorkflow or BaseAgent is instantiated at all — so an invalid request never pays for agent-service compute. BaseAgent's contract no longer includes _validate_state.
 
+- Concurrency is owned by invariant, not by a global manager. Each shared-resource risk — duplicate work, lost updates, stale owners, overload, work orphaned after a timeout — is assigned to exactly one existing class, contract or config key. Section 2.19 maps each invariant to its owner, gives the pseudocode and failure semantics, and lists the tests that prove it. The guarantee the framework makes is effectively-once material effects under at-least-once delivery — never exactly-once.
+
 The document is structured in four parts:
 
 - Part A — Class Contract Specifications (Section 2): complete method signatures, config/kwargs, and the propagation contract for every class — BaseValidationService, BaseAgent, BaseWorkflow, BaseRAGPipeline, BaseToolService, BaseMCPServer, tool-call routing, and guidance on progressively splitting a class into multiple microservices as it grows.
@@ -30,7 +32,7 @@ The document is structured in four parts:
 
 > **Single Rule**
 >
-> Every class has exactly one public entry point: validate() for BaseValidationService, run() for BaseAgent, execute() for BaseWorkflow and BaseToolService, retrieve() for BaseRAGPipeline, serve() for BaseMCPServer, ingest() for BaseIndexingPipeline. BaseLLMAgentService is the one class with two public entry points — process_inference() (unary) and process_inference_stream() (server-streaming) — because the two are distinct interaction modes that cannot share a return type; both run the same admission pipeline. The rule is therefore one public entry point per interaction mode. Application code calls only this public method. All protected methods are called internally in a fixed sequence. Subclasses override only the protected methods they need.
+> Every class has exactly one public entry point: validate() for BaseValidationService, run() for BaseAgent, execute() for BaseWorkflow and BaseToolService, retrieve() for BaseRAGPipeline, serve() for BaseMCPServer, ingest() for BaseIndexingPipeline. BaseLLMAgentService is the one class with two public entry points — process_inference() (unary) and process_inference_stream() (server-streaming) — because the two are distinct interaction modes that cannot share a return type; both run the same admission pipeline. The rule is therefore one public entry point per interaction mode. The operational lifecycle members of BaseLLMAgentService — drain(), ready and inflight — are shutdown and health controls, not entry points, and are not counted. Application code calls only this public method. All protected methods are called internally in a fixed sequence. Subclasses override only the protected methods they need.
 
 *Source Note: Implementation examples and the categorical breakdown of cloud-native primitives in this playbook align with the AWS AI Ecosystem architectural map by Prashant Rathi.*
 
@@ -64,6 +66,8 @@ Six fields flow through every PUBLIC, PROTECTED, and PRIVATE method across all s
 | INPUT         | tenant_id: str            | Read from state['tenant_id']; validated present in BaseWorkflow.execute() before routing.                             | Scopes RAG index search, tool endpoint resolution, and MCP server/tool registry lookups to a tenant namespace.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | OUTPUT        | message_log: list[dict] | Empty list created in BaseWorkflow.execute(); every method appends structured entries via the shared _log() helper.    | One ordered, structured log for the entire request. BaseWorkflow.execute() no longer flushes it to stdout directly: its finally block hands message_log to a configured BaseObservability.record_telemetry() implementation (Section 2.10), falling back to per-entry logging only if no observability_engine is configured. Individual entries carry whatever fields the writer attached — BaseAgent.run(), BaseRAGPipeline.retrieve(), and BaseToolService.execute() each attach latency (seconds) to their own completion entry, and BaseAgent.run() additionally attaches tokens_used and confidence, which is what lets BaseObservability.__extract_metrics() (Section 2.10) sum total_tokens without any class-specific parsing. |
 | OUTPUT        | failed_keys: list[str]  | Empty list created in BaseWorkflow.execute(); any _handle_error() across any class appends the failing item's key.     | Drives the commit gate and end-of-request DLQ dispatch — failed items are isolated, successful items still commit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+An optional seventh field, deadline, is additive and does not change the six above. It is an INPUT resolved once at the request origin — BaseWorkflow.execute(), BaseOrchestrator.execute() or AIDLCPipelineOrchestrator.execute_pipeline() — from an inbound Deadline (or remaining milliseconds, carried on the x-e2a-deadline-ms header) or, failing that, from request_deadline_seconds. When neither is present there is no deadline and existing callers behave exactly as before. Locally a Deadline is an absolute monotonic instant; across a process boundary it travels as remaining milliseconds and is rebuilt with Deadline.from_remaining_ms(), because monotonic clocks are not comparable between hosts. Every wait in the framework — permit, quota, bulkhead, cache fill, tool call, bridge wait — is bounded by min(its own timeout, deadline.remaining()). Cancellation uses the runtime's native mechanism (asyncio task cancellation); there is deliberately no cancellation field. Section 2.19.2 gives the rule in full.
 
 ### 2.1.1 AgentState Schema — Additions
 
@@ -132,7 +136,7 @@ Method Contract Table
 | PUBLIC     | run(state, config=None, correlation_id=None, io_config=None, idempotency_key=None, tenant_id=None, message_log=None, failed_keys=None, **kwargs) -> Dict | any config key; any kwarg              | Template method. Calls all protected methods in fixed sequence. Receives and forwards propagation fields; does not re-generate correlation_id if one is supplied. Assumes state has already passed BaseValidationService.validate() (Section 2.2) — run() no longer validates its own input. Immediately before this step, run() checks config['governance_engine']: if a BaseGovernanceFramework instance is configured, run() calls its enforce_governance_gate() (Section 2.11) instead of _apply_policy(); a DehydrationInterrupt raised from that call is re-raised unchanged, for BaseWorkflow to catch. After the LLM call, run() also tracks this call's token usage via the private __track_usage() helper below (feeding state['cumulative_tokens_used'], which the governance gate's token-budget check reads on the next call) and, once a response is set, measures total elapsed latency against max_latency, logging a single agent_run_complete entry to message_log either way and raising NFRViolationError only on a breach. |
 | PROTECTED  | _build_messages(state, config, **common, **kwargs) -> list                                                                                            | prompt_template, role                  | Enforce governance: retries, circuit breakers, approval gates, redaction. Used only as the fallback when no governance_engine is configured — the preferred, centrally-enforced path is BaseGovernanceFramework.enforce_governance_gate() (Section 2.11). This is also where a tool call is triggered via _resolve_tool_call() (Section 2.8) when this fallback path runs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | PROTECTED  | _apply_policy(state, config, **common, **kwargs) -> None                                                                                              | retry_policy, circuit_breaker_config   | Enforce governance: retries, circuit breakers, approval gates, redaction. This is also where a tool call is triggered via _resolve_tool_call() (Section 2.8).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| PROTECTED (mixin) | _infer(messages, config, common, **kwargs) -> dict | llm_service, model_id, max_output_tokens, temperature | Base-owned bridge to config['llm_service'] (Section 2.18), shared by BaseAgent and LLMOnlyAgent. Runs the service's async process_inference() on one process-wide background event loop, so the service's semaphores and token bucket are always bound to the same loop whatever thread the agent runs on. A FAILED inference raises, so run()'s normal except path (failed_keys + _handle_error) applies; async callers use the awaitable twin _infer_async(). Replaces the former private __llm_call(): there is no model dispatch code in BaseAgent. |
+| PROTECTED (mixin) | _infer(messages, config, common, **kwargs) -> dict | llm_service, model_id, max_output_tokens, temperature | Base-owned bridge to config['llm_service'] (Section 2.18), shared by BaseAgent and LLMOnlyAgent. Runs the service's async process_inference() on one process-wide background event loop, so the service's semaphores and token bucket are always bound to the same loop whatever thread the agent runs on. The bridge wait is bounded — by the request deadline when one exists, otherwise by llm_max_latency + permit_timeout + quota_timeout + 1 second — and on expiry or interrupt the coroutine is cancelled rather than left running (Section 2.19.2). A FAILED inference raises, so run()'s normal except path (failed_keys + _handle_error) applies; async callers use the awaitable twin _infer_async(). Replaces the former private __llm_call(): there is no model dispatch code in BaseAgent. |
 | PRIVATE    | __track_usage(messages, response, config=None, **kwargs) -> int                                                                                        | —                                      | Base-owned, never overridden. Prefers an actual token count from the LLM provider's response metadata (response['metadata']['tokens_used']); falls back to a ~4-chars/token estimate over the outbound messages when a provider doesn't report usage. run() adds the returned value to state['cumulative_tokens_used'] and to the agent_run_complete log entry's tokens_used field — the same field BaseObservability.__extract_metrics() (Section 2.10) already sums into total_tokens.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | PROTECTED  | _evaluate_output(response, state, config, **common, **kwargs) -> float                                                                                | min_confidence, groundedness_threshold | Evaluate output quality, return [0.0–1.0].                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | PROTECTED  | _fallback(state, config, **common, **kwargs) -> dict                                                                                                  | fallback_model, cache_key              | Fallback strategy when confidence is below threshold.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -155,15 +159,25 @@ Method Contract Table
 
 | **Access** | **Signature**                                                          | **Config / kwargs keys**                       | **Purpose**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 |------------|------------------------------------------------------------------------|------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| PUBLIC     | execute(state, config=None, correlation_id=None, **kwargs) -> Dict  | workflow_id, routing_strategy                  | Public entry point. Validates tenant_id, accepts correlation_id from the caller (BaseValidationService, normally) or originates one as a standalone fallback, resolves io_config/idempotency_key, builds and validates the workflow graph, resolves and invokes the target agent, dispatches message_log to the configured observability engine, and dispatches failed_keys to the DLQ. A DehydrationInterrupt raised from within the agent chain (Section 2.11) is caught separately: execute() logs a workflow_dehydrated event and sets state['status'] = 'AWAITING_WEBHOOK' rather than treating the pause as a failure. |
+| PUBLIC     | execute(state, config=None, correlation_id=None, **kwargs) -> Dict  | workflow_id, routing_strategy                  | Public entry point. Validates tenant_id, accepts correlation_id from the caller (BaseValidationService, normally) or originates one as a standalone fallback, resolves io_config, the request deadline and the idempotency_key, takes the atomic idempotency claim when an idempotency_store is configured (a duplicate returns a typed REPLAYED / IN_PROGRESS / CONFLICT / RECOVERY_REQUIRED / FAILED_FINAL status without executing again), builds and validates the workflow graph, resolves and invokes the target agent, dispatches message_log to the configured observability engine, and dispatches failed_keys to the DLQ. A DehydrationInterrupt raised from within the agent chain (Section 2.11) is caught separately: execute() logs a workflow_dehydrated event and sets state['status'] = 'AWAITING_WEBHOOK' rather than treating the pause as a failure. The claim is settled in the finally block — SUCCEEDED with the post-redaction result, FAILED_RETRYABLE, FAILED_FINAL, or parked for reconciliation when the physical outcome is UNKNOWN (Section 2.19.5). |
 | PROTECTED  | _build_workflow(config, **common, **kwargs) -> Any               | workflow_definition                            | Construct the LangGraph graph (or equivalent) of agent nodes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | PROTECTED  | _validate_workflow(workflow, config, **common, **kwargs) -> bool | required_nodes                                 | Validate the graph is well-formed before execution.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | PROTECTED  | _get_agent(intent, config, **common, **kwargs) -> BaseAgent      | agent_registry                                 | Resolve which BaseAgent subclass handles a given intent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | PROTECTED  | _resolve_io_config(config, **kwargs) -> dict                       | io_config namespace                            | Extract the IO_CONFIG-prefixed subset of config, separate from behavioral NFR config.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | PROTECTED  | _generate_idempotency_key(state, config, **kwargs) -> str          | idempotency_strategy, business_key_fields      | Abstract — subclass supplies domain logic, e.g. hash(tenant_id + REF_ELEM_KEY). Called only when no valid client-supplied key exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| PRIVATE    | __resolve_idempotency(state, config, **kwargs) -> str             | idempotency_ttl_seconds, idempotency_store_url | Base-owned. Checks for a client-supplied key, validates and looks it up in the idempotency store; returns the existing key if a matching non-expired entry exists (replay), otherwise mints and persists a new one via _generate_idempotency_key().                                                                                                                                                                                                                                                                                                                                                                           |
+| PRIVATE    | __resolve_idempotency(state, config, **kwargs) -> str             | idempotency_ttl_seconds, idempotency_store_url | Base-owned. Derives the key only: a client-supplied key wins, otherwise _generate_idempotency_key() mints one. It no longer decides whether a request is a duplicate — that is the atomic claim in execute() (Section 2.19.5), because a look-up followed by a later write lets two concurrent requests both pass. |
+| PROTECTED  | _requires_idempotency_claim(state, config, **kwargs) -> bool | — | Does this request carry a material effect (a write or side effect that must happen at most once)? Default True. A workflow whose intents are read-only or purely generative overrides it to False so those requests are not replayed from a stored answer. |
+| PROTECTED  | _request_fingerprint(state, config, **kwargs) -> str | — | Stable SHA-256 of the request's business content, excluding propagation and volatile fields. The same idempotency key with a different fingerprint is a typed CONFLICT, never a replay. |
+| PROTECTED  | _replayable_result(state, config, **kwargs) -> dict | — | What a duplicate caller receives on REPLAY. Taken after egress redaction so a stored result never re-exposes redacted fields. |
+| PROTECTED  | _physical_outcome(state, config, **kwargs) -> Optional[PhysicalOutcome] | — | Typed commit evidence (COMMITTED / NOT_COMMITTED / UNKNOWN) read from state['outcome'], or None when the request had no material effect. UNKNOWN parks the claim for reconciliation instead of marking it failed or done. |
+| PRIVATE    | __resolve_deadline(config, kwargs) -> Optional[Deadline] | request_deadline_seconds | Base-owned. Inbound deadline wins; otherwise request_deadline_seconds; 0 means none. |
+| PRIVATE    | __short_circuit(state, claim, message_log, correlation_id, config) / __settle_claim(store, key, tenant_id, owner, state, failed_keys, dehydrated, error, config) | idempotency_lease_seconds | Base-owned. Return the typed duplicate outcome without executing, and settle the claim exactly once in finally. A dehydrated (paused) request is settled as retryable so it is claimable again on resume. |
 | PRIVATE    | (retired — see BaseObservability.record_telemetry(), Section 2.10)     | —                                              | The private __flush_logs() helper from the prior revision is retired. BaseWorkflow.execute()'s finally block now reads config['observability_engine'] directly: if a BaseObservability instance is configured it calls record_telemetry(message_log, correlation_id, config, tenant_id=tenant_id); otherwise it falls back to logging each message_log entry individually.                                                                                                                                                                                                                                                 |
 | PRIVATE    | _send_to_dlq(failed_keys, config)                                     | dlq_queue_url                                  | Base-owned. Dispatches failed_keys to SQS/Pub-Sub/Service Bus at end of request.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+**Compatibility note.** A concrete subclass that supplied only the old check_and_set behaviour keeps working: BaseIdempotencyStore.check_and_set() remains as a shim over claim(). What does not stay source-compatible is an implementer of BaseIdempotencyStore itself — it must now provide claim(), complete() and fail() (Section 2.16).
+
+**Verification (beside the class).** smoke_test_concurrency.py: "T-01 exactly one of 20 concurrent claimers wins"; "workflow: duplicate request replays, agent ran once"; "workflow: same key, changed payload -> CONFLICT, not executed"; "T-12 UNKNOWN outcome parks the key for reconciliation"; "T-12 duplicate of an UNKNOWN request is not re-executed"; "failed run is retryable (claimable again)"; "expired deadline rejected before any work".
 
 ## 2.5 BaseRAGPipeline
 
@@ -190,12 +204,18 @@ Method Contract Table
 
 | **Access** | **Signature**                                                            | **Config / kwargs keys**                   | **Purpose**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 |------------|--------------------------------------------------------------------------|--------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| PUBLIC     | async execute(payload, config=None, tenant_id=None, **kwargs) -> dict | timeout, retries, auth_token, max_latency  | Template method. Validates → resolves endpoint → builds payload → checks the commit gate → HTTP POST. Returns result dict. Measures wall-clock latency across the full call (validation through __http_post's return), logs a tool_execute_complete entry to message_log (when the caller passes one), and raises NFRViolationError if latency exceeds max_latency (kwargs > config > MAX_LATENCY env > 5.0s default here, a looser bound than BaseAgent/BaseRAGPipeline's 2.0s since this measures a network round trip). |
+| PUBLIC     | async execute(payload, config=None, tenant_id=None, **kwargs) -> dict | timeout, retries, auth_token, max_latency  | Template method. Validates → resolves endpoint → builds payload → checks the commit gate → HTTP POST under the resilience policy (retry budget, circuit breaker, bulkhead — Section 2.19.4). Returns result dict. Measures wall-clock latency across the full call (validation through __http_post's return), logs a tool_execute_complete entry to message_log (when the caller passes one), and raises NFRViolationError if latency exceeds max_latency (kwargs > config > MAX_LATENCY env > 5.0s default here, a looser bound than BaseAgent/BaseRAGPipeline's 2.0s since this measures a network round trip). |
 | PROTECTED  | get_endpoint(config, tenant_id=None, **kwargs) -> str                 | base_url, service_name, tenant_routing_map | Return the endpoint URL for this tool. Optionally resolves a tenant-specific base URL via config['tenant_routing_map'][tenant_id], falling back to the shared base_url.                                                                                                                                                                                                                                                                                                                                                     |
 | PROTECTED  | _build_payload(payload, config, **kwargs) -> dict                    | schema, enrichments                        | Transform input dict to the tool's request schema.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | PROTECTED  | _validate_input(payload, config, **kwargs) -> bool                   | schema, required_fields                    | Domain-specific validation. Return False to raise ValueError in execute().                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| PRIVATE    | async __http_post(endpoint, body, config, **kwargs) -> dict         | timeout, retries, auth_token               | Perform HTTP POST. Handles retries and timeout internally. Never overridden.                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| PRIVATE    | _commit_gate(key, failed_keys, config, **kwargs) -> bool             | commit_gate_enabled                        | Base-owned. Called immediately before any save/commit/write. Returns False if key is already present in failed_keys — the item is excluded from commit and left for DLQ investigation while sibling items proceed.                                                                                                                                                                                                                                                                                                              |
+| PROTECTED  | _resilience_policy(config=None, kwargs=None) -> ResiliencePolicy | retry_base_backoff, retry_max_backoff, retry_budget_ratio, retry_budget_cap, circuit_failure_threshold, circuit_reset_seconds, bulkhead_max_concurrent, bulkhead_acquire_timeout | Returns the service's ResiliencePolicy. One policy instance is kept per (transport, tool) so the retry budget and circuit state are shared by every call to the same dependency — a fresh policy per call would defeat both. |
+| PROTECTED  | async _send_request(endpoint, body, token=None, timeout=None, config=None, **kwargs) -> dict | timeout, auth_token | The wire call itself — the one hook a concrete transport implements. The framework default is a stub; the policy, deadline and outcome typing around it are base-owned. |
+| PRIVATE    | async __http_post(endpoint, body, config, **kwargs) -> dict         | timeout, retries, auth_token               | Perform the HTTP POST through ResiliencePolicy.call(). Retries are drawn from a shared retry budget with full-jitter backoff and only happen for an idempotent call — one carrying an idempotency_key or safe_to_retry=True. A timeout is an UNKNOWN physical outcome, not a failure: the result is {'status': 'UNKNOWN', 'outcome': UNKNOWN, 'physical_success': False}, the request is never re-sent blindly, and the idempotency claim is parked for reconciliation. Never overridden. |
+| PRIVATE    | _commit_gate(key, failed_keys, config, **kwargs) -> bool             | commit_gate_enabled, expected_version      | Base-owned and ADVISORY. Called immediately before a save/commit/write; returns False if key is already in failed_keys, so the item is excluded and left for DLQ investigation while sibling items proceed. The optional expected_version check here is a pre-flight convenience only — it is not the authority on a lost update. The authority is BaseTransactionalStore.put_if_version(), a single conditional write in the store itself (Section 2.19.6). |
+
+The return contract is tri-state. physical_success stays a required boolean for existing callers; the typed outcome key (COMMITTED, NOT_COMMITTED or UNKNOWN) adds the case a boolean cannot express — the call timed out or the connection dropped after the request left, so the remote system may or may not have applied it. UNKNOWN is routed to reconciliation (Section 2.17), never to a blind retry and never to a DLQ replay.
+
+**Verification (beside the class).** smoke_test_concurrency.py: "T-06 retry amplification bounded by the budget (not 4x)"; "circuit opens after the threshold; later calls fail fast"; "T-12 timeout on a non-idempotent write -> UNKNOWN, sent once, never retried"; "T-05 bulkhead: 2 admitted, the rest rejected within the bound". smoke_test_multimodal_concurrency.py: "T-12 slow tool: typed UNKNOWN, sent exactly once, bounded wait".
 
 ### 2.6.1 RestToolService and MCPToolService — Transport Implementations
 
@@ -339,7 +359,7 @@ Method Contract Table
 | PUBLIC               | run_pipeline(config=None, correlation_id=None, message_log=None, failed_keys=None, **kwargs) -> dict | Template method. Runs seven stages in fixed order; any stage failing raises internally and is caught, appending correlation_id to failed_keys and returning status='FAILED' rather than propagating the exception.                                                                                                                                                                                                  |
 | PROTECTED (abstract) | _run_static_security_scans(config, **kwargs) -> bool                                                | SAST linting and secret-detection scans (e.g. gitleaks) for exposed LLM API tokens/keys. Runs first — cheapest, fastest check, so a bad commit fails before any compute-heavy stage runs.                                                                                                                                                                                                                           |
 | PROTECTED (abstract) | _execute_test_suite(config, **kwargs) -> bool                                                       | Runs the tests/ directory — unit and integration tests against the Playbook's scaffold contracts. Supersedes the old bare _run_tests() stub with a richer, execution-oriented name.                                                                                                                                                                                                                                |
-| PROTECTED (abstract) | _verify_scaffold_contracts(config, **kwargs) -> bool | Statically parses source classes and asserts the Single Public Entry Point Rule (Section 1) still holds: exactly one public method per core class (run/execute/retrieve/serve/validate/ingest/provision_landing_zone/run_pipeline; two for BaseLLMAgentService — process_inference and process_inference_stream), and no framework-owned private method (the double-underscore ones, e.g. __http_post) has been overridden in a subclass. This turns a documented convention into an enforced CI gate. |
+| PROTECTED (abstract) | _verify_scaffold_contracts(config, **kwargs) -> bool | Statically parses source classes and asserts the Single Public Entry Point Rule (Section 1) still holds: exactly one public method per core class (run/execute/retrieve/serve/validate/ingest/provision_landing_zone/run_pipeline; two for BaseLLMAgentService — process_inference and process_inference_stream; its drain(), ready and inflight lifecycle members are operational controls, not entry points), and no framework-owned private method (the double-underscore ones, e.g. __http_post) has been overridden in a subclass. This turns a documented convention into an enforced CI gate. The same stage also runs validate_capacity() over the central registry (Section 2.19.11) and fails the pipeline when replicas × per-instance concurrency exceeds a pool, a database or model ceiling, or the drain window outlasts the platform's termination grace period. The seven stages and their order are unchanged. |
 | PROTECTED (abstract) | _run_rag_eval(config, **kwargs) -> float                                                            | Same method name as the retired Foundation-interface stub — RAGAS faithfulness/groundedness score against a golden dataset. Canonical reference implementation: Needle-In-A-Haystack recall testing (Section 2.15). Runs before artifact compilation deliberately: no point building and pushing five container images if the eval already failed.                                                                  |
 | PROTECTED (abstract) | _compile_artifact(artifact_name, config, **kwargs) -> bool                                          | Builds one OCI/Docker image from required_artifact_matrix and pushes it to the versioned artifact registry (Landing Zone Section 9.1).                                                                                                                                                                                                                                                                              |
 | PROTECTED (abstract) | _run_dynamic_security_checks(config, **kwargs) -> bool                                              | DAST scans against a running instance in an ephemeral staging sandbox — the same sandbox infrastructure the NIAH validation pattern uses (Section 2.15), since both need a live, disposable deployment rather than static source.                                                                                                                                                                                   |
@@ -431,24 +451,32 @@ The patterns below are performance, cost, reliability, and safety techniques tha
 | Semantic Routing                       | BaseWorkflow._get_agent()                                                                         | Existing hook — corrected placement: classifier runs as Tier 2 compute, not inside the Tier 3 data perimeter, which holds no compute in this framework; the same lookup resolves a RAG-grounded, MCP tool-call, API tool-call, or LLM-only agent (Section 4.8), or the fallback agent directly when no intent matches — a fifth registry entry, not a new hook |
 | Chain of Verification (CoVe)           | BaseAgent._evaluate_output() / _fallback()                                                       | Existing hooks — runs synchronously inside BaseAgent.run() (Tier 2) as coded; offloading it to Tier 4 would require an explicit async redesign, not assume one                                                                                                                                                                                                 |
 | Extraction Backstop                    | BaseAgent.run() exception handling → _fallback()                                                  | Existing pattern — already how run() converts exceptions into failed_keys entries; formalized as the canonical use of _fallback() for schema repair                                                                                                                                                                                                           |
-| Optimistic Concurrency Control         | _commit_gate (extended)                                                                           | Contract extension — _commit_gate gains an optional expected_version/actual_version check, not a second, colliding method name                                                                                                                                                                                                                                |
+| Optimistic Concurrency Control         | BaseTransactionalStore.put_if_version() (Section 2.16); _commit_gate stays advisory | Contract extension — the store performs one conditional write on an expected version and returns a typed CommitResult (COMMITTED / CONFLICT / FENCED). _commit_gate keeps its failed_keys check and an optional pre-flight version comparison, but it is never the authority on a lost update. |
 | Ordered / Causal Delivery              | Intake Topic + Task Queue (FIFO), correlation_id + timestamped message_log                         | Infrastructure-level, already present — see naming note below                                                                                                                                                                                                                                                                                                  |
-| Logical vs. Physical State Resolution  | BaseToolService.execute() return contract                                                          | Contract extension — physical_success: bool becomes a required key in every tool result; _resolve_tool_call() and BaseWorkflow must check it before treating a tool's result as ground truth                                                                                                                                                                  |
+| Logical vs. Physical State Resolution  | BaseToolService.execute() return contract | Contract extension — physical_success: bool is a required key in every tool result, and a typed outcome (COMMITTED / NOT_COMMITTED / UNKNOWN) carries the case a boolean cannot: a timeout after the request left. _resolve_tool_call() and BaseWorkflow check it before treating a tool's result as ground truth, and UNKNOWN goes to reconciliation. |
 | Blue-Green / Shadow Mode Trials        | BaseWorkflow.execute()                                                                             | Config-driven — shadow_mode_enabled, shadow_target_pipeline; existing entry point, no new method                                                                                                                                                                                                                                                               |
 | Prompt Registry (IaC for Prompts)      | BaseAgent._build_messages(), composing with BasePromptRegistry                                    | New Foundation interface (Section 2.9) — the one genuinely new abstraction in this revision                                                                                                                                                                                                                                                                    |
 | Base + Delta (Tenant Merging)          | BaseRAGPipeline._search_index()                                                                   | Existing hook — reference implementation only                                                                                                                                                                                                                                                                                                                  |
 | Read-Only Data (Access Locked)         | BaseToolService discovery-tool subclasses + IAM/network boundary                                   | Not a code abstraction — enforced by database credentials and read replicas between Tier 2 and Tier 3, documented in the Landing Zone Section 10.5                                                                                                                                                                                                             |
 | Semantic Distance (Similarity Metrics) | BaseRAGPipeline._search_index() io_config                                                         | Config key — similarity_metric, added to the Central Configuration Registry (Section 5)                                                                                                                                                                                                                                                                               |
 | Needle-In-A-Haystack (NIAH) Validation | BasePipeline._run_rag_eval()                                                                      | Existing Foundation interface — canonical reference implementation of the CI/CD RAG evaluation gate                                                                                                                                                                                                                                                            |
-| Capacity Admission (RPM/TPM + Concurrency) | BaseLLMAgentService.process_inference() — private __admit_quota() and __concurrency_permit() | Framework-owned, in-memory per pod: dual token bucket plus pod and optional per-tenant semaphores; optional fleet-wide quota through the _acquire_shared_quota() hook. |
+| Capacity Admission (RPM/TPM + Concurrency) | BaseLLMAgentService.process_inference() — private __concurrency_permit() then __admit_quota() | Framework-owned, in-memory per pod: tenant and pod permits with a bounded wait, then a dual token bucket, under the request deadline. Optional fleet-wide quota through the _acquire_shared_quota() / _release_shared_quota() hooks. Overload is a typed AdmissionTimeout, never an unbounded queue (Section 2.19.3). |
 | Semantic Cache | BaseLLMAgentService._check_semantic_cache() / _store_semantic_cache() | Optional hooks, tenant-scoped; backed by a BaseCacheStore. Disabled whenever tools are supplied or bypass_cache is set. |
 | Streaming DLP | BaseLLMAgentService.process_inference_stream() | Holdback-window redaction so a sensitive value split across chunks is screened before any part of it is released. |
+| Single-flight cache fill | BaseCacheStore.get_or_load() / aget_or_load() (Section 2.16) | Strengthened existing port — one caller loads a missing key while concurrent callers wait for it (bounded by cache_fill_timeout_seconds) instead of all hitting the origin. Replaces the earlier cache-stampede mutex (Section 2.15.2). |
+| Atomic Idempotency Claim | BaseIdempotencyStore.claim() / complete() / fail() (Section 2.16); BaseWorkflow.execute() | Strengthened existing port — ownership of a material request is one atomic conditional write, with typed outcomes for the duplicate. Replaces look-up-then-write (Section 2.19.5). |
+| Retry Budget, Circuit Breaker, Bulkhead | ResiliencePolicy (Section 2.19.4), used by BaseToolService.__http_post() and BaseLLMAgentService | One shared helper, not a class family — bounded retry amplification, fail-fast on a failing dependency, and a per-dependency in-flight cap. |
+| Request Deadline and Cancellation | Deadline (Section 2.19.2), resolved in execute() and propagated through the additive deadline field | One absolute budget for the request; every wait is bounded by it and cancelled work releases what it held. |
 
 ### 2.15.2 Two Corrections Worth Flagging
 
 - Semantic Firewall and Semantic Router both run model inference over raw tenant query content — a guard model for the firewall, an embedding classifier for the router. Placing either in a public-facing proxy, or in the Data & Messaging Perimeter (which holds no compute in this framework — see Landing Zone Section 3.3), contradicts the rule that governs every other class in this framework: business logic and tenant-data processing live in the Private VPC, never the public edge or the data-only perimeter. Both patterns' own code samples already agree with this — Semantic Firewall wires into BaseGovernanceFramework.enforce_governance_gate() (Section 2.11) and Semantic Router wires into _get_agent(), both Tier 2 methods. Keep them there.
 
 - 'External Consistency' is a specific, stronger distributed-systems guarantee (Spanner's TrueTime commit-wait, linearizable global ordering across synchronized clocks) than what FIFO partition keys plus timestamped logs actually provide, which is ordered, causal delivery per partition key — a real and useful guarantee, just a weaker one than the name implies. This framework's Intake Topic and Task Queue already give you the weaker, honest guarantee; nothing needs to change in the infrastructure, only in what you call it when explaining the system to someone else.
+
+- The earlier cache-stampede pattern used a mutex around the cache fill, and the lock port was described as extracted from it. That is the wrong tool: a mutex gives mutual exclusion, but a cache fill needs single-flight — one caller loads, the others receive that caller's result — and a mutex held by a crashed loader blocks everyone until its TTL. Single-flight is now BaseCacheStore.get_or_load() (Section 2.16). The lock port (BaseDistributedLock) is a lease, kept for scheduled workers that need one active instance (Section 2.17), and is not used for de-duplication (use the idempotency claim), ordinary writes (use put_if_version) or cache fills (use get_or_load).
+
+- 'Exactly-once' is not a property this framework claims or can provide: delivery is at-least-once, so the guarantee is effectively-once material effects — an idempotency claim plus a conditional write — with an UNKNOWN physical outcome reconciled rather than guessed. A lease also does not make a stale owner harmless on its own; where that matters the holder's fencing token must be checked by the store that receives the write.
 
 ## 2.16 New Foundation Ports — Storage, Coordination, Messaging, Schema, and Memory
 
@@ -457,13 +485,13 @@ Six new classes, added in this revision, follow the Foundation-interface discipl
 | **Access** | **Signature** | **Config / kwargs keys** | **Purpose** |
 |---|---|---|---|
 | INTERFACE | BaseTransactionalStore |  | Vendor-neutral read/write contract, replacing ad hoc direct SDK calls scattered across protected methods. |
-| INTERFACE | get(key, config=None, **kwargs) -> Optional[dict] / put(key, value, config=None, **kwargs) -> bool / delete(key, config=None, **kwargs) -> bool | table_or_collection_name | The three operations every store-backed protected method actually needs. No query language, no transaction API — those are subclass-owned, backend-specific concerns kept out of the abstract contract deliberately. |
+| INTERFACE | get(key, config=None, **kwargs) -> Optional[dict] / put(key, value, config=None, **kwargs) -> bool / delete(key, config=None, **kwargs) -> bool / get_versioned(key, config=None, **kwargs) -> Optional[(dict, int)] / put_if_version(key, value, expected_version, config=None, **kwargs) -> CommitResult | table_or_collection_name, fencing_token | The three plain operations, plus the versioned pair that carries optimistic concurrency. put_if_version() is ONE conditional write — expected_version None means create-only — returning COMMITTED, CONFLICT (another writer changed it first) or FENCED (the supplied fencing_token is older than one the store has accepted). No query language and no multi-item transaction API: those stay subclass-owned. Where a backend's conditional write is single-item, the invariant must be confined to one item. |
 | INTERFACE | BaseCacheStore |  | Vendor-neutral get/set/delete contract over a cache backend, separate from BaseTransactionalStore because cache semantics (TTL, eviction) differ from durable-store semantics. |
-| INTERFACE | get(key, config=None, **kwargs) -> Optional[Any] / set(key, value, ttl_seconds=None, config=None, **kwargs) -> bool / delete(key, config=None, **kwargs) -> bool | default_ttl_seconds | Same three-operation shape as BaseTransactionalStore, with ttl_seconds as the one cache-specific addition. A subclass implementing two-tier (L1 in-process / L2 shared) caching does so entirely inside its own get()/set() — no new abstract method needed. |
-| INTERFACE | BaseIdempotencyStore |  | Formalizes the conditional-write pattern already described informally in Section 2.1 (__ensure_idempotency) as a reusable, injectable port instead of inline per-class logic. |
-| INTERFACE | check_and_set(idempotency_key, config=None, **kwargs) -> bool | ttl_seconds | Atomic "has this key been seen" check plus claim, in one call — returns True only for the caller that wins the race. |
-| INTERFACE | BaseDistributedLock |  | Extracted from the inline mutex referenced in the cache-stampede-prevention pattern (Section 2.15) into a standalone, reusable coordination primitive — used by BaseCacheStore implementations, BaseOutboxSweeper, and BaseReconciliationService (2.17) alike, rather than each reimplementing its own lock. |
-| INTERFACE | acquire(lock_key, ttl_seconds, config=None, **kwargs) -> bool / release(lock_key, config=None, **kwargs) -> None | lock_backend | Short-lived, TTL-bound lock. No reentrancy, no distributed-transaction semantics — deliberately minimal, matching the framework's existing bias against over-specifying infrastructure primitives. |
+| INTERFACE | get(key, config=None, **kwargs) -> Optional[Any] / set(key, value, ttl_seconds=None, config=None, **kwargs) -> bool / delete(key, config=None, **kwargs) -> bool / get_or_load(key, loader, ttl_seconds=None, config=None, **kwargs) / aget_or_load(...) | default_ttl_seconds, cache_fill_timeout_seconds, cache_fill_on_timeout | The three-operation shape, plus single-flight: concurrent callers for one missing key share one loader call. A follower that waits longer than cache_fill_timeout_seconds follows cache_fill_on_timeout — load (fall through to the origin), stale (serve the last value) or raise. A loader failure propagates to every waiter and is not cached. get_or_load is concrete; a subclass implementing two-tier (L1 in-process / L2 shared) caching does so entirely inside its own get()/set(). |
+| INTERFACE | BaseIdempotencyStore |  | The atomic idempotency CLAIM — a small state machine, not a lock: ABSENT → IN_PROGRESS(owner, lease) → SUCCEEDED(result) / FAILED_RETRYABLE / FAILED_FINAL / UNKNOWN. Keys are scoped by tenant_id. It answers "has this request already been, or is it being, done?" and replaces the informal look-up-then-write of the earlier revision. |
+| INTERFACE | claim(idempotency_key, config=None, **kwargs) -> ClaimResult / complete(idempotency_key, result, config=None, **kwargs) -> bool / fail(idempotency_key, retryable=True, config=None, **kwargs) -> bool / check_and_set(idempotency_key, config=None, **kwargs) -> bool | tenant_id, fingerprint, owner, lease_seconds, ttl_seconds, recover, idempotency_ttl_seconds | claim() is ONE atomic conditional write and returns CLAIMED, IN_PROGRESS, REPLAY (stored result), CONFLICT (same key, different fingerprint), RECOVERY_REQUIRED (the owner's lease expired or the outcome is UNKNOWN) or FAILED_FINAL. complete() and fail() are owner-checked — a stale owner whose claim was taken over gets False. recover=True lets a reconciler take over a RECOVERY_REQUIRED record. The claim's expiry is an explicit field; the store's TTL deletion is garbage collection only and is never relied on for correctness. check_and_set() is retained as a compatibility shim: True only for the caller that wins the claim. |
+| INTERFACE | BaseDistributedLock |  | A LEASE — temporary exclusive ownership that is time-bound, renewable and owner-checked — for scheduled and reconciliation workers that need one active instance (BaseOutboxSweeper, BaseReconciliationService, 2.17). It is not used for ordinary writes (put_if_version), de-duplication (the idempotency claim) or cache fills (get_or_load). |
+| INTERFACE | acquire(lock_key, ttl_seconds, config=None, **kwargs) -> Optional[LeaseHandle] / renew(handle, ttl_seconds=None, config=None, **kwargs) -> bool / release(handle, config=None, **kwargs) -> None | lock_backend, lease_ttl_seconds, lease_renew_interval_seconds, fencing_enabled | acquire() returns a LeaseHandle(key, owner_token, fencing_token, expires_at) or None when the lease is held elsewhere; the fencing_token is strictly increasing per key. renew() returns False once the lease is lost. release() is owner-checked, so releasing a lease that was taken over is a no-op. A lease alone does not stop an expired-but-still-running owner from reaching a downstream store: the holder passes the fencing_token with each commit and the store rejects a token older than one it has already accepted. No reentrancy and no distributed-transaction semantics. |
 | PRIMARY | BaseWebhookDispatcher — dispatch() is the single public entry point |  | Outbound counterpart to BaseToolService: BaseToolService calls out and waits for a response; BaseWebhookDispatcher pushes a notification and does not. |
 | PUBLIC | dispatch(webhook_url, payload, config=None, correlation_id=None, **kwargs) -> dict | signing_secret, max_retries | Template method. Signs the payload (HMAC), attempts delivery with retry/backoff (reusing the same retry contract already established elsewhere in the framework), and records success/failure to message_log. Failure after max_retries appends to failed_keys, same DLQ path as any other class. |
 | PROTECTED (abstract) | _sign_payload(payload, signing_secret, config=None, **kwargs) -> str | signing_algorithm | HMAC-SHA256 by default; subclass-overridable for a different signing scheme. |
@@ -475,7 +503,22 @@ Six new classes, added in this revision, follow the Foundation-interface discipl
 
 ### Why These Six and Not More
 
-Every method above either has no existing hook to attach to (storage access, distributed locking, outbound webhook delivery, schema versioning, memory pruning were genuinely absent — Section 2.15's Integration Map found a home for sixteen of seventeen reviewed patterns in *existing* hooks; these six are patterns that did not fit that criterion) or is a direct formalization of logic the framework already described informally (BaseIdempotencyStore formalizes Section 2.1's __ensure_idempotency; BaseDistributedLock formalizes Section 2.15's cache-stampede mutex). None of the six carry a single line of settlement, order, or tenant-specific business logic — that discipline is what keeps them Foundation interfaces rather than primary classes.
+Every method above either has no existing hook to attach to (storage access, distributed locking, outbound webhook delivery, schema versioning, memory pruning were genuinely absent — Section 2.15's Integration Map found a home for sixteen of seventeen reviewed patterns in *existing* hooks; these six are patterns that did not fit that criterion) or is a direct formalization of logic the framework already described informally (BaseIdempotencyStore formalizes Section 2.1's idempotency handling as an atomic claim; BaseDistributedLock is the lease the scheduled workers of Section 2.17 need — the cache-stampede mutex it was once extracted from is superseded by single-flight on BaseCacheStore). None of the six carry a single line of settlement, order, or tenant-specific business logic — that discipline is what keeps them Foundation interfaces rather than primary classes.
+
+### 2.16.1 Port Contract Migration
+
+Three ports changed shape, and the effect differs for callers and implementers.
+
+| **Port** | **Callers** | **Implementers** |
+|---|---|---|
+| BaseIdempotencyStore | Keep working: check_and_set() is retained as a shim over claim(). Callers that need replay or in-progress distinction move to claim(). | Must implement claim(), complete() and fail(). check_and_set() needs no change. |
+| BaseTransactionalStore | get()/put()/delete() are unchanged. | Must implement get_versioned() and put_if_version() with a real conditional write; a get-then-put emulation is not acceptable. |
+| BaseDistributedLock | acquire() now returns a LeaseHandle (truthy) or None instead of a bool, so `if lock.acquire(...)` still reads correctly; release() takes the handle. | Must return a LeaseHandle with a monotonically increasing fencing_token, and implement renew() and owner-checked release(handle). |
+| BaseCacheStore | get()/set()/delete() are unchanged; get_or_load() is new and optional to use. | No new abstract method — get_or_load() is concrete and built on get()/set(). |
+
+The in-memory reference adapters (e2a_inmemory_adapters.py) implement the new contracts for tests only; they are not production implementations.
+
+**Verification (beside the ports).** smoke_test_concurrency.py: "T-01 exactly one of 20 concurrent claimers wins"; "T-01 keys are tenant-scoped"; "expired claim -> RECOVERY_REQUIRED, never blind re-execution"; "reconciler takes over with recover=True; stale owner cannot complete"; "T-02 exactly one same-version writer commits; rest get typed CONFLICT"; "T-09 stale owner commit rejected as FENCED"; "lease: fencing token strictly increases"; "lease: stale owner cannot renew; its release is a no-op"; "T-03 async: 30 concurrent misses -> 1 load"; "T-03 loader failure propagates and is not cached".
 
 ## 2.17 Control-Plane Extensions — Scheduled Reconciliation Workers
 
@@ -483,12 +526,15 @@ Two new classes run on a schedule, not per request — the same control-plane ca
 
 | **Access** | **Signature** | **Config / kwargs** | **Behaviour** |
 |---|---|---|---|
-| PUBLIC | BaseOutboxSweeper.sweep(config=None, correlation_id=None, **kwargs) -> dict | batch_size, max_age_seconds | Template method, invoked on a fixed cadence (EventBridge Scheduler / cron). Acquires a BaseDistributedLock (2.16) before running, so only one sweeper instance processes a given batch. Reads pending records from the Outbox table (Landing Zone Section 3.1.3 / 8.1), publishes each via the abstract hook below, and marks each success. A record still PENDING past max_age_seconds is logged as a stuck-record warning, not silently retried forever. |
+| PUBLIC | BaseOutboxSweeper.sweep(config=None, correlation_id=None, **kwargs) -> dict | batch_size, max_age_seconds | Template method, invoked on a fixed cadence (EventBridge Scheduler / cron). Acquires a lease from BaseDistributedLock (2.16) before running, so only one sweeper instance processes a given batch, and renews it between records; if renewal fails the sweep stops with status LEASE_LOST rather than continuing without proof of ownership. Each publish receives the lease's fencing_token, so a downstream store can reject a stale sweeper. If the lease is held elsewhere the run returns SKIPPED_LOCKED. Reads pending records from the Outbox table (Landing Zone Section 3.1.3 / 8.1), publishes each via the abstract hook below, and marks each success. A record still PENDING past max_age_seconds is logged as a stuck-record warning, not silently retried forever. |
 | PROTECTED (abstract) | _publish_pending_record(record, config=None, **kwargs) -> bool | destination_topic | Publishes one Outbox record to its downstream destination (event bus, message topic). What "publish" means and where it goes is entirely subclass-owned. |
-| PUBLIC | BaseReconciliationService.reconcile(config=None, correlation_id=None, **kwargs) -> dict | dlq_source, max_replay_count | Template method, same scheduled-cadence and lock-acquisition pattern as BaseOutboxSweeper. Reads entries from the configured DLQ source, replays each through the abstract hook below, and tracks replay count per entry so a permanently-failing item is flagged for manual review rather than replayed indefinitely. |
+| PUBLIC | BaseReconciliationService.reconcile(config=None, correlation_id=None, **kwargs) -> dict | dlq_source, max_replay_count | Template method, same scheduled-cadence and lease pattern as BaseOutboxSweeper (including LEASE_LOST). Reads entries from the configured DLQ source and, for each, takes over its idempotency record with claim(recover=True), asks _confirm_physical_outcome() what actually happened, and only then acts: COMMITTED is marked done and never replayed; NOT_COMMITTED is replayed through the abstract hook below; UNKNOWN stays parked and is reported in the result's unresolved list for the next run — a replay is never issued on a guess. It tracks replay count per entry so a permanently-failing item is flagged for manual review rather than replayed indefinitely. |
 | PROTECTED (abstract) | _replay_dlq_entry(entry, config=None, **kwargs) -> bool | target_idempotency_store | Re-submits one DLQ entry to its original destination, through the same BaseIdempotencyStore (2.16) check every live request already uses — a replay is not exempt from the idempotency contract just because it originated from reconciliation rather than the request path. |
+| PROTECTED | _confirm_physical_outcome(entry, config=None, **kwargs) -> PhysicalOutcome | fencing_token | Hook: ask the system of record whether the entry's material effect actually committed, by idempotency key or business key. The default returns UNKNOWN — a safe never-replay default for a subclass that has not bound a confirmation query. |
 
 Both classes are optional — a deployment with no Outbox table or no DLQ has nothing to schedule them against. Neither is called from BaseWorkflow.execute() or BaseAgent.run(); they are independently scheduled workers, wired up in the CI/CD-provisioned infrastructure (BaseInfraProvisioner, 2.13), not the request path.
+
+**Verification (beside the workers).** smoke_test_concurrency.py: "sweeper passes the lease fencing token to publish"; "sweeper skips when lease is held"; "T-12 UNKNOWN stays parked: no replay"; "T-12 COMMITTED truth: marked done, never replayed"; "T-12 NOT_COMMITTED truth: replayed once, then SUCCEEDED".
 
 ## 2.18 BaseLLMAgentService — LLM Inference Microservice
 
@@ -508,33 +554,43 @@ The vendor boundary: the only place a provider SDK appears is the concrete subcl
 
 ### Two Public Entry Points — One Per Interaction Mode
 
-process_inference() is unary and serves every agent that needs a whole answer — confidence evaluation, structured-output validation, tool-call detection and egress DLP all need the complete response. process_inference_stream() is server-streaming and serves end-user chat surfaces where time-to-first-token matters. Streaming is exposed publicly because the caller must consume it incrementally; it cannot be hidden behind a private helper or folded into the unary return type. Both run the same admission steps (prompt sanitising, context budget, quota, tenant and pod permits) and the same failure bookkeeping. The stream path deliberately omits semantic cache, tool calls, structured output and the total-latency SLO, and holds its permit for the life of the stream, so consumers must iterate it to completion or aclose() it.
+process_inference() is unary and serves every agent that needs a whole answer — confidence evaluation, structured-output validation, tool-call detection and egress DLP all need the complete response. process_inference_stream() is server-streaming and serves end-user chat surfaces where time-to-first-token matters. Streaming is exposed publicly because the caller must consume it incrementally; it cannot be hidden behind a private helper or folded into the unary return type. Both run the same admission steps (prompt sanitising, context budget, tenant and pod permits, quota) under the same deadline, and the same failure bookkeeping. The stream path deliberately omits semantic cache, tool calls, structured output and the total-latency SLO, and holds its permit for the life of the stream, so consumers must iterate it to completion or aclose() it.
 
 ### Capacity Model
 
-The pod semaphore (pod_concurrency) bounds in-flight upstream calls. A dual token bucket enforces requests-per-minute and tokens-per-minute; each pod holds its share of the fleet limit (max_rpm and max_tpm divided by llm_replica_count). This state is held in memory by design — no network hop on the hot path. A fleet-wide quota is optional: a subclass may bind _acquire_shared_quota() to a BaseCacheStore counter, and the in-memory bucket still applies on top. Tokens are admitted on an estimate (prompt plus max_output_tokens) and then refunded down to actual usage, or refunded in full if the call fails. tenant_concurrency optionally caps one tenant's share of the pod so a noisy tenant cannot starve the rest. A caller that cannot obtain quota within quota_timeout fails fast with NFRViolationError rather than queueing indefinitely.
+The pod semaphore (pod_concurrency) bounds in-flight upstream calls, and the optional tenant semaphore (tenant_concurrency) is acquired first. A dual token bucket enforces requests-per-minute and tokens-per-minute; each pod holds its share of the fleet limit (max_rpm and max_tpm divided by llm_replica_count). This state is held in memory by design — no network hop on the hot path. A fleet-wide quota is optional: a subclass may bind _acquire_shared_quota() to a BaseCacheStore counter, and the in-memory bucket still applies on top. Tokens are admitted on an estimate (prompt plus max_output_tokens) and then refunded down to actual usage, or refunded in full if the call fails. tenant_concurrency optionally caps one tenant's share of the pod so a noisy tenant cannot starve the rest. A caller that cannot obtain a permit within permit_timeout, or quota within quota_timeout, fails fast with the typed AdmissionTimeout rather than queueing indefinitely; each wait is also capped by the request's remaining deadline.
+
+Admission order (exact). (1) Reject immediately if the service is draining or the deadline has already expired. (2) Acquire the tenant permit, then the pod permit, within min(permit_timeout, deadline.remaining()). (3) Inside the permit, admit quota — the request bucket, then the token bucket on an estimate of prompt plus max_output_tokens, then the optional _acquire_shared_quota() hook — within min(quota_timeout, deadline.remaining()). (4) Run the upstream call under min(llm_max_latency, deadline.remaining()) through the resilience policy. The permit is held while quota is awaited, so the quota wait is bounded by design; it is the only nested wait. Release is mirrored and unconditional: the permit is released in a finally block, so a failure, timeout or cancellation cannot leak it.
+
+Quota settlement. Admitted tokens are an estimate. On success the difference to actual usage is refunded; on failure, or on cancellation, everything admitted is refunded. CancelledError is a BaseException, so an `except Exception` clause never sees it — the service handles it explicitly, refunds the quota, counts e2a.cancellation.cleanup_total and re-raises. A request cancelled while still waiting for a permit has consumed no quota, so nothing is refunded.
+
+Tenant permit table. Per-tenant semaphores live in a table whose entries count holders and waiters; an entry idle for tenant_idle_evict_seconds is evicted, so a stream of one-off tenant ids cannot grow it without bound. The quotas remain in memory per pod by design (each pod holds its share of the fleet limit); a fleet-wide quota is an optional hook, not the default.
+
+Graceful shutdown. drain(timeout) stops new admission (new requests are rejected with AdmissionTimeout), waits for in-flight requests up to the drain bound, and flips ready to False so the platform's readiness probe withdraws the instance. The drain bound must be shorter than the platform's termination grace period; validate_capacity() checks this (Section 2.19.11).
 
 ### Method Contract Table
 
 | **Access** | **Signature** | **Config / kwargs** | **Behaviour** |
 |---|---|---|---|
-| PUBLIC | process_inference(messages, config=None, correlation_id=None, io_config=None, idempotency_key=None, tenant_id=None, message_log=None, failed_keys=None, **kwargs) -> Dict | model_id, temperature, max_output_tokens, llm_max_latency; kwargs: tools, stop_sequences, response_schema, reasoning_budget, bypass_cache | Unary template method. Fixed lifecycle: sanitise prompts → semantic cache → context budget → KV prefix cache → tool-schema compile → quota admission → tenant + pod permit → upstream call under the llm_max_latency deadline → output framing → egress DLP → usage accounting. tenant_id is required (ValueError if absent — never defaulted). Never raises a request failure past this boundary: errors return {'status': 'FAILED', 'error', 'error_type', 'physical_success': False}, append idempotency_key or correlation_id to failed_keys, and call _handle_error(). DehydrationInterrupt is re-raised unchanged. Always returns the physical_success contract (Section 2.15). |
+| PUBLIC | process_inference(messages, config=None, correlation_id=None, io_config=None, idempotency_key=None, tenant_id=None, message_log=None, failed_keys=None, **kwargs) -> Dict | model_id, temperature, max_output_tokens, llm_max_latency, permit_timeout, quota_timeout; kwargs: tools, stop_sequences, response_schema, reasoning_budget, bypass_cache, deadline | Unary template method. Fixed lifecycle: reject if draining or past deadline → sanitise prompts → semantic cache → context budget → KV prefix cache → tool-schema compile → tenant + pod permit (bounded wait) → quota admission (bounded wait) → upstream call under min(llm_max_latency, remaining deadline) → output framing → egress DLP → usage accounting → quota settlement. tenant_id is required (ValueError if absent — never defaulted). Never raises a request failure past this boundary: errors return {'status': 'FAILED', 'error', 'error_type', 'physical_success': False}, append idempotency_key or correlation_id to failed_keys, and call _handle_error(). DehydrationInterrupt is re-raised unchanged. Always returns the physical_success contract (Section 2.15). |
 | PUBLIC | process_inference_stream(messages, config=None, correlation_id=None, io_config=None, idempotency_key=None, tenant_id=None, message_log=None, failed_keys=None, **kwargs) -> AsyncGenerator[str] | dlp_enabled, dlp_holdback_chars | Server-streaming sibling. Same admission and failure bookkeeping, then yields DLP-screened text chunks. There is no result payload to carry a failure, so a failure is recorded (failed_keys + _handle_error) and re-raised to the consumer. |
 | PROTECTED | _manage_context_budget(messages, budget, reasoning_budget, config, **kwargs) -> list | context_budget | Working-set management. System and priority-0 messages are pinned; the last turn and priority-1 messages are active; remaining history is kept newest-first as one contiguous recent window, conversation order preserved. Pinned + active alone exceeding the budget raises NFRViolationError — never silent truncation. |
 | PROTECTED | _apply_kv_caching(messages, tenant_id, config, **kwargs) -> Optional[str] | enable_context_caching, min_cache_threshold | Static prefixes at or above the threshold get a deterministic, tenant-scoped cache-handle name. The handle is a request to the vendor transport, which creates or reuses the real provider-side cache. |
 | PROTECTED | _compile_tool_schemas(tools, config, **kwargs) -> list | — | Normalises caller tool specs to the canonical vendor-neutral declaration {name, description, parameters}. Mapping to a provider wire format is the subclass's job. |
 | PROTECTED (async hooks) | _check_semantic_cache(messages, config, tenant_id=None) / _store_semantic_cache(messages, payload, config, tenant_id=None) | enable_semantic_cache | Tenant-scoped similarity lookup and write-through against a BaseCacheStore. Default: no cache. Skipped when tools are supplied or bypass_cache is set; a hit returns cached_semantic_hit=True with tokens_used=0. |
-| PROTECTED (async hook) | _acquire_shared_quota(tokens, tenant_id, config, **kwargs) -> bool | — | Optional fleet-wide quota check. Default admits. |
+| PROTECTED (async hook) | _acquire_shared_quota(tokens, tenant_id, config, **kwargs) -> bool / _release_shared_quota(tokens, tenant_id, config, **kwargs) -> None | — | Optional fleet-wide quota check and its matching release, called on the refund path. Defaults admit and do nothing. |
+| PROTECTED | _emit_metric(kind, name, value, dimensions=None) -> None | — | Hook (default no-op): forward a metric from the E2A_METRICS catalogue — e2a.llm.inflight, e2a.llm.permit_wait_seconds, e2a.llm.quota_wait_seconds, e2a.admission.rejected_total, e2a.cancellation.cleanup_total — to the telemetry backend. |
+| PUBLIC (lifecycle) | async drain(timeout=None, config=None) -> bool / ready (property) / inflight (property) | drain_timeout_seconds | Graceful shutdown support, not a third inference entry point: stop admitting, wait for in-flight work, report readiness. Returns True when everything finished within the bound. |
 | PROTECTED | _format_and_validate_output(raw, response_schema, model_id, cached_hit, correlation_id, tenant_id, config) -> dict | response_schema | Frames the provider result: text, or tool_calls with action TOOL_CALL_DETECTED, or structured_output parsed against response_schema (a parse failure sets physical_success False). |
 | PROTECTED | _redact_sensitive(text) -> (str, int) | dlp_enabled | Egress DLP: SSN, Luhn-validated card numbers and bearer tokens replaced by a marker. Best-effort pattern gate; strict egress belongs to BaseGovernanceFramework. |
 | PROTECTED | _estimate_tokens(message) -> int / _resolve_param(key, config, kwargs) / _handle_error(error, messages, config, **kwargs) | all keys in the table below | Token estimate (~4 chars per token), kwargs > config > env > default resolution, and error logging. Each may be specialised. |
-| PRIVATE | __sanitize_prompts(messages) / __admit_quota(...) / __refund_quota(tokens) / __concurrency_permit(...) / __stream_with_dlp(...) / __track_usage(prepared, raw) / __extras(kwargs, *explicit) | — | Framework-owned, never overridden. Injection screening, dual token-bucket admission and refund, tenant + pod permits, holdback-window stream redaction, usage accounting (provider-reported tokens preferred, ~4 chars per token fallback), and a guard that no keyword is ever supplied twice to a hook. |
+| PRIVATE | __sanitize_prompts(messages) / __admit_quota(...) / __settle_quota(quota, dispatched, used) / __concurrency_permit(...) / __tenant_entry(...) / __bounded_acquire(...) / __stream_with_dlp(...) / __track_usage(prepared, raw) / __extras(kwargs, *explicit) | — | Framework-owned, never overridden. Injection screening, dual token-bucket admission and refund, tenant + pod permits, holdback-window stream redaction, usage accounting (provider-reported tokens preferred, ~4 chars per token fallback), and a guard that no keyword is ever supplied twice to a hook. |
 | ABSTRACT | _dispatch_upstream_call(messages, model_id, temperature, max_tokens, tools, stop_sequences, cache_handle, config, **kwargs) -> dict | model_id, speculative_model | The vendor transport — one concrete subclass per provider. Executes one model call, creates or reuses the provider-side cache for cache_handle, maps canonical tool declarations to the wire format, and owns any model-fallback cascade. Returns {'text', 'metadata': {'tokens_used'}} and/or {'tool_calls': [...]}. |
 | ABSTRACT | _dispatch_upstream_stream(messages, model_id, temperature, max_tokens, config, **kwargs) -> AsyncGenerator[str] | model_id | Async generator yielding raw text chunks from the provider. |
 
 ### Failure Semantics
 
-The service never lets a request failure escape as an exception from process_inference(). The sync bridge _infer() turns a FAILED payload back into an exception, so BaseAgent.run() has exactly one failure path (failed_keys + _handle_error). The upstream call runs under the llm_max_latency deadline, so a breach cancels the call instead of letting it complete and bill after the deadline. The agent's own max_latency measures the whole run, so it must be set above llm_max_latency plus the agent's own processing time or the agent-level SLO will always trip first.
+The service never lets a request failure escape as an exception from process_inference(). The sync bridge _infer() turns a FAILED payload back into an exception, so BaseAgent.run() has exactly one failure path (failed_keys + _handle_error). The upstream call runs under min(llm_max_latency, remaining request deadline), so a breach cancels the call instead of letting it complete and bill after the deadline; an SLO breach raises NFRViolationError and an expired request deadline raises DeadlineExceeded. Overload is a different failure from a model failure — a permit or quota wait that times out raises AdmissionTimeout, counted as e2a.admission.rejected_total, and the caller may retry later. Cancellation is not a failure: it propagates after the service has released its permit and refunded its quota. The agent's own max_latency measures the whole run, so it must be set above llm_max_latency plus the agent's own processing time or the agent-level SLO will always trip first.
 
 ### Token Accounting
 
@@ -546,15 +602,230 @@ The class contains no provider SDK and no provider name. A concrete subclass imp
 
 ### Configuration — BaseLLMAgentService (central registry)
 
-Keys read by this class — names, environment variables and defaults are defined once in the central registry (Section 5, group 'LLM service'), resolved kwargs > config > environment variable > default: model_id, temperature, context_budget, max_output_tokens, llm_max_latency, pod_concurrency, tenant_concurrency, llm_replica_count, max_rpm, max_tpm, quota_timeout, enable_context_caching, min_cache_threshold, enable_semantic_cache, dlp_enabled, dlp_holdback_chars, speculative_model, max_speculative_tokens.
+Keys read by this class — names, environment variables and defaults are defined once in the central registry (Section 5, group 'LLM service'), resolved kwargs > config > environment variable > default: model_id, temperature, context_budget, max_output_tokens, llm_max_latency, pod_concurrency, tenant_concurrency, permit_timeout, tenant_idle_evict_seconds, llm_replica_count, max_rpm, max_tpm, quota_timeout, drain_timeout_seconds, enable_context_caching, min_cache_threshold, enable_semantic_cache, dlp_enabled, dlp_holdback_chars, speculative_model, max_speculative_tokens.
+
+### Verification (beside the class)
+
+smoke_test_llm_service.py (37 checks) covers the registry, admission, quota and streaming. smoke_test_concurrency.py adds: "T-04 permit wait is bounded: excess rejected early, not queued"; "T-04 permits fully released afterwards"; "T-04 noisy tenant cannot starve a quiet tenant"; "idle tenant permit entries are evicted"; "deadline bounds the upstream call"; "expired deadline rejected before any work"; "T-10 cancel mid-call: permit released"; "T-10 cancel mid-call: TPM refunded, cleanup counted"; "T-10 cancel while waiting for a permit consumes no quota"; "T-11 drain: in-flight finishes, new work rejected, readiness flips"; "bridge: sync caller bounded by the deadline; coroutine cancelled"; "bridge: nothing orphaned after the deadline".
 
 ### What Does Not Change
 
-BaseAgent's contract — no new abstract methods. It still builds messages, applies policy and evaluates output; only the private model call is gone.
+BaseAgent's contract — no new abstract methods. It still builds messages, applies policy and evaluates output; only the private model call is gone. The seven-stage order of BasePipeline, the single-entry-point rule and the propagation fields are likewise unchanged; deadline is additive.
 
 LLMOnlyAgent's modality dispatch and _select_model() — its _handle_* methods now call the inherited _infer() instead of _llm_call().
 
 BaseGovernanceFramework — the gate still runs before the model call and redact_response() after it; the service's DLP is an additional, cheaper screen, not a replacement.
+
+## 2.19 Concurrency Contracts — Ownership by Invariant
+
+Concurrency in E2A is not managed by one central component. Each shared-resource risk is an invariant, and each invariant has exactly one owner — an existing class, port or config key that already sits at the point where the risk arises. This section is the single place that maps invariant to owner, states the rule, gives the pseudocode and failure semantics, and points at the tests. Sections 2.3 to 2.18 carry the per-class contracts and cross-refer here. The sections below describe what the reference scaffold in Section 3 implements; where a part is left to a concrete adapter it is labelled directional.
+
+### 2.19.1 Invariant, Risk, Control, Owner
+
+| **Invariant** | **Risk it prevents** | **Control** | **Owner** |
+|---|---|---|---|
+| A material request takes effect at most once | Duplicate or concurrent submission | Atomic idempotency claim | BaseIdempotencyStore, driven by BaseWorkflow.execute() and BaseOrchestrator.execute() |
+| No lost update on shared state | Two writers acting on the same read | Optimistic concurrency: one conditional write on an expected version | BaseTransactionalStore.put_if_version() |
+| A stale owner cannot change state | An expired lease holder still writing | Lease plus fencing token, checked by the receiving store | BaseDistributedLock; the store enforces the token |
+| One loader per missing cache key | Cache stampede on the origin | Single-flight | BaseCacheStore.get_or_load() |
+| In-flight work and waiting are bounded | Overload, unbounded queues, permit starvation | Admission with a bounded wait and a typed rejection | BaseLLMAgentService; AIDLCPipelineOrchestrator; consumer runtime |
+| Retry amplification is bounded | Retry storms against a failing dependency | Retry budget, circuit breaker, bulkhead | ResiliencePolicy |
+| No work continues after the caller gave up | Orphaned calls, leaked permits and quota | Request deadline, native cancellation, cleanup in finally | Deadline; every bounded wait |
+| An unknown outcome is never guessed | A timeout after the request left | Tri-state PhysicalOutcome and reconciliation | BaseToolService, BaseWorkflow, BaseReconciliationService |
+| Configuration is consistent with capacity | Replicas multiplying concurrency past a pool or ceiling | validate_capacity() | BasePipeline scaffold-compliance stage |
+| Shutdown is orderly | In-flight work killed mid-effect | drain() and readiness | BaseLLMAgentService; consumer runtime |
+
+Choose the control by the invariant, not by habit. A lock is not a de-duplication mechanism, and a lease is not a substitute for a conditional write.
+
+### 2.19.2 Deadlines and Cancellation
+
+Rules. The deadline is created once at the request origin and passed down as the additive deadline field (Section 2.1). Locally it is an absolute monotonic instant; across a process boundary it is sent as remaining milliseconds (header x-e2a-deadline-ms) and rebuilt on arrival. Every bounded wait takes min(its own timeout, deadline.remaining()). Cancellation uses the runtime's native mechanism; nothing is added to the state for it.
+
+```
+origin:           deadline = inbound deadline | Deadline.after(request_deadline_seconds) | none
+before each step: deadline.check('step')                    # DeadlineExceeded, no work started
+every wait:       timeout = deadline.bound(own_timeout)     # min(own, remaining)
+process boundary: send   x-e2a-deadline-ms = deadline.to_remaining_ms()
+                  receive deadline = Deadline.from_remaining_ms(header)
+sync -> async:    _run_on_bridge_loop(coro, timeout=deadline.remaining() + 0.5)
+                  on timeout or interrupt: cancel the coroutine, never leave it running
+cleanup:          release permits and refund quota in finally; CancelledError is a
+                  BaseException, so `except Exception` does not catch it
+```
+
+Failure semantics. An expired deadline raises DeadlineExceeded before any further work begins and is recorded as a failed request, not retried. A bridge wait that outlives the deadline cancels the coroutine; nothing is left running after the caller has returned. Cancellation propagates to the caller after the cleanup above has run; it is counted as e2a.cancellation.cleanup_total.
+
+### 2.19.3 Admission and Backpressure
+
+Admission is a bounded wait followed by a typed rejection — never an unbounded queue. Three owners apply it, each to the resource it protects.
+
+| **Where** | **What is bounded** | **Keys** | **On refusal** |
+|---|---|---|---|
+| BaseLLMAgentService | Tenant permit, pod permit, then quota — in that order (Section 2.18) | tenant_concurrency, pod_concurrency, permit_timeout, quota_timeout | AdmissionTimeout; retryable by the caller; counted as e2a.admission.rejected_total |
+| AIDLCPipelineOrchestrator | Concurrent builds per instance and per tenant | build_max_inflight, tenant_build_max_inflight, permit_timeout | Phase REJECTED_OVERLOAD: nothing ran, so nothing is compensated or dead-lettered, and the idempotency claim is released so a retry can proceed |
+| Consumer runtime (directional — an adapter concern) | In-flight messages and broker prefetch per instance | worker_concurrency, worker_prefetch | Message stays on the queue; queue depth and oldest age are the signal |
+
+A synchronous wait is always bounded by the request deadline. Backlog that must survive a restart belongs in a durable queue, with its age watched against queue_age_slo_seconds; it is not held in a process-local queue.
+
+### 2.19.4 Retry Budgets, Circuit Breakers and Bulkheads
+
+One helper, ResiliencePolicy, serves every outbound dependency. BaseToolService uses all three controls; BaseLLMAgentService uses the circuit breaker only, because quota and permit admission already bound its concurrency and its calls are not blindly retried.
+
+```
+call(fn, deadline, max_retries, idempotent):
+    deadline.check()
+    take a bulkhead slot within min(bulkhead_acquire_timeout, remaining)   # else BulkheadFullError
+    budget.deposit()                          # each first attempt earns retry_budget_ratio tokens
+    loop:
+        if circuit is open: raise CircuitOpenError          # fn is not called
+        try:  result = fn(); circuit.record_success(); return result
+        except error:
+            count a circuit failure unless the error is deterministic or structural
+            retry only if  attempts <= max_retries
+                      and error is not deterministic (ValueError, TypeError, PermissionError)
+                      and error is not NFR, deadline, admission, circuit or bulkhead
+                      and (idempotent  or  the error is not a timeout)
+                      and budget.withdraw()                  # one token per retry
+            sleep a full-jitter backoff, never past the remaining deadline
+```
+
+Failure semantics. Retry amplification is bounded by the budget to roughly retry_budget_ratio of traffic however hard the dependency fails. A timeout is retried only for an idempotent call: a timeout after a possible commit is an UNKNOWN physical outcome for a material write, never re-sent blindly (Section 2.19.9). After circuit_failure_threshold consecutive failures the circuit opens and calls fail fast; after circuit_reset_seconds exactly one half-open probe is allowed. One policy instance is kept per dependency so the budget and circuit are shared by every call to it.
+
+### 2.19.5 The Atomic Idempotency Claim
+
+Ownership of a material request is one atomic conditional write. A look-up followed by a later write lets two concurrent requests both see "not seen" and both execute; the claim removes that window.
+
+| **State** | **Meaning** | **A duplicate caller gets** |
+|---|---|---|
+| IN_PROGRESS | One owner holds an unexpired claim | IN_PROGRESS — wait or retry later, no second execution |
+| SUCCEEDED | The request completed and its post-redaction result is stored | REPLAY — the stored result |
+| FAILED_RETRYABLE | The attempt failed, the request may be tried again | CLAIMED — the new caller becomes the owner |
+| FAILED_FINAL | A deterministic failure | FAILED_FINAL — never re-executed |
+| UNKNOWN / expired lease | The outcome cannot be determined | RECOVERY_REQUIRED — only a reconciler (claim with recover=True) may take it over |
+
+```
+claim(key, tenant_id, fingerprint, owner, lease_seconds)      # ONE conditional write
+   absent                                -> IN_PROGRESS(owner)      -> CLAIMED
+   present, other fingerprint            ->                            CONFLICT
+   present, IN_PROGRESS, lease live      ->                            IN_PROGRESS
+   present, IN_PROGRESS, lease expired   -> (recover only)             RECOVERY_REQUIRED
+   present, SUCCEEDED                    ->                            REPLAY(result)
+execute only when CLAIMED
+finally: complete(result) | fail(retryable) | fail(retryable=False, outcome=UNKNOWN)
+         # owner-checked: a stale owner whose claim was taken over gets False
+```
+
+Rules. Keys are scoped by tenant_id. The fingerprint is a hash of the request's business content, so the same key with a different payload is a CONFLICT, never a replay. The claim's expiry is an explicit field; a store's TTL deletion is garbage collection only and must not decide correctness, because TTL deletion can lag. A dehydrated (paused) request settles as retryable, so it is claimable again on resume. Read-only and purely generative intents return False from _requires_idempotency_claim() and are neither claimed nor replayed. The claim is stored after egress redaction. Compatibility is described in Section 2.16.1.
+
+### 2.19.6 Optimistic Concurrency and Fencing
+
+The authority on a lost update is the store, not the application. put_if_version(key, value, expected_version) is a single conditional write that returns a typed CommitResult.
+
+```
+current = store.get_versioned(key)                     # (value, version) or None
+result  = store.put_if_version(key, new_value, current.version,    # None = create-only
+                               fencing_token=lease.fencing_token)  # optional
+COMMITTED -> done                  (new version returned)
+CONFLICT  -> another writer won: re-read and decide, or surface a typed ConcurrencyConflict
+FENCED    -> the token is older than one the store accepted: the caller is a stale owner; stop
+```
+
+Failure semantics. In the CQRS command path a CONFLICT is returned to the caller as status CONFLICT — it is a business-level answer, not a failure, so it is not dead-lettered, and the idempotency claim stays claimable. A FENCED result means the caller's lease has been superseded and its write was rejected. _commit_gate stays an advisory pre-flight check (Section 2.6) and is never the authority. Where a backend's conditional write is single-item, an invariant that spans items must be confined to one item or enforced by another mechanism.
+
+### 2.19.7 Single-Flight
+
+BaseCacheStore.get_or_load(key, loader) lets exactly one caller run the loader for a missing key; concurrent callers wait for that result. A follower waits at most cache_fill_timeout_seconds and then follows cache_fill_on_timeout: load (go to the origin itself), stale (serve the last known value) or raise. A loader failure propagates to every waiter and is not cached. aget_or_load() is the async twin. In the CQRS query path BaseQueryService.fetch() uses it when a BaseCacheStore is bound. It replaces the earlier mutex-around-the-fill pattern, which blocked every caller behind a crashed loader until the lock expired.
+
+### 2.19.8 Leases and Fencing
+
+A lease gives one scheduled worker temporary exclusive ownership. It is time-bound, renewable and owner-checked, and it is used only by BaseOutboxSweeper and BaseReconciliationService.
+
+```
+handle = lock.acquire(key, ttl_seconds)        # LeaseHandle(owner_token, fencing_token, expires_at) | None
+none  -> return SKIPPED_LOCKED
+loop over work:
+    renew when lease_renew_interval_seconds has passed   # must be shorter than lease_ttl_seconds
+    renew fails -> stop with LEASE_LOST; do not release (it is no longer ours)
+    pass handle.fencing_token to every downstream write
+finally: lock.release(handle)                  # owner-checked; a no-op if the lease was taken over
+```
+
+A lease alone does not stop an expired-but-still-running owner from reaching a store; the fencing token, checked where the write lands, does. No major managed service provides a monotonic fencing token natively, so a concrete lock adapter must supply one from its own counter or version.
+
+### 2.19.9 Physical Outcome and Reconciliation
+
+A tool call can end in three ways, not two. PhysicalOutcome is COMMITTED (the effect is confirmed), NOT_COMMITTED (it is confirmed not to have happened) or UNKNOWN (the request left and no confirmation came back — a timeout, a dropped connection). A boolean cannot tell the last case from a failure, and treating it as a failure is how a duplicate material effect happens.
+
+```
+tool call times out        -> result {'status': 'UNKNOWN', 'outcome': UNKNOWN, 'physical_success': False}
+workflow settles the claim -> fail(retryable=False, outcome=UNKNOWN)       # parked: RECOVERY_REQUIRED
+a duplicate arrives        -> RECOVERY_REQUIRED                            # not re-sent
+reconciler:  claim(recover=True) -> _confirm_physical_outcome(entry)
+             COMMITTED     -> complete(); never replayed
+             NOT_COMMITTED -> replay through the normal claim path
+             UNKNOWN       -> stay parked; reported in the 'unresolved' list; retried next run
+```
+
+UNKNOWN is never routed to a blind retry and never to a DLQ replay. The default _confirm_physical_outcome() returns UNKNOWN, a safe never-replay default until a subclass binds a confirmation query to its system of record.
+
+### 2.19.10 Graceful Shutdown
+
+On SIGTERM a service stops admitting, finishes what is in flight and reports itself not ready, in that order.
+
+```
+SIGTERM -> service.drain(timeout=drain_timeout_seconds)
+           new admissions rejected (AdmissionTimeout);  ready -> False
+           wait for in-flight requests, up to the drain bound
+           return True if everything finished, False if the bound was reached
+platform kills the process after termination_grace_seconds
+```
+
+drain_timeout_seconds must be shorter than the platform's termination grace period, or in-flight work is killed mid-effect; validate_capacity() enforces this. The grace period itself is platform-specific and is configured as termination_grace_seconds to match the deployment.
+
+### 2.19.11 Capacity Equation and Effective Fleet Capacity
+
+validate_capacity(config) is one pure rule over the central registry. It returns the list of violated equations (empty when consistent) and runs inside BasePipeline's scaffold-compliance stage; it can also be called at start-up.
+
+| **Check** | **Equation** |
+|---|---|
+| Worker concurrency within the DB pool | worker_concurrency ≤ db_pool_size, per instance |
+| LLM concurrency within the HTTP pool | pod_concurrency ≤ http_pool_size, per instance |
+| Tenant share within the pod | tenant_concurrency ≤ pod_concurrency |
+| Prefetch does not starve workers | worker_prefetch ≥ worker_concurrency |
+| Fleet DB connections | fleet_replica_count × db_pool_size ≤ db_max_connections (when set) |
+| Fleet model concurrency, with retry amplification | fleet_replica_count × pod_concurrency × (1 + retry_budget_ratio) ≤ model_max_inflight (when set) |
+| Lease renewal | lease_renew_interval_seconds < lease_ttl_seconds |
+| Drain window | drain_timeout_seconds < termination_grace_seconds |
+
+Worked example. Take pod_concurrency 32, db_pool_size 20, retry_budget_ratio 0.2, a database that allows 200 connections and a model quota of 400 concurrent requests. At 10 replicas the fleet needs 10 × 20 = 200 connections and 10 × 32 × 1.2 = 384 concurrent model requests: both fit and validate_capacity() returns an empty list. Scale to 12 replicas and it reports "fleet DB connections 12 x 20 = 240 exceed db_max_connections (200)" and "fleet model concurrency 12 x 32 x (1+retry_budget_ratio) = 461 exceeds model_max_inflight (400)". The per-instance limits did not change; replica multiplication did. The in-memory per-pod RPM and TPM buckets divide the fleet limit by llm_replica_count, so max_rpm and max_tpm are fleet figures, not per-pod ones.
+
+### 2.19.12 Metric Catalogue
+
+Metric names, types and labels are defined once in E2A_METRICS in the scaffold. Per-tenant labels are an unbounded-cardinality risk; use them only where the backend tolerates it.
+
+| **Metric** | **Type** | **Status** |
+|---|---|---|
+| e2a.llm.inflight | gauge | Implemented — emitted by BaseLLMAgentService through _emit_metric() |
+| e2a.llm.permit_wait_seconds, e2a.llm.quota_wait_seconds | histogram | Implemented — same hook |
+| e2a.admission.rejected_total | counter | Implemented — same hook (reason: permit_timeout, quota_timeout, shared_quota) |
+| e2a.cancellation.cleanup_total | counter | Implemented — same hook |
+| e2a.retry.attempts_total, e2a.retry.budget_exhausted_total, e2a.circuit.state, e2a.bulkhead.wait_seconds | counter / gauge / histogram | Directional — ResiliencePolicy reports retry, retry_budget_exhausted and circuit_open events through an optional callback and keeps counters in its stats; an adapter maps them to these names |
+| e2a.occ.conflicts_total, e2a.idempotency.replays_total, e2a.lease.lost_total, e2a.fencing.rejections_total, e2a.cache.single_flight_followers_total | counter | Directional — the outcomes exist as typed results (CONFLICT, REPLAY, LEASE_LOST, FENCED) and single_flight_stats(); a concrete adapter or the caller emits the metric |
+| e2a.queue.depth, e2a.queue.oldest_age_seconds | gauge | Directional — emitted by the queue adapter; Azure Service Bus exposes no oldest-message-age metric natively, so it must be derived |
+
+### 2.19.13 Verification
+
+Each class section above lists its own checks. The suites and what they cover:
+
+| **Suite** | **Checks** | **Covers** |
+|---|---|---|
+| smoke_test_llm_service.py | 37 | Registry, admission, quota, streaming, agent integration |
+| smoke_test_concurrency.py | 48 | Claims, conditional writes, leases and fencing, single-flight, bounded admission, cancellation cleanup, drain, resilience, deadlines, bridge, capacity validation |
+| smoke_test_cqrs_concurrency.py | 9 | CQRS command conflict and replay, single-flight read, deadline |
+| smoke_test_multimodal_concurrency.py | 6 | Tool-call claim and replay, UNKNOWN outcome, deadline bounding, no asyncio.run |
+| smoke_test_aidlc_concurrency.py | 16 | Duplicate build claim, build admission, shared-artifact reference and compensation, deadline |
+
+The tests run against in-memory test doubles. They prove the contracts of the scaffold; they do not prove a production adapter, which must be run against its real backend.
 
 # 3. Scaffold File — e2a_base.py
 
@@ -562,7 +833,7 @@ Drop this file into any repository as the foundation layer. All E2A abstract cla
 
 > **File placement**
 >
-> Place e2a_base.py at src/e2a_base.py or framework/e2a_base.py. All concrete agent, workflow, RAG, tool, and MCP server classes import from it. The file must never be modified once placed — create subclasses instead. Ship tests/smoke_test_llm_service.py beside it: a self-contained smoke suite (37 checks) covering the central config registry, the inference service, its agent integration through _infer(), hybrid retrieve(), and BaseIndexingPipeline.ingest().
+> Place e2a_base.py at src/e2a_base.py or framework/e2a_base.py. All concrete agent, workflow, RAG, tool, and MCP server classes import from it. The file must never be modified once placed — create subclasses instead. Ship the smoke suites beside it: tests/smoke_test_llm_service.py (37 checks — the central config registry, the inference service, its agent integration through _infer(), hybrid retrieve(), and BaseIndexingPipeline.ingest()) and tests/smoke_test_concurrency.py (48 checks — claims, conditional writes, leases and fencing, single-flight, bounded admission, cancellation cleanup, resilience, deadlines and capacity validation), which runs against the in-memory test adapters in e2a_inmemory_adapters.py (test doubles only, never for production).
 
 e2a_base.py — Complete Source
 ```python
@@ -581,8 +852,11 @@ import hashlib
 import logging
 import threading
 import contextlib
+import random
+import concurrent.futures
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
  
 logging.basicConfig(level=logging.INFO)
@@ -613,16 +887,197 @@ _BRIDGE = {'loop': None}
 _BRIDGE_LOCK = threading.Lock()
 
 
-def _run_on_bridge_loop(coro):
+def _run_on_bridge_loop(coro, timeout: Optional[float] = None):
     """Run a coroutine to completion on one shared background event
-    loop (created lazily, daemon thread) and return its result."""
+    loop (created lazily, daemon thread) and return its result. The wait
+    is BOUNDED when `timeout` is given: on expiry (or if the calling
+    thread is interrupted) the coroutine is cancelled, so its permits and
+    quota are released by the coroutine's own cleanup — a parent deadline
+    or cancellation is never left orphaned on the bridge loop."""
     with _BRIDGE_LOCK:
         if _BRIDGE['loop'] is None:
             loop = asyncio.new_event_loop()
             threading.Thread(target=loop.run_forever, daemon=True,
                              name='e2a-llm-bridge').start()
             _BRIDGE['loop'] = loop
-    return asyncio.run_coroutine_threadsafe(coro, _BRIDGE['loop']).result()
+    fut = asyncio.run_coroutine_threadsafe(coro, _BRIDGE['loop'])
+    try:
+        return fut.result(timeout)
+    except concurrent.futures.TimeoutError:
+        if fut.done():
+            raise                      # the coroutine's own TimeoutError, not ours
+        fut.cancel()
+        raise DeadlineExceeded(f'bridge call exceeded its {timeout:.2f}s bound; coroutine cancelled')
+    except BaseException:
+        fut.cancel()
+        raise
+
+
+
+# ==================================================
+# CONCURRENCY PRIMITIVES — typed outcomes and small, owner-local helpers.
+# Nothing here is a global concurrency manager: each primitive is used by
+# the class that owns the scarce resource or correctness invariant
+# (LLM service -> permits/quota, stores -> conditional commit / claim,
+# adapters -> retry budget / circuit / bulkhead, workflows -> deadline).
+# ==================================================
+
+class ConcurrencyConflict(Exception):
+    """Typed conflict: an OCC version mismatch, a fenced (stale-owner)
+    write, or an idempotency key reused with a different request
+    fingerprint. Never auto-retried against new state without
+    re-evaluating the caller's preconditions."""
+
+
+class AdmissionTimeout(NFRViolationError):
+    """A bounded wait for a permit or quota expired before admission —
+    reject-early backpressure, not an unbounded queue."""
+
+
+class DeadlineExceeded(NFRViolationError):
+    """The request's remaining deadline reached zero."""
+
+
+class CircuitOpenError(NFRViolationError):
+    """A dependency's circuit is open; the call was never attempted."""
+
+
+class BulkheadFullError(NFRViolationError):
+    """A dependency's bulkhead had no free slot within its bounded wait."""
+
+
+# Deterministic failures (validation / policy) are never retried.
+_DETERMINISTIC_ERRORS = (ValueError, TypeError, PermissionError)
+
+
+class PhysicalOutcome(str, Enum):
+    """Typed commit evidence for a material side effect. Logical/model
+    success is not proof of a system-of-record commit. UNKNOWN (e.g. a
+    timeout after the request may have been committed) is reconciled,
+    never blindly retried or dead-lettered."""
+    COMMITTED = 'COMMITTED'
+    NOT_COMMITTED = 'NOT_COMMITTED'
+    UNKNOWN = 'UNKNOWN'
+
+
+def outcome_of(result: Optional[Dict[str, Any]]) -> 'PhysicalOutcome':
+    """Typed outcome of a tool/command result. physical_success stays the
+    boolean view (True only for COMMITTED)."""
+    result = result or {}
+    if result.get('outcome') is not None:
+        return PhysicalOutcome(result['outcome'])
+    return PhysicalOutcome.COMMITTED if result.get('physical_success') else PhysicalOutcome.NOT_COMMITTED
+
+
+class Deadline:
+    """Additive propagation field `deadline`. Absolute on the local
+    monotonic clock; across a process boundary it travels as REMAINING
+    milliseconds (to_remaining_ms / from_remaining_ms), never as a
+    wall-clock time, so clock skew cannot corrupt it. Cancellation is not
+    a field: it propagates through the runtime (asyncio task
+    cancellation / thread interruption)."""
+    HEADER = 'x-e2a-deadline-ms'
+    __slots__ = ('_at',)
+
+    def __init__(self, at_monotonic: float):
+        self._at = at_monotonic
+
+    @classmethod
+    def after(cls, seconds: float) -> 'Deadline':
+        return cls(time.monotonic() + float(seconds))
+
+    @classmethod
+    def from_remaining_ms(cls, ms) -> 'Deadline':
+        return cls.after(float(ms) / 1000.0)
+
+    @classmethod
+    def coerce(cls, value) -> Optional['Deadline']:
+        """None -> None; Deadline -> itself; number -> remaining seconds."""
+        if value is None or isinstance(value, Deadline):
+            return value
+        return cls.after(float(value))
+
+    def remaining(self) -> float:
+        return max(0.0, self._at - time.monotonic())
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self._at
+
+    def bound(self, timeout: Optional[float]) -> float:
+        """min(timeout, remaining) — every bounded wait uses this."""
+        rem = self.remaining()
+        return rem if timeout is None else min(float(timeout), rem)
+
+    def check(self, what: str = 'operation') -> None:
+        if self.expired():
+            raise DeadlineExceeded(f'request deadline exceeded before {what}')
+
+    def to_remaining_ms(self) -> int:
+        return int(self.remaining() * 1000)
+
+
+class ClaimStatus(str, Enum):
+    CLAIMED = 'CLAIMED'                      # caller owns the work; execute it
+    IN_PROGRESS = 'IN_PROGRESS'              # another owner holds an unexpired claim
+    REPLAY = 'REPLAY'                        # already SUCCEEDED; result is the stored one
+    CONFLICT = 'CONFLICT'                    # same key, different request fingerprint
+    RECOVERY_REQUIRED = 'RECOVERY_REQUIRED'  # owner lease expired / outcome UNKNOWN -> reconcile
+    FAILED_FINAL = 'FAILED_FINAL'            # deterministic failure; never re-executed
+
+
+@dataclass
+class ClaimResult:
+    status: 'ClaimStatus'
+    result: Optional[Dict[str, Any]] = None
+    owner: Optional[str] = None
+
+
+@dataclass
+class CommitResult:
+    """Outcome of BaseTransactionalStore.put_if_version()."""
+    status: str                    # COMMITTED | CONFLICT | FENCED
+    version: Optional[int] = None  # new version when COMMITTED
+    current_version: Optional[int] = None  # store's version when CONFLICT
+
+    @property
+    def committed(self) -> bool:
+        return self.status == 'COMMITTED'
+
+
+@dataclass
+class LeaseHandle:
+    """Returned by BaseDistributedLock.acquire(). owner_token proves
+    ownership for renew()/release(); fencing_token is monotonically
+    increasing per key and must accompany any commit a stale (expired)
+    owner could otherwise still land."""
+    key: str
+    owner_token: str
+    fencing_token: int
+    expires_at: float              # monotonic clock
+
+
+# Metric catalogue — names, types and labels defined once. Emitted through
+# BaseObservability's typed emitters (_emit_counter/_emit_histogram/
+# _emit_gauge) or a class's own _emit_metric() hook. tenant_id is a
+# high-cardinality label: aggregate or sample it in the metrics backend.
+E2A_METRICS: Dict[str, Dict[str, Any]] = {
+    'e2a.llm.inflight': {'type': 'gauge', 'unit': 'requests', 'labels': ['pod']},
+    'e2a.llm.permit_wait_seconds': {'type': 'histogram', 'unit': 's', 'labels': ['tenant_id']},
+    'e2a.llm.quota_wait_seconds': {'type': 'histogram', 'unit': 's', 'labels': ['tenant_id']},
+    'e2a.admission.rejected_total': {'type': 'counter', 'unit': '1', 'labels': ['reason']},
+    'e2a.retry.attempts_total': {'type': 'counter', 'unit': '1', 'labels': ['dependency']},
+    'e2a.retry.budget_exhausted_total': {'type': 'counter', 'unit': '1', 'labels': ['dependency']},
+    'e2a.circuit.state': {'type': 'gauge', 'unit': '0=closed,1=half,2=open', 'labels': ['dependency']},
+    'e2a.bulkhead.wait_seconds': {'type': 'histogram', 'unit': 's', 'labels': ['dependency']},
+    'e2a.occ.conflicts_total': {'type': 'counter', 'unit': '1', 'labels': ['store']},
+    'e2a.idempotency.replays_total': {'type': 'counter', 'unit': '1', 'labels': ['status']},
+    'e2a.lease.lost_total': {'type': 'counter', 'unit': '1', 'labels': ['lease']},
+    'e2a.fencing.rejections_total': {'type': 'counter', 'unit': '1', 'labels': ['store']},
+    'e2a.cache.single_flight_followers_total': {'type': 'counter', 'unit': '1', 'labels': ['cache']},
+    'e2a.queue.depth': {'type': 'gauge', 'unit': 'messages', 'labels': ['queue']},
+    'e2a.queue.oldest_age_seconds': {'type': 'gauge', 'unit': 's', 'labels': ['queue']},
+    'e2a.cancellation.cleanup_total': {'type': 'counter', 'unit': '1', 'labels': ['owner']},
+}
 
 
 # ==================================================
@@ -775,6 +1230,51 @@ E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
     _k('prompt_store_url', 'PROMPT_STORE_URL', None, str, 'Workflow / Pipeline', 'BasePromptRegistry.get_prompt()'),
     _k('default_version', 'PROMPT_DEFAULT_VERSION', 'latest', str, 'Workflow / Pipeline', 'BasePromptRegistry.get_prompt()'),
     _k('deployment_strategy', 'DEPLOYMENT_STRATEGY', 'BLUE_GREEN', str, 'Workflow / Pipeline', 'BasePipeline._execute_deployment_rollout()'),
+    # -- Object references added by the concurrency extension --
+    _k('idempotency_store', None, None, str, 'Engines (object references)', 'BaseWorkflow.execute() / BaseOrchestrator.execute() / AIDLCPipelineOrchestrator — the bound BaseIdempotencyStore (atomic claim)'),
+    _k('cache_store', None, None, str, 'Engines (object references)', 'BaseQueryService.fetch() — the bound BaseCacheStore (single-flight get_or_load)'),
+    _k('transactional_store', None, None, str, 'Engines (object references)', 'BaseCommandService._commit_versioned() — the bound BaseTransactionalStore (conditional commit)'),
+    _k('pipeline_state_store', None, None, str, 'Engines (object references)', 'AIDLCPipelineOrchestrator — the bound BaseTransactionalStore (durable phase state)'),
+    # -- Deadlines --
+    _k('request_deadline_seconds', 'REQUEST_DEADLINE_SECONDS', 0.0, float, 'Deadlines', 'BaseWorkflow.execute() / BaseOrchestrator.execute() — origin of the additive deadline field (0 = none)'),
+    # -- LLM service admission (extends the LLM service group) --
+    _k('permit_timeout', 'LLM_PERMIT_TIMEOUT', 5.0, float, 'LLM service', 'bounded wait for the tenant + pod permit — AdmissionTimeout on expiry (also capped by the remaining deadline)'),
+    _k('tenant_idle_evict_seconds', 'LLM_TENANT_IDLE_EVICT_SECONDS', 300.0, float, 'LLM service', 'idle per-tenant permit entries are evicted after this long'),
+    # -- Resilience (retry budget, circuit breaker, bulkhead) — owned by the adapter that calls the dependency --
+    _k('retry_base_backoff', 'RETRY_BASE_BACKOFF', 0.1, float, 'Resilience', 'ResiliencePolicy — full-jitter exponential backoff base (seconds)'),
+    _k('retry_max_backoff', 'RETRY_MAX_BACKOFF', 2.0, float, 'Resilience', 'ResiliencePolicy — backoff ceiling (seconds)'),
+    _k('retry_budget_ratio', 'RETRY_BUDGET_RATIO', 0.2, float, 'Resilience', 'ResiliencePolicy — retry tokens earned per first attempt (caps retry amplification)'),
+    _k('retry_budget_cap', 'RETRY_BUDGET_CAP', 10.0, float, 'Resilience', 'ResiliencePolicy — maximum retry-token balance'),
+    _k('circuit_failure_threshold', 'CIRCUIT_FAILURE_THRESHOLD', 5, int, 'Resilience', 'ResiliencePolicy — consecutive failures that open the circuit'),
+    _k('circuit_reset_seconds', 'CIRCUIT_RESET_SECONDS', 30.0, float, 'Resilience', 'ResiliencePolicy — open duration before a half-open probe'),
+    _k('bulkhead_max_concurrent', 'BULKHEAD_MAX_CONCURRENT', 16, int, 'Resilience', 'ResiliencePolicy — per-dependency in-flight cap (0 = off)'),
+    _k('bulkhead_acquire_timeout', 'BULKHEAD_ACQUIRE_TIMEOUT', 1.0, float, 'Resilience', 'ResiliencePolicy — bounded wait for a bulkhead slot'),
+    # -- Pools and fleet capacity (inputs to validate_capacity()) --
+    _k('db_pool_size', 'DB_POOL_SIZE', 20, int, 'Pools / capacity', 'store adapters — per-instance database connection pool'),
+    _k('http_pool_size', 'HTTP_POOL_SIZE', 50, int, 'Pools / capacity', 'tool / upstream adapters — per-instance HTTP connection pool'),
+    _k('retrieval_pool_size', 'RETRIEVAL_POOL_SIZE', 20, int, 'Pools / capacity', 'BaseRAGPipeline._search_index() adapters — per-instance index connection pool'),
+    _k('fleet_replica_count', 'FLEET_REPLICA_COUNT', 1, int, 'Pools / capacity', 'validate_capacity() — replicas of this service (multiplies per-instance concurrency)'),
+    _k('db_max_connections', 'DB_MAX_CONNECTIONS', 0, int, 'Pools / capacity', 'validate_capacity() — database connection ceiling for the whole fleet (0 = unchecked)'),
+    _k('model_max_inflight', 'MODEL_MAX_INFLIGHT', 0, int, 'Pools / capacity', 'validate_capacity() — provider-side concurrent request ceiling for the whole fleet (0 = unchecked)'),
+    _k('termination_grace_seconds', 'TERMINATION_GRACE_SECONDS', 30.0, float, 'Pools / capacity', 'validate_capacity() — platform SIGTERM-to-SIGKILL window; drain_timeout_seconds must be shorter'),
+    # -- Async workers --
+    _k('worker_concurrency', 'WORKER_CONCURRENCY', 8, int, 'Async workers', 'consumer runtime — in-flight messages per instance'),
+    _k('worker_prefetch', 'WORKER_PREFETCH', 16, int, 'Async workers', 'consumer runtime — broker prefetch / max in-flight window per instance'),
+    _k('drain_timeout_seconds', 'DRAIN_TIMEOUT_SECONDS', 20.0, float, 'Async workers', 'consumer runtime / services — graceful-shutdown drain bound'),
+    # -- Leases --
+    _k('lease_ttl_seconds', 'LEASE_TTL_SECONDS', 60, int, 'Leases', 'BaseOutboxSweeper / BaseReconciliationService — BaseDistributedLock lease TTL'),
+    _k('lease_renew_interval_seconds', 'LEASE_RENEW_INTERVAL_SECONDS', 20, int, 'Leases', 'BaseOutboxSweeper / BaseReconciliationService — renew cadence (must be < lease_ttl_seconds)'),
+    _k('fencing_enabled', 'FENCING_ENABLED', True, _to_bool, 'Leases', 'lease holders pass LeaseHandle.fencing_token to downstream commits'),
+    _k('idempotency_lease_seconds', 'IDEMPOTENCY_LEASE_SECONDS', 300, int, 'Leases', 'BaseIdempotencyStore.claim() — IN_PROGRESS claim expiry; an expired claim needs reconciliation, never blind re-execution'),
+    # -- Cache single-flight --
+    _k('cache_fill_timeout_seconds', 'CACHE_FILL_TIMEOUT_SECONDS', 5.0, float, 'Cache', 'BaseCacheStore.get_or_load() — follower wait for the in-flight fill'),
+    _k('cache_fill_on_timeout', 'CACHE_FILL_ON_TIMEOUT', 'load', str, 'Cache', 'BaseCacheStore.get_or_load() — follower policy on fill timeout: load | stale | raise'),
+    # -- Build admission (AI-DLC) --
+    _k('build_max_inflight', 'BUILD_MAX_INFLIGHT', 4, int, 'Build (AI-DLC)', 'AIDLCPipelineOrchestrator — concurrent builds per instance'),
+    _k('tenant_build_max_inflight', 'TENANT_BUILD_MAX_INFLIGHT', 2, int, 'Build (AI-DLC)', 'AIDLCPipelineOrchestrator — concurrent builds per tenant'),
+    # -- Concurrency observability --
+    _k('slow_wait_threshold_seconds', 'SLOW_WAIT_THRESHOLD_SECONDS', 0.5, float, 'Concurrency observability', 'permit / pool / bulkhead waits above this are logged at WARN'),
+    _k('queue_age_slo_seconds', 'QUEUE_AGE_SLO_SECONDS', 60.0, float, 'Concurrency observability', 'oldest-message age above this is an SLO breach signal'),
 ]}
 
 
@@ -850,6 +1350,219 @@ def env_example() -> str:
         lines.append(f'{c.env}={val}')
     return '\n'.join(lines) + '\n'
 
+
+# ==================================================
+# ResiliencePolicy — retry budget + circuit breaker + bulkhead, as ONE small
+# composition helper owned by the ADAPTER that calls a dependency
+# (BaseToolService, BaseLLMAgentService upstream, retrieval adapters).
+# Not a manager: each adapter instance owns one policy per dependency, so
+# a saturated dependency cannot starve another.
+# ==================================================
+
+class RetryBudget:
+    """Token-deposit retry budget: every first attempt earns `ratio`
+    tokens (capped); every retry spends one. Bounds retry amplification
+    to roughly `ratio` of traffic regardless of failure rate."""
+
+    def __init__(self, ratio: float = 0.2, cap: float = 10.0):
+        self._ratio, self._cap = float(ratio), float(cap)
+        self._tokens = self._cap / 2.0
+        self._lock = threading.Lock()
+
+    def deposit(self) -> None:
+        with self._lock:
+            self._tokens = min(self._cap, self._tokens + self._ratio)
+
+    def withdraw(self) -> bool:
+        with self._lock:
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
+
+    @property
+    def balance(self) -> float:
+        return self._tokens
+
+
+class CircuitBreaker:
+    """closed -> (threshold consecutive failures) -> open -> (reset window)
+    -> half-open (one probe) -> closed on success / open on failure."""
+
+    def __init__(self, failure_threshold: int = 5, reset_seconds: float = 30.0, clock=time.monotonic):
+        self._threshold, self._reset, self._clock = int(failure_threshold), float(reset_seconds), clock
+        self._failures, self._opened_at, self._probing = 0, None, False
+        self._lock = threading.Lock()
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self._opened_at is None:
+                return 'closed'
+            return 'half_open' if self._clock() - self._opened_at >= self._reset else 'open'
+
+    def allow(self) -> bool:
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if self._clock() - self._opened_at >= self._reset and not self._probing:
+                self._probing = True      # exactly one half-open probe
+                return True
+            return False
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures, self._opened_at, self._probing = 0, None, False
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._probing or self._failures >= self._threshold:
+                self._opened_at, self._probing = self._clock(), False
+
+
+class Bulkhead:
+    """Per-dependency in-flight cap with a BOUNDED wait."""
+
+    def __init__(self, max_concurrent: int, name: str = 'dependency'):
+        self.name, self.max_concurrent = name, int(max_concurrent)
+        self._sem = asyncio.Semaphore(self.max_concurrent)
+        self.waiting = 0
+
+    @contextlib.asynccontextmanager
+    async def slot(self, timeout: float):
+        self.waiting += 1
+        try:
+            await asyncio.wait_for(self._sem.acquire(), timeout=max(0.0, timeout))
+        except asyncio.TimeoutError:
+            raise BulkheadFullError(f"bulkhead '{self.name}' full ({self.max_concurrent} in flight)")
+        finally:
+            self.waiting -= 1
+        try:
+            yield
+        finally:
+            self._sem.release()
+
+
+class ResiliencePolicy:
+    """One dependency's retry / circuit / bulkhead state.
+
+    call(fn, deadline=, max_retries=, idempotent=) runs the zero-argument
+    coroutine factory `fn`:
+      * circuit open            -> CircuitOpenError, fn never called
+      * bulkhead full (bounded) -> BulkheadFullError
+      * deterministic failures (ValueError/TypeError/PermissionError) and
+        NFR/deadline errors are never retried
+      * a timeout is retried only when the call is idempotent (a timeout
+        after a possible commit is an UNKNOWN outcome for a material
+        write — never blindly re-sent)
+      * each retry spends one retry-budget token, uses full-jitter
+        exponential backoff and never sleeps past the remaining deadline
+    `emit(name, **fields)` is an optional metrics callback."""
+
+    def __init__(self, name: str, config: Dict[str, Any] = None, kwargs: Dict[str, Any] = None,
+                 bulkhead: bool = True, emit: Callable[..., None] = None):
+        c, k = config or {}, kwargs or {}
+        self.name, self._emit = name, emit
+        self.base = float(resolve_config('retry_base_backoff', c, k))
+        self.max_backoff = float(resolve_config('retry_max_backoff', c, k))
+        self.budget = RetryBudget(resolve_config('retry_budget_ratio', c, k),
+                                  resolve_config('retry_budget_cap', c, k))
+        self.breaker = CircuitBreaker(resolve_config('circuit_failure_threshold', c, k),
+                                      resolve_config('circuit_reset_seconds', c, k))
+        n = int(resolve_config('bulkhead_max_concurrent', c, k))
+        self.bulkhead = Bulkhead(n, name) if (bulkhead and n > 0) else None
+        self.bulkhead_timeout = float(resolve_config('bulkhead_acquire_timeout', c, k))
+        self.stats = {'attempts': 0, 'retries': 0, 'budget_exhausted': 0, 'circuit_rejected': 0}
+
+    def _note(self, event: str, **fields) -> None:
+        if self._emit:
+            self._emit(event, dependency=self.name, **fields)
+
+    async def call(self, fn: Callable[[], Any], *, deadline: Optional[Deadline] = None,
+                   max_retries: int = 0, idempotent: bool = False,
+                   retryable: Callable[[BaseException], bool] = None):
+        if deadline:
+            deadline.check(f'calling {self.name}')
+        if self.bulkhead is None:
+            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable)
+        wait = deadline.bound(self.bulkhead_timeout) if deadline else self.bulkhead_timeout
+        async with self.bulkhead.slot(wait):
+            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable)
+
+    async def __attempts(self, fn, deadline, max_retries, idempotent, retryable):
+        self.budget.deposit()
+        attempt = 0
+        while True:
+            if not self.breaker.allow():
+                self.stats['circuit_rejected'] += 1
+                self._note('circuit_open')
+                raise CircuitOpenError(f"circuit open for '{self.name}'")
+            attempt += 1
+            self.stats['attempts'] += 1
+            try:
+                result = await fn()
+                self.breaker.record_success()
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                is_timeout = isinstance(e, (asyncio.TimeoutError, TimeoutError))
+                structural = isinstance(e, (CircuitOpenError, BulkheadFullError, DeadlineExceeded, AdmissionTimeout))
+                if not isinstance(e, _DETERMINISTIC_ERRORS) and not structural:
+                    self.breaker.record_failure()
+                can_retry = (attempt <= max_retries and not isinstance(e, _DETERMINISTIC_ERRORS)
+                             and not structural and not isinstance(e, NFRViolationError)
+                             and (idempotent or not is_timeout)
+                             and (retryable(e) if retryable else True))
+                if can_retry and not self.budget.withdraw():
+                    self.stats['budget_exhausted'] += 1
+                    self._note('retry_budget_exhausted')
+                    can_retry = False
+                if not can_retry:
+                    raise
+                delay = random.uniform(0.0, min(self.max_backoff, self.base * (2 ** (attempt - 1))))
+                if deadline and deadline.remaining() <= delay:
+                    raise
+                self.stats['retries'] += 1
+                self._note('retry', attempt=attempt, delay=round(delay, 4))
+                await asyncio.sleep(delay)
+
+
+def validate_capacity(config: Dict[str, Any] = None, **kwargs) -> List[str]:
+    """Capacity equation as ONE pure, testable rule over the central
+    registry: replicas x per-instance concurrency must not silently exceed
+    pools, ceilings or the shutdown window. Returns violation strings
+    (empty = consistent). Runs as part of BasePipeline's scaffold-compliance
+    gate and may be called at start-up."""
+    r = lambda key: resolve_config(key, config, kwargs)
+    v: List[str] = []
+    replicas = max(1, int(r('fleet_replica_count')))
+    pod, tenant = int(r('pod_concurrency')), int(r('tenant_concurrency'))
+    workers, prefetch = int(r('worker_concurrency')), int(r('worker_prefetch'))
+    db_pool, http_pool = int(r('db_pool_size')), int(r('http_pool_size'))
+    if workers > db_pool:
+        v.append(f'worker_concurrency ({workers}) exceeds db_pool_size ({db_pool}) per instance')
+    if pod > http_pool:
+        v.append(f'pod_concurrency ({pod}) exceeds http_pool_size ({http_pool}) per instance')
+    if tenant > pod:
+        v.append(f'tenant_concurrency ({tenant}) exceeds pod_concurrency ({pod})')
+    if prefetch < workers:
+        v.append(f'worker_prefetch ({prefetch}) is below worker_concurrency ({workers}); workers would starve')
+    db_max = int(r('db_max_connections'))
+    if db_max and replicas * db_pool > db_max:
+        v.append(f'fleet DB connections {replicas} x {db_pool} = {replicas * db_pool} exceed db_max_connections ({db_max})')
+    model_max = int(r('model_max_inflight'))
+    amplified = replicas * pod * (1.0 + float(r('retry_budget_ratio')))
+    if model_max and amplified > model_max:
+        v.append(f'fleet model concurrency {replicas} x {pod} x (1+retry_budget_ratio) = {amplified:.0f} exceeds model_max_inflight ({model_max})')
+    if int(r('lease_renew_interval_seconds')) >= int(r('lease_ttl_seconds')):
+        v.append('lease_renew_interval_seconds must be shorter than lease_ttl_seconds')
+    if float(r('drain_timeout_seconds')) >= float(r('termination_grace_seconds')):
+        v.append('drain_timeout_seconds must be shorter than termination_grace_seconds')
+    return v
+
+
 # ==================================================
 # Shared propagation helpers (mixed into every class below)
 # ==================================================
@@ -894,7 +1607,13 @@ class _PropagationMixin:
            a mismatch means a sibling process already wrote a newer
            version, so this write is rejected rather than clobbering it.
         OCC and the failed_keys check are deliberately one gate, not two:
-        both answer 'is it still safe to write this item right now?'"""
+        both answer 'is it still safe to write this item right now?'
+
+        ADVISORY ONLY for competing writers: a version compared here can
+        change before the write lands (check-then-write). The AUTHORITY is
+        BaseTransactionalStore.put_if_version(), an atomic conditional
+        commit returning a typed CommitResult. This gate is the cheap
+        local fast-fail in front of it."""
         config = config or {}
         enabled = resolve_config('commit_gate_enabled', config, kwargs)
         if not enabled:
@@ -932,7 +1651,13 @@ class _PropagationMixin:
         same event loop, whatever thread the agent runs on. A FAILED
         inference raises, so the caller's normal except path
         (failed_keys + _handle_error) applies."""
-        return _run_on_bridge_loop(self._infer_async(messages, config, **kwargs))
+        c = config or {}
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        bound = (float(resolve_config('llm_max_latency', c, kwargs)) + float(resolve_config('permit_timeout', c, kwargs))
+                 + float(resolve_config('quota_timeout', c, kwargs)) + 1.0)
+        # slack so the service raises its own typed DeadlineExceeded first
+        timeout = min(bound, deadline.remaining() + 0.5) if deadline else bound
+        return _run_on_bridge_loop(self._infer_async(messages, config, **kwargs), timeout=timeout)
  
 # ==================================================
 # BaseObservability & BaseGovernanceFramework — Foundation classes
@@ -1219,6 +1944,15 @@ def _luhn_valid(candidate: str) -> bool:
     return total % 10 == 0
 
 
+class _TenantPermit:
+    """Per-tenant concurrency cap entry. `active` counts holders AND
+    waiters so an entry in use is never evicted."""
+    __slots__ = ('sem', 'cap', 'active', 'last_used')
+
+    def __init__(self, cap: int):
+        self.sem, self.cap, self.active, self.last_used = asyncio.Semaphore(cap), cap, 0, time.monotonic()
+
+
 class BaseLLMAgentService(ABC, _PropagationMixin):
     """E2A LLM Inference Microservice — the single, capacity-governed
     boundary between every agent archetype (BaseAgent, LLMOnlyAgent,
@@ -1252,7 +1986,15 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         replicas = max(1, int(self._resolve_param('llm_replica_count', self._config, kwargs)))
         self._pod_semaphore = asyncio.Semaphore(
             max(1, int(self._resolve_param('pod_concurrency', self._config, kwargs))))
-        self._tenant_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._tenant_permits: Dict[str, _TenantPermit] = {}
+        self._inflight = 0
+        self._draining = False
+        self.stats: Dict[str, float] = {
+            'permit_wait_total': 0.0, 'quota_wait_total': 0.0, 'permit_timeouts': 0,
+            'quota_timeouts': 0, 'quota_rejections': 0, 'cancelled_cleanups': 0, 'peak_inflight': 0}
+        # circuit breaker around the upstream call; permits already bound
+        # concurrency, so the policy runs without its own bulkhead
+        self._resilience = ResiliencePolicy('llm-upstream', self._config, kwargs, bulkhead=False)
         # Per-pod share of the fleet quota: configured limit / replica count.
         self._max_rpm = float(self._resolve_param('max_rpm', self._config, kwargs)) / replicas
         self._max_tpm = float(self._resolve_param('max_tpm', self._config, kwargs)) / replicas
@@ -1269,12 +2011,16 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             correlation_id: str = None, io_config: Dict[str, Any] = None,
             idempotency_key: str = None, tenant_id: str = None,
             message_log: List[dict] = None, failed_keys: List[str] = None,
-            **kwargs) -> Dict[str, Any]:
+            deadline: Any = None, **kwargs) -> Dict[str, Any]:
         """Template method. Fixed lifecycle: sanitise -> semantic cache ->
-        context budget -> KV prefix cache -> tool schemas -> quota
-        admission -> (tenant + pod) concurrency permit -> upstream call
-        under the latency deadline -> output framing -> egress DLP ->
-        usage accounting. Never raises a request failure past this
+        context budget -> KV prefix cache -> tool schemas -> (tenant + pod)
+        concurrency permit [bounded wait] -> RPM/TPM quota admission
+        [bounded wait] -> upstream call under min(llm_max_latency, remaining
+        deadline) behind a circuit breaker -> output framing -> egress DLP
+        -> usage accounting. `deadline` is the additive propagation field
+        (a Deadline or remaining seconds): every wait is bounded by it, and
+        permits and quota are released in finally-style cleanup on failure,
+        deadline AND cancellation. Never raises a request failure past this
         boundary: errors become {'status': 'FAILED'} plus a failed_keys
         entry, like every other E2A class. Always returns the E2A
         physical_success contract. kwargs (model_id, temperature, tools,
@@ -1290,9 +2036,15 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         common = dict(correlation_id=correlation_id, io_config=io_config,
                       tenant_id=tenant_id, message_log=message_log)
         start = time.time()
-        admitted = 0
+        deadline = Deadline.coerce(deadline)
+        quota, dispatched = None, False
+        note = lambda event, **f: self._log(message_log, correlation_id, 'WARN', event, **f)
         payload: Dict[str, Any] = {}
         try:
+            if self._draining:
+                raise AdmissionTimeout('E2A service draining: not accepting new inference')
+            if deadline:
+                deadline.check('inference')
             self.__sanitize_prompts(messages)
 
             tools = kwargs.get('tools')
@@ -1320,24 +2072,33 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             model_id = self._resolve_param('model_id', cfg, kwargs)
             temperature = self._resolve_param('temperature', cfg, kwargs)
 
-            admitted = sum(self._estimate_tokens(m) for m in prepared) + max_out
-            await self.__admit_quota(admitted, tenant_id, cfg, kwargs)
+            estimate = sum(self._estimate_tokens(m) for m in prepared) + max_out
+            async with self.__concurrency_permit(tenant_id, cfg, kwargs, deadline, note):
+                quota = await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline)
+                up_timeout = float(self._resolve_param('llm_max_latency', cfg, kwargs))
+                if deadline:
+                    up_timeout = deadline.bound(up_timeout)
 
-            deadline = float(self._resolve_param('llm_max_latency', cfg, kwargs))
-            async with self.__concurrency_permit(tenant_id, cfg, kwargs):
-                try:
-                    raw = await asyncio.wait_for(
-                        self._dispatch_upstream_call(
-                            messages=prepared, model_id=model_id, temperature=temperature,
-                            max_tokens=max_out, tools=compiled_tools,
-                            stop_sequences=stop_sequences, cache_handle=cache_handle,
-                            config=cfg, **common,
-                            **self.__extras(kwargs, 'model_id', 'temperature', 'max_tokens',
-                                            'tools', 'stop_sequences', 'cache_handle', 'config')),
-                        timeout=deadline)
-                except asyncio.TimeoutError:
-                    raise NFRViolationError(
-                        f'LLM inference latency SLO breached: > {deadline:.2f}s')
+                async def _upstream():
+                    nonlocal dispatched
+                    dispatched = True
+                    try:
+                        return await asyncio.wait_for(
+                            self._dispatch_upstream_call(
+                                messages=prepared, model_id=model_id, temperature=temperature,
+                                max_tokens=max_out, tools=compiled_tools,
+                                stop_sequences=stop_sequences, cache_handle=cache_handle,
+                                config=cfg, **common,
+                                **self.__extras(kwargs, 'model_id', 'temperature', 'max_tokens',
+                                                'tools', 'stop_sequences', 'cache_handle', 'config')),
+                            timeout=up_timeout)
+                    except asyncio.TimeoutError:
+                        if deadline and deadline.expired():
+                            raise DeadlineExceeded('request deadline exceeded during the upstream call')
+                        raise NFRViolationError(
+                            f'LLM inference latency SLO breached: > {up_timeout:.2f}s')
+
+                raw = await self._resilience.call(_upstream, deadline=deadline)
 
             payload = self._format_and_validate_output(
                 raw, kwargs.get('response_schema'), model_id, cache_handle is not None,
@@ -1346,16 +2107,23 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             payload['metadata'] = {'model_id': model_id, 'tokens_used': payload['tokens_used']}
             if self._resolve_param('dlp_enabled', cfg, kwargs) and 'text' in payload:
                 payload['text'], payload['dlp_redactions'] = self._redact_sensitive(payload['text'])
-            await self.__refund_quota(admitted - payload['tokens_used'])
-            admitted = 0
+            self.__settle_quota(quota, dispatched, used=payload['tokens_used'])
+            quota = None
             if use_cache and payload.get('physical_success') and 'tool_calls' not in payload:
                 await self._store_semantic_cache(
                     messages, payload, cfg, tenant_id=tenant_id, **self.__extras(kwargs))
         except DehydrationInterrupt:
+            self.__settle_quota(quota, dispatched, used=None)
+            raise
+        except asyncio.CancelledError:
+            # BaseException: the `except Exception` below never sees it, so
+            # the admitted quota MUST be returned here (cancellation cleanup)
+            self.__settle_quota(quota, dispatched, used=None)
+            self.stats['cancelled_cleanups'] += 1
+            self._emit_metric('counter', 'e2a.cancellation.cleanup_total', 1, {'owner': 'llm_service'})
             raise
         except Exception as e:
-            if admitted:
-                await self.__refund_quota(admitted)
+            self.__settle_quota(quota, dispatched, used=None)
             key = idempotency_key or correlation_id
             if key not in failed_keys:
                 failed_keys.append(key)
@@ -1379,7 +2147,7 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             correlation_id: str = None, io_config: Dict[str, Any] = None,
             idempotency_key: str = None, tenant_id: str = None,
             message_log: List[dict] = None, failed_keys: List[str] = None,
-            **kwargs) -> AsyncGenerator[str, None]:
+            deadline: Any = None, **kwargs) -> AsyncGenerator[str, None]:
         """Streaming sibling of process_inference(). Same admission
         (sanitise, context budget, quota, tenant + pod permit) and the
         same failure bookkeeping, then yields DLP-screened text chunks.
@@ -1397,18 +2165,26 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             raise ValueError('tenant_id is required for LLM inference')
         common = dict(correlation_id=correlation_id, io_config=io_config,
                       tenant_id=tenant_id, message_log=message_log)
-        start, emitted, admitted = time.time(), 0, 0
+        start, emitted = time.time(), 0
+        deadline = Deadline.coerce(deadline)
+        quota, dispatched, completed = None, False, False
+        note = lambda event, **f: self._log(message_log, correlation_id, 'WARN', event, **f)
         try:
+            if self._draining:
+                raise AdmissionTimeout('E2A service draining: not accepting new inference')
+            if deadline:
+                deadline.check('stream inference')
             self.__sanitize_prompts(messages)
             prepared = self._manage_context_budget(
                 messages, self._resolve_param('context_budget', cfg, kwargs),
                 kwargs.get('reasoning_budget'), cfg, **common)
             max_out = int(self._resolve_param('max_output_tokens', cfg, kwargs))
-            admitted = sum(self._estimate_tokens(m) for m in prepared) + max_out
-            await self.__admit_quota(admitted, tenant_id, cfg, kwargs)
+            estimate = sum(self._estimate_tokens(m) for m in prepared) + max_out
             holdback = int(self._resolve_param('dlp_holdback_chars', cfg, kwargs))
             dlp_on = self._resolve_param('dlp_enabled', cfg, kwargs)
-            async with self.__concurrency_permit(tenant_id, cfg, kwargs):
+            async with self.__concurrency_permit(tenant_id, cfg, kwargs, deadline, note):
+                quota = await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline)
+                dispatched = True
                 raw_stream = self._dispatch_upstream_stream(
                     messages=prepared,
                     model_id=self._resolve_param('model_id', cfg, kwargs),
@@ -1416,9 +2192,16 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                     max_tokens=max_out, config=cfg, **common,
                     **self.__extras(kwargs, 'model_id', 'temperature', 'max_tokens', 'config'))
                 async for chunk in self.__stream_with_dlp(raw_stream, holdback, dlp_on):
+                    if deadline and deadline.expired():
+                        raise DeadlineExceeded('request deadline exceeded mid-stream')
                     emitted += len(chunk)
                     yield chunk
+                completed = True
         except DehydrationInterrupt:
+            raise
+        except asyncio.CancelledError:
+            self.stats['cancelled_cleanups'] += 1
+            self._emit_metric('counter', 'e2a.cancellation.cleanup_total', 1, {'owner': 'llm_service'})
             raise
         except Exception as e:
             key = idempotency_key or correlation_id
@@ -1427,6 +2210,8 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             self._handle_error(e, messages, cfg, **common, failed_keys=failed_keys)
             raise
         finally:
+            # runs on completion, failure, cancellation and aclose()
+            self.__settle_quota(quota, dispatched, used=(emitted // 4 + 1) if completed else None)
             self._log(message_log, correlation_id, 'INFO', 'llm_stream_complete',
                       latency=round(time.time() - start, 3), chars_emitted=emitted)
 
@@ -1505,6 +2290,11 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         applies in addition."""
         return True
 
+    async def _release_shared_quota(self, tokens, tenant_id, config, **kwargs) -> None:
+        """Hook: return fleet-wide quota taken by _acquire_shared_quota()
+        when local admission then failed. Default no-op."""
+        return None
+
     def _format_and_validate_output(self, raw, response_schema, model_id, cached_hit,
                                     correlation_id, tenant_id, config, **kwargs):
         out: Dict[str, Any] = {
@@ -1575,50 +2365,160 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         return max(1, sum(self._estimate_tokens(m) for m in prepared)
                    + len(str((raw or {}).get('text', ''))) // 4)
 
-    def __concurrency_permit(self, tenant_id, config, kwargs):
-        """Tenant-fairness cap (optional) then the pod semaphore."""
-        stack = contextlib.AsyncExitStack()
-        service = self
+    def _emit_metric(self, kind: str, name: str, value: float, dimensions: Dict[str, Any] = None) -> None:
+        """Hook (default no-op): forward a metric from the E2A_METRICS
+        catalogue to BaseObservability's typed emitters / the metrics
+        backend. kind: counter | histogram | gauge."""
 
-        class _Permit:
-            async def __aenter__(_self):
-                cap = int(service._resolve_param('tenant_concurrency', config, kwargs))
-                if cap > 0:
-                    sem = service._tenant_semaphores.setdefault(tenant_id, asyncio.Semaphore(cap))
-                    await stack.enter_async_context(sem)
-                await stack.enter_async_context(service._pod_semaphore)
+    def __observe_wait(self, kind: str, waited: float, tenant_id: str, note=None) -> None:
+        self.stats[f'{kind}_wait_total'] += waited
+        self._emit_metric('histogram', f'e2a.llm.{kind}_wait_seconds', waited, {'tenant_id': tenant_id})
+        slow = float(self._resolve_param('slow_wait_threshold_seconds', self._config, {}))
+        if note and waited >= slow:
+            note('llm_slow_wait', kind=kind, waited=round(waited, 3))
 
-            async def __aexit__(_self, *exc):
-                return await stack.__aexit__(*exc)
-        return _Permit()
+    @property
+    def ready(self) -> bool:
+        """Readiness signal: False once drain() has started, so the
+        platform stops routing new traffic before in-flight work ends."""
+        return not self._draining
 
-    async def __admit_quota(self, tokens, tenant_id, config, kwargs) -> None:
-        """Dual token bucket (requests/min and tokens/min). Fails fast
-        with NFRViolationError after quota_timeout rather than queueing
-        a caller indefinitely."""
+    async def drain(self, timeout: float = None, config: Dict[str, Any] = None) -> bool:
+        """Graceful shutdown: flip readiness, reject new inference, wait up
+        to drain_timeout_seconds (which must be shorter than the platform's
+        SIGTERM-to-SIGKILL window — see validate_capacity()) for in-flight
+        work. Returns True if everything finished; the caller cancels the
+        remainder otherwise, and cancellation cleanup releases their
+        permits and quota."""
+        self._draining = True
+        limit = float(timeout if timeout is not None
+                      else self._resolve_param('drain_timeout_seconds', {**self._config, **(config or {})}, {}))
+        end = time.monotonic() + limit
+        while self._inflight > 0 and time.monotonic() < end:
+            await asyncio.sleep(0.01)
+        return self._inflight == 0
+
+    @property
+    def inflight(self) -> int:
+        """Requests currently holding a pod permit (gauge e2a.llm.inflight)."""
+        return self._inflight
+
+    async def __bounded_acquire(self, sem, timeout, deadline, what) -> None:
+        if not sem.locked():
+            await sem.acquire()
+            return
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=max(0.0, timeout))
+        except asyncio.TimeoutError:
+            self.stats['permit_timeouts'] += 1
+            self._emit_metric('counter', 'e2a.admission.rejected_total', 1, {'reason': 'permit_timeout'})
+            if deadline and deadline.expired():
+                raise DeadlineExceeded(f'request deadline exceeded waiting for the {what}')
+            raise AdmissionTimeout(f'E2A Admission Timeout: no {what} within {max(0.0, timeout):.2f}s')
+
+    def __tenant_entry(self, tenant_id, cap, config, kwargs) -> _TenantPermit:
+        now = time.monotonic()
+        evict = float(self._resolve_param('tenant_idle_evict_seconds', config, kwargs))
+        for k in [k for k, e in self._tenant_permits.items() if e.active == 0 and now - e.last_used > evict]:
+            del self._tenant_permits[k]          # idle tenants do not accumulate
+        entry = self._tenant_permits.get(tenant_id)
+        if entry is None or (entry.cap != cap and entry.active == 0):
+            entry = self._tenant_permits[tenant_id] = _TenantPermit(cap)   # picks up a changed cap once idle
+        return entry
+
+    @contextlib.asynccontextmanager
+    async def __concurrency_permit(self, tenant_id, config, kwargs, deadline=None, note=None):
+        """Optional tenant-fairness cap, then the pod semaphore. The WAIT is
+        bounded by min(permit_timeout, remaining deadline); nothing is
+        queued indefinitely. Always released, including on cancellation."""
+        timeout = float(self._resolve_param('permit_timeout', config, kwargs))
+        budget = deadline.bound(timeout) if deadline else timeout
+        t0 = time.monotonic()
+        entry, tenant_held = None, False
+        try:
+            cap = int(self._resolve_param('tenant_concurrency', config, kwargs))
+            if cap > 0:
+                entry = self.__tenant_entry(tenant_id, cap, config, kwargs)
+                entry.active += 1
+                await self.__bounded_acquire(entry.sem, budget - (time.monotonic() - t0), deadline, 'tenant permit')
+                tenant_held = True
+            await self.__bounded_acquire(self._pod_semaphore, budget - (time.monotonic() - t0), deadline, 'pod permit')
+        except BaseException:
+            if tenant_held:
+                entry.sem.release()
+            if entry:
+                entry.active -= 1
+                entry.last_used = time.monotonic()
+            raise
+        self.__observe_wait('permit', time.monotonic() - t0, tenant_id, note)
+        self._inflight += 1
+        self.stats['peak_inflight'] = max(self.stats['peak_inflight'], self._inflight)
+        self._emit_metric('gauge', 'e2a.llm.inflight', self._inflight, {})
+        try:
+            yield
+        finally:
+            self._inflight -= 1
+            self._pod_semaphore.release()
+            if tenant_held:
+                entry.sem.release()
+            if entry:
+                entry.active -= 1
+                entry.last_used = time.monotonic()
+
+    async def __admit_quota(self, tokens, tenant_id, config, kwargs, deadline=None):
+        """Dual token bucket (requests/min and tokens/min). Fails fast with
+        a typed AdmissionTimeout after min(quota_timeout, remaining
+        deadline) rather than queueing a caller indefinitely. The wait is
+        computed from the refill rate, not busy-polled. Returns the
+        (rpm_units, tpm_tokens) actually consumed, for settlement."""
         timeout = float(self._resolve_param('quota_timeout', config, kwargs))
+        budget = deadline.bound(timeout) if deadline else timeout
         start = time.monotonic()
         if not await self._acquire_shared_quota(tokens, tenant_id, config):
-            raise NFRViolationError('E2A Quota Exhaustion: shared fleet quota denied.')
-        while True:
-            async with self._bucket_lock:
-                now = time.monotonic()
-                elapsed, self._last_bucket_update = now - self._last_bucket_update, now
-                self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + elapsed * self._max_rpm / 60.0)
-                self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + elapsed * self._max_tpm / 60.0)
-                if self._rpm_tokens >= 1.0 and self._tpm_tokens >= min(tokens, self._max_tpm):
-                    self._rpm_tokens -= 1.0
-                    self._tpm_tokens -= min(tokens, self._max_tpm)
-                    return
-            if time.monotonic() - start > timeout:
-                raise NFRViolationError(
-                    'E2A Quota Exhaustion: timed out waiting for RPM/TPM quota.')
-            await asyncio.sleep(0.02)
+            self.stats['quota_rejections'] += 1
+            self._emit_metric('counter', 'e2a.admission.rejected_total', 1, {'reason': 'shared_quota'})
+            raise AdmissionTimeout('E2A Quota Exhaustion: shared fleet quota denied.')
+        need_tpm = min(tokens, self._max_tpm)
+        try:
+            while True:
+                async with self._bucket_lock:
+                    now = time.monotonic()
+                    elapsed, self._last_bucket_update = now - self._last_bucket_update, now
+                    self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + elapsed * self._max_rpm / 60.0)
+                    self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + elapsed * self._max_tpm / 60.0)
+                    if self._rpm_tokens >= 1.0 and self._tpm_tokens >= need_tpm:
+                        self._rpm_tokens -= 1.0
+                        self._tpm_tokens -= need_tpm
+                        self.__observe_wait('quota', time.monotonic() - start, tenant_id)
+                        return (1.0, need_tpm)
+                    rpm_rate, tpm_rate = self._max_rpm / 60.0, self._max_tpm / 60.0
+                    wait = max((1.0 - self._rpm_tokens) / rpm_rate if (self._rpm_tokens < 1.0 and rpm_rate > 0) else 0.0,
+                               (need_tpm - self._tpm_tokens) / tpm_rate if (self._tpm_tokens < need_tpm and tpm_rate > 0) else 0.0)
+                remaining = budget - (time.monotonic() - start)
+                if remaining <= 0 or wait == float('inf'):
+                    self.stats['quota_timeouts'] += 1
+                    self._emit_metric('counter', 'e2a.admission.rejected_total', 1, {'reason': 'quota_timeout'})
+                    if deadline and deadline.expired():
+                        raise DeadlineExceeded('request deadline exceeded waiting for RPM/TPM quota')
+                    raise AdmissionTimeout('E2A Quota Exhaustion: timed out waiting for RPM/TPM quota.')
+                await asyncio.sleep(max(0.005, min(wait, remaining, 1.0)))
+        except BaseException:
+            await self._release_shared_quota(tokens, tenant_id, config)   # local admission failed: give the fleet quota back
+            raise
 
-    async def __refund_quota(self, tokens) -> None:
-        if tokens > 0:
-            async with self._bucket_lock:
-                self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + tokens)
+    def __settle_quota(self, quota, dispatched, used) -> None:
+        """Return admitted-but-unused quota. Synchronous on purpose: it must
+        run on the cancellation path too. RPM is returned only if the call
+        never reached the upstream; tokens are returned for the unused part
+        (all of it when the outcome is a failure/cancellation)."""
+        if not quota:
+            return
+        rpm, tpm = quota
+        if not dispatched:
+            self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + rpm)
+        refund = tpm if used is None else max(0, tpm - used)
+        if refund > 0:
+            self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + refund)
 
     async def __stream_with_dlp(self, raw_stream, holdback, enabled):
         """Hold back the trailing `holdback` characters so a sensitive
@@ -1781,12 +2681,27 @@ class BaseWorkflow(ABC, _PropagationMixin):
         correlation_id = kwargs.get(
             'correlation_id', state.get('correlation_id', str(uuid.uuid4())))
         io_config = self._resolve_io_config(config, **kwargs)
+        deadline = self.__resolve_deadline(config, kwargs)
         idempotency_key = self.__resolve_idempotency(state, config, **kwargs)
         message_log: List[dict] = []
         failed_keys: List[str] = []
         state['tenant_id'] = tenant_id
         state['correlation_id'] = correlation_id
         state['idempotency_key'] = idempotency_key
+        # Atomic claim: exactly one caller owns a material request. A
+        # duplicate gets a typed outcome (REPLAYED / IN_PROGRESS / CONFLICT /
+        # RECOVERY_REQUIRED / FAILED_FINAL), never a second execution.
+        store = config.get('idempotency_store')
+        owned, dehydrated, last_error = False, False, None
+        if isinstance(store, BaseIdempotencyStore) and self._requires_idempotency_claim(state, config, **kwargs):
+            claim = store.claim(
+                idempotency_key, config, tenant_id=tenant_id, owner=correlation_id,
+                fingerprint=self._request_fingerprint(state, config, **kwargs),
+                lease_seconds=int(resolve_config('idempotency_lease_seconds', config, kwargs)),
+                ttl_seconds=int(resolve_config('idempotency_ttl_seconds', config, kwargs)))
+            if claim.status != ClaimStatus.CLAIMED:
+                return self.__short_circuit(state, claim, message_log, correlation_id, config)
+            owned = True
         try:
             workflow = self._build_workflow(
                 config, correlation_id=correlation_id, io_config=io_config,
@@ -1804,11 +2719,13 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 state, config, correlation_id=correlation_id,
                 io_config=io_config, idempotency_key=idempotency_key,
                 tenant_id=tenant_id, message_log=message_log,
-                failed_keys=failed_keys, **kwargs)
+                failed_keys=failed_keys, deadline=deadline, **kwargs)
         except DehydrationInterrupt as d:
             self._log(message_log, correlation_id, 'INFO', 'workflow_dehydrated', reason=str(d))
             state['status'] = 'AWAITING_WEBHOOK'
+            dehydrated = True
         except Exception as e:
+            last_error = e
             failed_keys.append(idempotency_key)
             self._handle_error(e, state, config, correlation_id=correlation_id,
                                 message_log=message_log,
@@ -1819,6 +2736,9 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 obs_engine.record_telemetry(message_log, correlation_id, config, tenant_id=tenant_id)
             else:
                 self._flush_logs(message_log, config)  # fallback when no engine configured
+            if owned:
+                self.__settle_claim(store, idempotency_key, tenant_id, correlation_id, state,
+                                    failed_keys, dehydrated, last_error, config)
             if failed_keys:
                 self._send_to_dlq(failed_keys, config)
             state['message_log'] = message_log
@@ -1846,28 +2766,78 @@ class BaseWorkflow(ABC, _PropagationMixin):
     def _handle_error(self, error, state, config=None, **kwargs):
         pass
  
+    # PROTECTED hooks with defaults — a subclass overrides only to specialise
+    def _requires_idempotency_claim(self, state, config=None, **kwargs) -> bool:
+        """Hook: does this request carry a MATERIAL effect (a write /
+        side effect that must happen at most once)? Default True. A
+        workflow with read-only or purely generative intents overrides it
+        so those are not replayed from a stored answer."""
+        return True
+
+    def _request_fingerprint(self, state, config=None, **kwargs) -> str:
+        """Stable hash of the request's business content. The same
+        idempotency key with a different fingerprint is a CONFLICT, never a
+        replay. Volatile/propagation fields are excluded."""
+        volatile = {'correlation_id', 'idempotency_key', 'message_log', 'failed_keys', 'deadline',
+                    'status', 'response', 'outcome', 'cumulative_tokens_used', 'trace_context'}
+        body = {k: v for k, v in state.items() if k not in volatile}
+        return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
+    def _replayable_result(self, state, config=None, **kwargs) -> Dict[str, Any]:
+        """What a duplicate caller gets back on REPLAY. Taken AFTER egress
+        redaction, so a stored result never re-exposes redacted fields."""
+        return {k: state[k] for k in ('response', 'outcome', 'cumulative_tokens_used') if k in state}
+
+    def _physical_outcome(self, state, config=None, **kwargs) -> Optional['PhysicalOutcome']:
+        """Typed commit evidence for the request, or None when the request
+        had no material side effect. Default reads state['outcome'] (set by
+        the agent from a tool's typed result)."""
+        o = state.get('outcome')
+        if o is None and isinstance(state.get('response'), dict):
+            o = state['response'].get('outcome')
+        return PhysicalOutcome(o) if o else None
+
     # PRIVATE — base-owned, never overridden
+    def __resolve_deadline(self, config, kwargs) -> Optional['Deadline']:
+        d = kwargs.pop('deadline', None)
+        if d is not None:
+            return Deadline.coerce(d)
+        secs = float(resolve_config('request_deadline_seconds', config, kwargs))
+        return Deadline.after(secs) if secs > 0 else None
+
     def __resolve_idempotency(self, state, config=None, **kwargs) -> str:
-        """1. Client-supplied key wins if present and well-formed.
-        2. A matching, non-expired store entry means 'retain existing'
-           (this is a replay). 3. Otherwise mint a new key via the
-        subclass's domain logic and persist it before returning."""
-        config = config or {}
+        """Client-supplied key wins; otherwise the subclass's domain logic
+        mints one. Resolution only DERIVES the key — ownership is the
+        atomic claim in execute(), never a lookup-then-persist."""
         client_key = kwargs.get('idempotency_key', state.get('idempotency_key'))
-        if client_key:
-            existing = self.__lookup_idempotency_store(client_key, config)
-            if existing and not existing.get('expired'):
-                return existing['idempotency_key']
-        new_key = self._generate_idempotency_key(state, config, **kwargs)
-        self.__persist_idempotency_store(new_key, config)
-        return new_key
- 
-    def __lookup_idempotency_store(self, key, config=None):
-        return None  # DynamoDB/Redis lookup via config['idempotency_store_url']
- 
-    def __persist_idempotency_store(self, key, config=None):
-        pass  # persisted with TTL = config['idempotency_ttl_seconds']
- 
+        return client_key if client_key else self._generate_idempotency_key(state, config, **kwargs)
+
+    def __short_circuit(self, state, claim, message_log, correlation_id, config):
+        st = {ClaimStatus.REPLAY: 'REPLAYED', ClaimStatus.IN_PROGRESS: 'IN_PROGRESS',
+              ClaimStatus.CONFLICT: 'CONFLICT', ClaimStatus.RECOVERY_REQUIRED: 'RECOVERY_REQUIRED',
+              ClaimStatus.FAILED_FINAL: 'FAILED_FINAL'}[claim.status]
+        state['status'] = st
+        state['idempotency_status'] = claim.status.value
+        if claim.status == ClaimStatus.REPLAY and claim.result:
+            state.update({k: v for k, v in claim.result.items() if k in ('response', 'outcome', 'cumulative_tokens_used')})
+            state['replayed'] = True
+        self._log(message_log, correlation_id, 'INFO', 'idempotent_short_circuit', claim_status=claim.status.value)
+        self._flush_logs(message_log, config)
+        state['message_log'], state['failed_keys'] = message_log, []
+        return state
+
+    def __settle_claim(self, store, key, tenant_id, owner, state, failed_keys, dehydrated, error, config):
+        kw = dict(config=config, tenant_id=tenant_id, owner=owner)
+        outcome = self._physical_outcome(state, config)
+        if dehydrated:
+            store.fail(key, retryable=True, **kw)            # paused, not failed: claimable again on resume
+        elif outcome == PhysicalOutcome.UNKNOWN:
+            store.fail(key, retryable=False, outcome=PhysicalOutcome.UNKNOWN, **kw)   # parked for reconciliation
+        elif failed_keys:
+            store.fail(key, retryable=not isinstance(error, _DETERMINISTIC_ERRORS), **kw)
+        else:
+            store.complete(key, self._replayable_result(state, config), **kw)
+
 # ==================================================
 # BaseRAGPipeline
 # ==================================================
@@ -2014,15 +2984,51 @@ class BaseToolService(ABC, _PropagationMixin):
     def _validate_input(self, payload, config=None, **kwargs):
         """kwargs: schema, required_fields"""
  
-    # PRIVATE — framework owns HTTP mechanics
+    # PRIVATE — framework owns HTTP mechanics, resilience and outcome typing
+    def _resilience_policy(self, config=None, kwargs=None) -> 'ResiliencePolicy':
+        """One ResiliencePolicy (retry budget, circuit, bulkhead) per tool
+        service instance = per dependency, so one slow dependency saturates
+        only its own bulkhead."""
+        pol = self.__dict__.get('_e2a_policy')
+        if pol is None:
+            pol = self.__dict__['_e2a_policy'] = ResiliencePolicy(type(self).__name__, config, kwargs)
+        return pol
+
     async def __http_post(self, endpoint, body, config=None, **kwargs):
-        timeout = resolve_config('timeout', config, kwargs)
-        retries = resolve_config('retries', config, kwargs)
+        timeout = float(resolve_config('timeout', config, kwargs))
+        retries = int(resolve_config('retries', config, kwargs))
         token = resolve_config('auth_token', config, kwargs)
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        # A call is replay-safe only with an idempotency key (or an explicit
+        # safe_to_retry for reads); only then may a timeout be retried.
+        replay_safe = bool(kwargs.get('idempotency_key')) or bool(kwargs.get('safe_to_retry'))
+
+        async def attempt():
+            t = deadline.bound(timeout) if deadline else timeout
+            return await asyncio.wait_for(
+                self._send_request(endpoint, body, token=token, timeout=t, config=config, **kwargs),
+                timeout=t)
+        try:
+            result = await self._resilience_policy(config, kwargs).call(
+                attempt, deadline=deadline, max_retries=retries if replay_safe else 0,
+                idempotent=replay_safe)
+        except (asyncio.TimeoutError, TimeoutError):
+            # The request may or may not have been committed: typed UNKNOWN,
+            # never a plain failure that a retry would re-execute.
+            return {'status': 'UNKNOWN', 'endpoint': endpoint, 'physical_success': False,
+                    'outcome': PhysicalOutcome.UNKNOWN,
+                    'error': 'timeout after the request may have been committed; reconcile, do not blindly retry'}
         # physical_success reflects the real network/API outcome —
         # callers must check this, never an agent's narrative about it.
-        return {'status': 'ok', 'endpoint': endpoint, 'physical_success': True}  # aiohttp/httpx call
- 
+        result.setdefault('outcome', PhysicalOutcome.COMMITTED if result.get('physical_success') else PhysicalOutcome.NOT_COMMITTED)
+        return result
+
+    async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **kwargs):
+        """Protected transport hook (aiohttp/httpx call in a real subclass).
+        Return {'status', 'physical_success': bool, ...}; raise on
+        transport failure. Default is the reference stub."""
+        return {'status': 'ok', 'endpoint': endpoint, 'physical_success': True}
+
 class RestToolService(BaseToolService):
     """Classic REST/HTTP tool."""
  
@@ -2165,9 +3171,20 @@ def _get_tool_service(tool_name: str, config: Dict[str, Any] = None,
     entry = registry.get(tool_name, {})
     transport = kwargs.get('transport') or entry.get(
         'transport', resolve_config('default_transport', config, kwargs))
-    if transport == 'mcp':
-        return MCPToolService()
-    return RestToolService()
+    # One long-lived instance per (transport, tool): its ResiliencePolicy
+    # (retry budget, circuit, bulkhead) must be SHARED by every call to the
+    # same dependency — a fresh instance per request would give each
+    # request its own, empty breaker and budget.
+    cache_key = (transport, tool_name)
+    with _TOOL_SERVICE_LOCK:
+        svc = _TOOL_SERVICE_CACHE.get(cache_key)
+        if svc is None:
+            svc = _TOOL_SERVICE_CACHE[cache_key] = MCPToolService() if transport == 'mcp' else RestToolService()
+    return svc
+
+
+_TOOL_SERVICE_CACHE: Dict[Any, 'BaseToolService'] = {}
+_TOOL_SERVICE_LOCK = threading.Lock()
  
 # ======================================================================
 # LLMOnlyAgent — abstract peer to BaseAgent, BaseRAGPipeline, and
@@ -2316,70 +3333,272 @@ class BasePromptRegistry(ABC):
 # ==================================================
  
 class BaseTransactionalStore(ABC):
-    """Vendor-neutral durable read/write contract."""
- 
+    """Vendor-neutral durable read/write contract. put_if_version() is the
+    AUTHORITY for competing writers (optimistic concurrency): a version
+    check done earlier (e.g. _commit_gate's expected_version fast-fail) is
+    advisory, because the state can change between check and write; only a
+    conditional commit inside the store is atomic."""
+
     @abstractmethod
     def get(self, key: str, config: Dict[str, Any] = None, **kwargs) -> Optional[Dict[str, Any]]:
         """kwargs: table_or_collection_name."""
- 
+
     @abstractmethod
     def put(self, key: str, value: Dict[str, Any], config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: table_or_collection_name."""
- 
+        """Unconditional write — for records with a single writer by
+        construction. Competing writers use put_if_version().
+        kwargs: table_or_collection_name."""
+
     @abstractmethod
     def delete(self, key: str, config: Dict[str, Any] = None, **kwargs) -> bool:
         """kwargs: table_or_collection_name."""
- 
- 
+
+    @abstractmethod
+    def get_versioned(self, key: str, config: Dict[str, Any] = None, **kwargs):
+        """Return (value, version) or None. kwargs: table_or_collection_name."""
+
+    @abstractmethod
+    def put_if_version(self, key: str, value: Dict[str, Any], expected_version: Optional[int],
+                       config: Dict[str, Any] = None, **kwargs) -> 'CommitResult':
+        """Atomic conditional commit. expected_version None means
+        'create only if absent'. Returns CommitResult COMMITTED (new
+        version) or CONFLICT (current_version) — never silently
+        overwrites. kwargs: table_or_collection_name, fencing_token (when
+        given, a token older than the highest one the store has accepted
+        for this key must return status FENCED). On CONFLICT the caller
+        reloads and RE-EVALUATES its preconditions; it never blindly
+        retries the same decision against new state."""
+
+
 class BaseCacheStore(ABC):
     """Vendor-neutral cache contract. Separate from
     BaseTransactionalStore — TTL/eviction semantics differ from
     durable-store semantics. A subclass implementing two-tier
     (L1 in-process / L2 shared) caching does so entirely inside
-    get()/set(); no separate abstract method for that."""
- 
+    get()/set(); no separate abstract method for that.
+
+    get_or_load()/aget_or_load() are base-owned template methods adding
+    per-key SINGLE-FLIGHT inside one process: concurrent misses for the
+    same key share one loader call. This is deduplication of expensive
+    work, not mutual exclusion — no lock is held around cache reads. A
+    short distributed fill lease is only justified when a cross-replica
+    stampede materially matters, and is then a subclass concern."""
+
     @abstractmethod
     def get(self, key: str, config: Dict[str, Any] = None, **kwargs) -> Optional[Any]:
         """kwargs: default_ttl_seconds."""
- 
+
     @abstractmethod
     def set(self, key: str, value: Any, ttl_seconds: int = None,
             config: Dict[str, Any] = None, **kwargs) -> bool:
         """kwargs: default_ttl_seconds."""
- 
+
     @abstractmethod
     def delete(self, key: str, config: Dict[str, Any] = None, **kwargs) -> bool:
         pass
- 
- 
+
+    # ---- single-flight (base-owned) ----
+    def __sf(self) -> Dict[str, Any]:
+        with _SINGLE_FLIGHT_INIT_LOCK:
+            st = self.__dict__.get('_e2a_single_flight')
+            if st is None:
+                st = {'lock': threading.Lock(), 'flights': {}, 'followers': 0, 'loads': 0}
+                self.__dict__['_e2a_single_flight'] = st
+            return st
+
+    @property
+    def single_flight_stats(self) -> Dict[str, int]:
+        st = self.__sf()
+        return {'loads': st['loads'], 'followers': st['followers']}
+
+    def get_or_load(self, key: str, loader: Callable[[], Any], ttl_seconds: int = None,
+                    config: Dict[str, Any] = None, **kwargs) -> Any:
+        """Cache-aside read with per-key single-flight (threads). Followers
+        wait up to cache_fill_timeout_seconds (bounded by kwargs['deadline']),
+        then follow cache_fill_on_timeout: load | stale | raise."""
+        value = self.get(key, config, **kwargs)
+        if value is not None:
+            return value
+        st = self.__sf()
+        with st['lock']:
+            flight = st['flights'].get(key)
+            leader = flight is None
+            if leader:
+                flight = st['flights'][key] = _Flight()
+                st['loads'] += 1
+            else:
+                st['followers'] += 1
+        if leader:
+            try:
+                value = loader()
+                if value is not None:
+                    self.set(key, value, ttl_seconds, config, **kwargs)
+                flight.finish(value=value)
+                return value
+            except BaseException as e:
+                flight.finish(error=e)
+                raise
+            finally:
+                with st['lock']:
+                    st['flights'].pop(key, None)
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        timeout = float(resolve_config('cache_fill_timeout_seconds', config, kwargs))
+        timeout = deadline.bound(timeout) if deadline else timeout
+        if flight.event.wait(timeout):
+            if flight.error is not None and not isinstance(flight.error, _FlightAborted):
+                raise flight.error
+            if flight.error is None:
+                return flight.value
+        return self.__follower_fallback(key, loader, config, kwargs)
+
+    def __follower_fallback(self, key, loader, config, kwargs):
+        policy = str(resolve_config('cache_fill_on_timeout', config, kwargs)).lower()
+        if policy == 'raise':
+            raise AdmissionTimeout(f'cache fill for {key!r} did not complete in time')
+        if policy == 'stale':
+            return self.get(key, config, **kwargs)
+        return loader()
+
+    async def aget_or_load(self, key: str, loader: Callable[[], Any], ttl_seconds: int = None,
+                           config: Dict[str, Any] = None, **kwargs) -> Any:
+        """asyncio variant of get_or_load(); `loader` is an async callable.
+        get()/set() are the store's own (synchronous) calls."""
+        value = self.get(key, config, **kwargs)
+        if value is not None:
+            return value
+        st = self.__sf()
+        loop = asyncio.get_running_loop()
+        fkey = (id(loop), key)
+        fut = st['flights'].get(fkey)
+        if fut is None:
+            fut = loop.create_future()
+            st['flights'][fkey] = fut
+            st['loads'] += 1
+            try:
+                value = await loader()
+                if value is not None:
+                    self.set(key, value, ttl_seconds, config, **kwargs)
+                fut.set_result(value)
+                return value
+            except asyncio.CancelledError:
+                fut.set_exception(_FlightAborted())   # followers fall back; they are not cancelled
+                raise
+            except BaseException as e:
+                fut.set_exception(e)
+                raise
+            finally:
+                st['flights'].pop(fkey, None)
+                if fut.done() and not fut.cancelled():
+                    fut.exception()      # mark retrieved: no 'never retrieved' warning when nobody followed
+        st['followers'] += 1
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        timeout = float(resolve_config('cache_fill_timeout_seconds', config, kwargs))
+        timeout = deadline.bound(timeout) if deadline else timeout
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout)
+        except _FlightAborted:
+            pass
+        except asyncio.TimeoutError:
+            pass
+        policy = str(resolve_config('cache_fill_on_timeout', config, kwargs)).lower()
+        if policy == 'raise':
+            raise AdmissionTimeout(f'cache fill for {key!r} did not complete in time')
+        if policy == 'stale':
+            return self.get(key, config, **kwargs)
+        return await loader()
+
+
+_SINGLE_FLIGHT_INIT_LOCK = threading.Lock()
+
+
+class _FlightAborted(Exception):
+    """Leader was cancelled; followers degrade instead of inheriting the cancellation."""
+
+
+class _Flight:
+    def __init__(self):
+        self.event, self.value, self.error = threading.Event(), None, None
+
+    def finish(self, value=None, error=None):
+        self.value = value
+        self.error = _FlightAborted() if isinstance(error, (KeyboardInterrupt, SystemExit)) else error
+        self.event.set()
+
+
 class BaseIdempotencyStore(ABC):
-    """Formalizes the conditional-write pattern already described
-    informally in Section 2.1 (__ensure_idempotency) as a reusable,
-    injectable port."""
- 
+    """Atomic idempotency CLAIM with a small state machine:
+        ABSENT -> IN_PROGRESS(owner, lease) -> SUCCEEDED(result)
+                                            -> FAILED_RETRYABLE | FAILED_FINAL
+                                            -> UNKNOWN (outcome needs reconciliation)
+    The ABSENT -> IN_PROGRESS transition MUST be one atomic conditional
+    write: a duplicate caller never executes the action merely because it
+    saw no cached result before another claimant committed ownership.
+    Keys are scoped by tenant_id; a request fingerprint makes the same
+    key with a different payload a typed CONFLICT. This is NOT a lock:
+    it answers 'has this request already been (or is it being) done?'."""
+
     @abstractmethod
+    def claim(self, idempotency_key: str, config: Dict[str, Any] = None, **kwargs) -> 'ClaimResult':
+        """kwargs: tenant_id, fingerprint, owner, lease_seconds,
+        ttl_seconds, recover (True lets a reconciler take over a
+        RECOVERY_REQUIRED record). CLAIMED -> caller owns the work;
+        IN_PROGRESS -> another unexpired owner; REPLAY -> stored result;
+        CONFLICT -> fingerprint mismatch; RECOVERY_REQUIRED -> expired
+        lease or UNKNOWN outcome; FAILED_FINAL -> never re-executed.
+        TTL is garbage collection only — correctness uses an explicit
+        expiry field, never a store's TTL deletion timing."""
+
+    @abstractmethod
+    def complete(self, idempotency_key: str, result: Dict[str, Any],
+                 config: Dict[str, Any] = None, **kwargs) -> bool:
+        """IN_PROGRESS -> SUCCEEDED, only for the current owner (a stale
+        owner whose lease was taken over returns False). Store the
+        post-redaction result. kwargs: tenant_id, owner."""
+
+    @abstractmethod
+    def fail(self, idempotency_key: str, retryable: bool = True,
+             config: Dict[str, Any] = None, **kwargs) -> bool:
+        """IN_PROGRESS -> FAILED_RETRYABLE (claimable again) or
+        FAILED_FINAL (deterministic failure). kwargs: tenant_id, owner,
+        outcome — PhysicalOutcome.UNKNOWN parks the record as
+        RECOVERY_REQUIRED for the reconciler."""
+
     def check_and_set(self, idempotency_key: str, config: Dict[str, Any] = None,
-                       **kwargs) -> bool:
-        """kwargs: ttl_seconds. Atomic check-and-claim — returns True
-        only for the caller that wins the race."""
- 
- 
+                      **kwargs) -> bool:
+        """Compatibility shim: True only for the caller that wins the
+        atomic claim. Callers that need replay or in-progress
+        distinction use claim()."""
+        return self.claim(idempotency_key, config, **kwargs).status == ClaimStatus.CLAIMED
+
+
 class BaseDistributedLock(ABC):
-    """Extracted from the inline cache-stampede mutex (Section 2.15)
-    into a standalone coordination primitive. Deliberately minimal —
-    short-lived, TTL-bound, no reentrancy, no distributed-transaction
-    semantics."""
- 
+    """Temporary EXCLUSIVE OWNERSHIP as a lease: time-bound, renewable,
+    owner-checked. Used by scheduled/reconciliation work that needs one
+    active worker (BaseOutboxSweeper, BaseReconciliationService). It is
+    not used for ordinary writes (use put_if_version), de-duplication
+    (use BaseIdempotencyStore) or cache fills (use get_or_load).
+
+    A lease alone does not stop an expired-but-still-running owner from
+    reaching a downstream store. Where that matters the holder passes
+    LeaseHandle.fencing_token with each commit and the store rejects a
+    token older than one it has already accepted."""
+
     @abstractmethod
     def acquire(self, lock_key: str, ttl_seconds: int,
-                config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: lock_backend."""
- 
+                config: Dict[str, Any] = None, **kwargs) -> Optional['LeaseHandle']:
+        """Return a LeaseHandle (truthy) or None if held elsewhere.
+        fencing_token is strictly increasing per key. kwargs: lock_backend."""
+
     @abstractmethod
-    def release(self, lock_key: str, config: Dict[str, Any] = None, **kwargs) -> None:
-        pass
- 
- 
+    def renew(self, handle: 'LeaseHandle', ttl_seconds: int = None,
+              config: Dict[str, Any] = None, **kwargs) -> bool:
+        """Extend the lease; False if it was lost (expired and taken)."""
+
+    @abstractmethod
+    def release(self, handle: 'LeaseHandle', config: Dict[str, Any] = None, **kwargs) -> None:
+        """Owner-checked: releasing a lease that was lost/taken over is a no-op."""
+
+
 class BaseWebhookDispatcher(ABC, _PropagationMixin):
     """PRIMARY class — dispatch() is the single public entry point.
     Outbound counterpart to BaseToolService: pushes a notification
@@ -2455,88 +3674,157 @@ class BaseMemoryManager(ABC):
 class BaseOutboxSweeper(ABC, _PropagationMixin):
     """PRIMARY class — sweep() is the single public entry point.
     Invoked on a fixed cadence (EventBridge Scheduler / cron),
-    not per request."""
- 
+    not per request. Exclusivity is a LEASE (BaseDistributedLock): the
+    sweeper renews it between records and stops with LEASE_LOST if it can
+    no longer prove ownership. Each publish carries the lease's
+    fencing_token so a downstream store can reject a stale sweeper."""
+
     def __init__(self, lock: 'BaseDistributedLock' = None):
         self.lock = lock  # injected BaseDistributedLock (2.16)
- 
+
     def sweep(self, config: Dict[str, Any] = None, correlation_id: str = None,
               **kwargs) -> Dict[str, Any]:
         """Template method. kwargs: batch_size, max_age_seconds."""
         config = config or {}
         correlation_id = correlation_id or str(uuid.uuid4())
-        if self.lock and not self.lock.acquire('outbox_sweeper', ttl_seconds=60, config=config):
-            return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
+        handle = None
+        if self.lock:
+            handle = self.lock.acquire('outbox_sweeper', ttl_seconds=int(resolve_config('lease_ttl_seconds', config, kwargs)),
+                                        config=config)
+            if not handle:
+                return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
         try:
+            fencing = (handle.fencing_token if handle and resolve_config('fencing_enabled', config, kwargs) else None)
+            renew_every = float(resolve_config('lease_renew_interval_seconds', config, kwargs))
+            last_renew = time.monotonic()
             pending = self._fetch_pending_records(config, **kwargs)
             published, failed = 0, []
             for record in pending:
-                if self._publish_pending_record(record, config, **kwargs):
+                if handle and time.monotonic() - last_renew >= renew_every:
+                    if not self.lock.renew(handle, config=config):
+                        handle = None   # lease lost: stop, do not release someone else's
+                        return {'status': 'LEASE_LOST', 'correlation_id': correlation_id,
+                                'published': published, 'failed_keys': failed}
+                    last_renew = time.monotonic()
+                if self._publish_pending_record(record, config, fencing_token=fencing, **kwargs):
                     published += 1
                 else:
                     failed.append(record.get('id'))
             return {'status': 'SWEPT', 'correlation_id': correlation_id,
                     'published': published, 'failed_keys': failed}
         finally:
-            if self.lock:
-                self.lock.release('outbox_sweeper', config=config)
- 
+            if self.lock and handle:
+                self.lock.release(handle, config=config)
+
     @abstractmethod
     def _fetch_pending_records(self, config: Dict[str, Any] = None, **kwargs) -> list:
         """kwargs: batch_size, max_age_seconds. Reads pending records
         from the Outbox table (Landing Zone Section 3.1.3 / 8.1)."""
- 
+
     @abstractmethod
     def _publish_pending_record(self, record: Dict[str, Any],
                                  config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: destination_topic."""
- 
- 
+        """kwargs: destination_topic, fencing_token (the lease's token, or
+        None when fencing is off — pass it on to any store write a stale
+        sweeper could otherwise land)."""
+
+
 class BaseReconciliationService(ABC, _PropagationMixin):
     """PRIMARY class — reconcile() is the single public entry point.
-    Same scheduled-cadence, same lock-acquisition pattern as
-    BaseOutboxSweeper."""
- 
+    Same scheduled-cadence, same lease pattern as BaseOutboxSweeper.
+
+    For each entry it takes over the idempotency record (claim with
+    recover=True), CONFIRMS PHYSICAL TRUTH through
+    _confirm_physical_outcome() before any replay, and only then replays
+    a NOT_COMMITTED entry. An UNKNOWN outcome stays parked for the next
+    run — it is never replayed blindly (that is how a duplicate material
+    effect happens)."""
+
     def __init__(self, lock: 'BaseDistributedLock' = None,
                  idempotency_store: 'BaseIdempotencyStore' = None):
         self.lock = lock
         self.idempotency_store = idempotency_store  # (2.16)
- 
+
     def reconcile(self, config: Dict[str, Any] = None, correlation_id: str = None,
                   **kwargs) -> Dict[str, Any]:
         """Template method. kwargs: dlq_source, max_replay_count."""
         config = config or {}
         correlation_id = correlation_id or str(uuid.uuid4())
-        if self.lock and not self.lock.acquire('reconciliation_service', ttl_seconds=60, config=config):
-            return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
+        handle = None
+        if self.lock:
+            handle = self.lock.acquire('reconciliation_service',
+                                        ttl_seconds=int(resolve_config('lease_ttl_seconds', config, kwargs)),
+                                        config=config)
+            if not handle:
+                return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
+        store = self.idempotency_store
         try:
+            fencing = (handle.fencing_token if handle and resolve_config('fencing_enabled', config, kwargs) else None)
+            renew_every = float(resolve_config('lease_renew_interval_seconds', config, kwargs))
+            last_renew = time.monotonic()
+            lease_s = int(resolve_config('idempotency_lease_seconds', config, kwargs))
             entries = self._fetch_dlq_entries(config, **kwargs)
-            replayed, exhausted = 0, []
+            replayed, exhausted, unresolved = 0, [], []
             for entry in entries:
-                if self.idempotency_store and not self.idempotency_store.check_and_set(
-                        entry.get('idempotency_key'), config=config):
-                    continue  # already reconciled by a prior run
-                if self._replay_dlq_entry(entry, config, **kwargs):
+                if handle and time.monotonic() - last_renew >= renew_every:
+                    if not self.lock.renew(handle, config=config):
+                        handle = None
+                        return {'status': 'LEASE_LOST', 'correlation_id': correlation_id,
+                                'replayed': replayed, 'failed_keys': exhausted, 'unresolved': unresolved}
+                    last_renew = time.monotonic()
+                key, tenant = entry.get('idempotency_key'), entry.get('tenant_id')
+                owned = False
+                if store and key:
+                    cr = store.claim(key, config, tenant_id=tenant, owner=correlation_id,
+                                     fingerprint=entry.get('fingerprint'), lease_seconds=lease_s, recover=True)
+                    if cr.status != ClaimStatus.CLAIMED:
+                        continue  # already reconciled, being worked, or finally failed
+                    owned = True
+                    outcome = self._confirm_physical_outcome(entry, config, fencing_token=fencing, **kwargs)
+                    if outcome == PhysicalOutcome.COMMITTED:
+                        store.complete(key, entry.get('result') or {'outcome': 'COMMITTED'}, config,
+                                       tenant_id=tenant, owner=correlation_id)
+                        continue    # the effect already happened — nothing to replay
+                    if outcome == PhysicalOutcome.UNKNOWN:
+                        store.fail(key, retryable=False, config=config, tenant_id=tenant,
+                                   owner=correlation_id, outcome=PhysicalOutcome.UNKNOWN)
+                        unresolved.append(entry.get('id'))
+                        continue
+                if self._replay_dlq_entry(entry, config, fencing_token=fencing, **kwargs):
                     replayed += 1
+                    if owned:
+                        store.complete(key, entry.get('result') or {'outcome': 'COMMITTED'}, config,
+                                       tenant_id=tenant, owner=correlation_id)
                 else:
                     exhausted.append(entry.get('id'))
+                    if owned:
+                        store.fail(key, retryable=True, config=config, tenant_id=tenant, owner=correlation_id)
             return {'status': 'RECONCILED', 'correlation_id': correlation_id,
-                    'replayed': replayed, 'failed_keys': exhausted}
+                    'replayed': replayed, 'failed_keys': exhausted, 'unresolved': unresolved}
         finally:
-            if self.lock:
-                self.lock.release('reconciliation_service', config=config)
- 
+            if self.lock and handle:
+                self.lock.release(handle, config=config)
+
+    def _confirm_physical_outcome(self, entry: Dict[str, Any], config: Dict[str, Any] = None,
+                                  **kwargs) -> 'PhysicalOutcome':
+        """Hook: ask the system of record whether the entry's material
+        effect actually committed (by idempotency key / business key).
+        Default UNKNOWN — a safe, never-replay default for a subclass that
+        has not bound a confirmation query. kwargs: fencing_token."""
+        return PhysicalOutcome.UNKNOWN
+
     @abstractmethod
     def _fetch_dlq_entries(self, config: Dict[str, Any] = None, **kwargs) -> list:
         """kwargs: dlq_source, max_replay_count."""
- 
+
     @abstractmethod
     def _replay_dlq_entry(self, entry: Dict[str, Any],
                            config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: target_idempotency_store. Re-submits through the
-        same BaseIdempotencyStore check every live request uses."""
- 
- 
+        """kwargs: target_idempotency_store, fencing_token. Re-submits
+        through the same BaseIdempotencyStore claim every live request
+        uses, and through the same governance/policy path."""
+
+
 # ==================================================
 # BasePipeline — control-plane class. CI/CD lifecycle engine,
 # the code-level counterpart to Landing Zone Section 9.
@@ -2582,6 +3870,10 @@ class BasePipeline(ABC, _PropagationMixin):
             report['stages']['test_execution'] = 'PASSED'
             self._log(message_log, correlation_id, 'INFO', 'test_suite_passed')
  
+            capacity = self._validate_capacity_budget(config, **kwargs)
+            report['capacity_violations'] = capacity
+            if capacity:
+                raise ValueError('Capacity budget violated: ' + '; '.join(capacity))
             if not self._verify_scaffold_contracts(config, **kwargs):
                 raise ValueError('Scaffold verification failed: Single Public Entry Point Rule violated.')
             report['stages']['scaffold_compliance'] = 'PASSED'
@@ -2622,6 +3914,13 @@ class BasePipeline(ABC, _PropagationMixin):
             report['message_log'] = message_log
         return report
  
+    def _validate_capacity_budget(self, config, **kwargs) -> List[str]:
+        """Part of the scaffold-compliance gate: the capacity equation
+        (replicas x per-instance concurrency vs pools, ceilings, retry
+        amplification, lease and shutdown windows). Returns violations;
+        override only to add project-specific rules."""
+        return validate_capacity(config, **kwargs)
+
     @abstractmethod
     def _run_static_security_scans(self, config, **kwargs) -> bool:
         """SAST + secret detection (e.g. gitleaks) for exposed LLM API keys."""
@@ -3027,8 +4326,16 @@ class OrderOpsMCPServer(BaseMCPServer):
  
 # src/agents/order_ops_agent.py
 from src.e2a_base import BaseAgent, _resolve_tool_call
-import asyncio
+from e2a_base import Deadline, _run_on_bridge_loop
  
+def _run_tool(coro, config, kwargs):
+    # Sync agent path -> shared bridge loop. Never asyncio.run(): a fresh loop per call
+    # cannot be cancelled by a parent. The wait is bounded by the request deadline and the
+    # coroutine is cancelled, not orphaned, on expiry. (Reference: multimodal_orchestrator.py)
+    deadline = Deadline.coerce(kwargs.get('deadline'))
+    bound = float(resolve_config('timeout', config, kwargs)) * (int(resolve_config('retries', config, kwargs)) + 1) + 1.0
+    return _run_on_bridge_loop(coro, timeout=min(bound, deadline.remaining() + 0.5) if deadline else bound)
+
 class OrderOpsAgent(BaseAgent):
     agent_name = 'OrderOpsAgent'
     # State is already validated by OrderOpsValidationService above —
@@ -3039,13 +4346,13 @@ class OrderOpsAgent(BaseAgent):
  
     def _apply_policy(self, state, config=None, tenant_id=None, **kwargs):
         if state.get('action') == 'check_stock':
-            state['tool_result'] = asyncio.run(_resolve_tool_call(
+            state['tool_result'] = _run_tool(_resolve_tool_call(
                 'check_stock', {'sku': state['sku']}, config,
-                tenant_id=tenant_id))
+                tenant_id=tenant_id), config, kwargs)
         elif state.get('action') == 'legacy_pricing_lookup':
-            state['tool_result'] = asyncio.run(_resolve_tool_call(
+            state['tool_result'] = _run_tool(_resolve_tool_call(
                 'legacy_pricing_lookup', {'sku': state['sku']}, config,
-                tenant_id=tenant_id))
+                tenant_id=tenant_id), config, kwargs)
  
     def _evaluate_output(self, response, state, config=None, **kwargs):
         return 1.0 if response.get('text') else 0.0
@@ -3234,9 +4541,9 @@ async for chunk in llm_service.process_inference_stream(        # chat surface
 
 # 5. Central Configuration Registry — Config / Environment Reference
 
-This section is the single point of reference for every config key and environment variable used anywhere in the playbook — every agent, workflow, RAG, tool, MCP, LLM-service and pipeline class. It is generated from the E2A_CONFIG registry at the top of e2a_base.py (config_reference_markdown()), so it cannot drift from the code. The per-class sections in Section 2 list only which keys a class reads and point here for names, environment variables and defaults.
+This section is the single point of reference for every config key and environment variable used anywhere in the playbook — every agent, workflow, RAG, tool, MCP, LLM-service and pipeline class. It is generated from the E2A_CONFIG registry at the top of e2a_base.py (config_reference_markdown()), so it cannot drift from the code. Each concurrency key is declared once, in the group of the class that consumes it; a resource is controlled by one key, and the existing keys (pod_concurrency, tenant_concurrency, quota_timeout, llm_max_latency, timeout, retries, max_rpm, max_tpm) remain the owners of their resources. The per-class sections in Section 2 list only which keys a class reads and point here for names, environment variables and defaults.
 
-Rules. (1) Resolution is identical everywhere: call-time kwargs, then the config dict, then the environment variable, then the default — resolve_config(key, config, kwargs). (2) No class reads os.getenv() or hardcodes a default; defaults live only in E2A_CONFIG. (3) A project declares its own keys once, in src/settings.py, with register_config_key(ConfigKey(...)) — never by editing e2a_base.py — and its concrete agents read them with resolve_config() like framework classes do. (4) Object references (llm_service, governance_engine, observability_engine) are not environment-resolvable; they are constructed in the composition root and passed in the config dict. (5) Secrets (auth_token, signing_secret) are env-resolvable but emitted empty in .env.example; production values come from the secrets manager. (6) unknown_config_keys(config) flags typos at start-up; env_example() generates .env.example.
+Rules. (1) Resolution is identical everywhere: call-time kwargs, then the config dict, then the environment variable, then the default — resolve_config(key, config, kwargs). (2) No class reads os.getenv() or hardcodes a default; defaults live only in E2A_CONFIG. (3) A project declares its own keys once, in src/settings.py, with register_config_key(ConfigKey(...)) — never by editing e2a_base.py — and its concrete agents read them with resolve_config() like framework classes do. (4) Object references (llm_service, governance_engine, observability_engine) are not environment-resolvable; they are constructed in the composition root and passed in the config dict. (5) Secrets (auth_token, signing_secret) are env-resolvable but emitted empty in .env.example; production values come from the secrets manager. (6) unknown_config_keys(config) flags typos at start-up; env_example() generates .env.example. (7) Provider overrides follow the same precedence: a provider-specific value is supplied as a call-time kwarg or in the config dict by the concrete subclass, never by a second key for the same resource. (8) validate_capacity() checks the registry as a whole — per-instance concurrency multiplied by fleet_replica_count against the pool, database and model ceilings — and runs in BasePipeline's scaffold-compliance stage (Section 2.19.11).
 
 ### Common
 
@@ -3259,6 +4566,10 @@ Rules. (1) Resolution is identical everywhere: call-time kwargs, then the config
 | governance_engine | — (not env-resolvable) | (unset) | BaseAgent.run() — BaseGovernanceFramework instance |
 | llm_service | — (not env-resolvable) | (unset) | BaseAgent / LLMOnlyAgent _infer() — the bound BaseLLMAgentService (required) |
 | max_token_budget | — (not env-resolvable) | inf | BaseGovernanceFramework.__enforce_token_budget() — io_config key |
+| idempotency_store | — (not env-resolvable) | (unset) | BaseWorkflow.execute() / BaseOrchestrator.execute() / AIDLCPipelineOrchestrator — the bound BaseIdempotencyStore (atomic claim) |
+| cache_store | — (not env-resolvable) | (unset) | BaseQueryService.fetch() — the bound BaseCacheStore (single-flight get_or_load) |
+| transactional_store | — (not env-resolvable) | (unset) | BaseCommandService._commit_versioned() — the bound BaseTransactionalStore (conditional commit) |
+| pipeline_state_store | — (not env-resolvable) | (unset) | AIDLCPipelineOrchestrator — the bound BaseTransactionalStore (durable phase state) |
 
 ### Validation
 
@@ -3317,6 +4628,8 @@ Rules. (1) Resolution is identical everywhere: call-time kwargs, then the config
 | dlp_holdback_chars | LLM_DLP_HOLDBACK_CHARS | 128 | stream holdback window |
 | speculative_model | SPECULATIVE_MODEL | (unset) | _dispatch_upstream_call() io_config — speculative-decoding draft model |
 | max_speculative_tokens | MAX_SPECULATIVE_TOKENS | (unset) | _dispatch_upstream_call() io_config — draft length |
+| permit_timeout | LLM_PERMIT_TIMEOUT | 5.0 | bounded wait for the tenant + pod permit — AdmissionTimeout on expiry (also capped by the remaining deadline) |
+| tenant_idle_evict_seconds | LLM_TENANT_IDLE_EVICT_SECONDS | 300.0 | idle per-tenant permit entries are evicted after this long |
 
 ### RAG
 
@@ -3359,10 +4672,71 @@ Rules. (1) Resolution is identical everywhere: call-time kwargs, then the config
 | default_version | PROMPT_DEFAULT_VERSION | 'latest' | BasePromptRegistry.get_prompt() |
 | deployment_strategy | DEPLOYMENT_STRATEGY | 'BLUE_GREEN' | BasePipeline._execute_deployment_rollout() |
 
-*E2A Architecture Framework — Implementation Playbook · github.com/subhamviky/e2a-framework · Subham Gupta*
+### Deadlines
 
-*Authorship: Framework implementation, abstract class contracts, and multi-cloud mapping logic are the original work of Subham Gupta.*
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| request_deadline_seconds | REQUEST_DEADLINE_SECONDS | 0.0 | BaseWorkflow.execute() / BaseOrchestrator.execute() — origin of the additive deadline field (0 = none) |
 
-*Trademark: All vendor trademarks (AWS, GCP, Azure, Meta Llama) are the property of their respective owners and are used here for architectural reference only.*
+### Resilience
 
-*Managed Service Disclaimer: Certain ecosystem components referenced (e.g., Pinecone, LangGraph, Lakera, FAISS) are third-party partner technologies and are not native managed services of AWS, Google Cloud, or Microsoft Azure. The E2A Framework provides a standardized way to integrate these third-party tools alongside native cloud services.*
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| retry_base_backoff | RETRY_BASE_BACKOFF | 0.1 | ResiliencePolicy — full-jitter exponential backoff base (seconds) |
+| retry_max_backoff | RETRY_MAX_BACKOFF | 2.0 | ResiliencePolicy — backoff ceiling (seconds) |
+| retry_budget_ratio | RETRY_BUDGET_RATIO | 0.2 | ResiliencePolicy — retry tokens earned per first attempt (caps retry amplification) |
+| retry_budget_cap | RETRY_BUDGET_CAP | 10.0 | ResiliencePolicy — maximum retry-token balance |
+| circuit_failure_threshold | CIRCUIT_FAILURE_THRESHOLD | 5 | ResiliencePolicy — consecutive failures that open the circuit |
+| circuit_reset_seconds | CIRCUIT_RESET_SECONDS | 30.0 | ResiliencePolicy — open duration before a half-open probe |
+| bulkhead_max_concurrent | BULKHEAD_MAX_CONCURRENT | 16 | ResiliencePolicy — per-dependency in-flight cap (0 = off) |
+| bulkhead_acquire_timeout | BULKHEAD_ACQUIRE_TIMEOUT | 1.0 | ResiliencePolicy — bounded wait for a bulkhead slot |
+
+### Pools / capacity
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| db_pool_size | DB_POOL_SIZE | 20 | store adapters — per-instance database connection pool |
+| http_pool_size | HTTP_POOL_SIZE | 50 | tool / upstream adapters — per-instance HTTP connection pool |
+| retrieval_pool_size | RETRIEVAL_POOL_SIZE | 20 | BaseRAGPipeline._search_index() adapters — per-instance index connection pool |
+| fleet_replica_count | FLEET_REPLICA_COUNT | 1 | validate_capacity() — replicas of this service (multiplies per-instance concurrency) |
+| db_max_connections | DB_MAX_CONNECTIONS | 0 | validate_capacity() — database connection ceiling for the whole fleet (0 = unchecked) |
+| model_max_inflight | MODEL_MAX_INFLIGHT | 0 | validate_capacity() — provider-side concurrent request ceiling for the whole fleet (0 = unchecked) |
+| termination_grace_seconds | TERMINATION_GRACE_SECONDS | 30.0 | validate_capacity() — platform SIGTERM-to-SIGKILL window; drain_timeout_seconds must be shorter |
+
+### Async workers
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| worker_concurrency | WORKER_CONCURRENCY | 8 | consumer runtime — in-flight messages per instance |
+| worker_prefetch | WORKER_PREFETCH | 16 | consumer runtime — broker prefetch / max in-flight window per instance |
+| drain_timeout_seconds | DRAIN_TIMEOUT_SECONDS | 20.0 | consumer runtime / services — graceful-shutdown drain bound |
+
+### Leases
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| lease_ttl_seconds | LEASE_TTL_SECONDS | 60 | BaseOutboxSweeper / BaseReconciliationService — BaseDistributedLock lease TTL |
+| lease_renew_interval_seconds | LEASE_RENEW_INTERVAL_SECONDS | 20 | BaseOutboxSweeper / BaseReconciliationService — renew cadence (must be < lease_ttl_seconds) |
+| fencing_enabled | FENCING_ENABLED | True | lease holders pass LeaseHandle.fencing_token to downstream commits |
+| idempotency_lease_seconds | IDEMPOTENCY_LEASE_SECONDS | 300 | BaseIdempotencyStore.claim() — IN_PROGRESS claim expiry; an expired claim needs reconciliation, never blind re-execution |
+
+### Cache
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| cache_fill_timeout_seconds | CACHE_FILL_TIMEOUT_SECONDS | 5.0 | BaseCacheStore.get_or_load() — follower wait for the in-flight fill |
+| cache_fill_on_timeout | CACHE_FILL_ON_TIMEOUT | 'load' | BaseCacheStore.get_or_load() — follower policy on fill timeout: load | stale | raise |
+
+### Build (AI-DLC)
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| build_max_inflight | BUILD_MAX_INFLIGHT | 4 | AIDLCPipelineOrchestrator — concurrent builds per instance |
+| tenant_build_max_inflight | TENANT_BUILD_MAX_INFLIGHT | 2 | AIDLCPipelineOrchestrator — concurrent builds per tenant |
+
+### Concurrency observability
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| slow_wait_threshold_seconds | SLOW_WAIT_THRESHOLD_SECONDS | 0.5 | permit / pool / bulkhead waits above this are logged at WARN |
+| queue_age_slo_seconds | QUEUE_AGE_SLO_SECONDS | 60.0 | oldest-message age above this is an SLO breach signal |

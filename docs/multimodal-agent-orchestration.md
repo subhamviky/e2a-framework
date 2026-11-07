@@ -98,6 +98,32 @@ def _build_workflow(self, config=None, **kwargs):
     return graph.compile()
 ```
 
+## Concurrency: Isolation, Deadlines and Bounded Fan-Out
+
+Concurrency here is owned by invariant, not by a manager: each risk is assigned to a class, a contract or a config key that already exists (Implementation Playbook Section 2.19). The guarantee is effectively-once material effects under at-least-once delivery, never exactly-once.
+
+**Request-local state.** The compiled `StateGraph` is built once and invoked by many requests at once, so nothing request-specific may live on `self` or in module globals. Every `execute()` call starts from its own `OrchestratorState`; the propagation fields (`correlation_id`, `tenant_id`, `message_log`, `failed_keys` and the additive `deadline`) are passed as arguments, never stored as attributes — the same rule `BaseWorkflow` already follows. Agents, the `ModalityPreprocessor` and the tool and LLM services are shared, long-lived and stateless per request; the only mutable state they hold is bounded by design (permits, bulkhead slots, circuit counters, cache entries).
+
+**Routing is exclusive, so there is no fan-out by default.** The conditional edge sends a request to exactly one peer. Fan-out is added only for genuinely independent branches — for example a RAG retrieval and a read-only lookup whose results do not depend on each other — and then only with a hard bound (a semaphore no larger than the pod's share of `pod_concurrency`) and one shared deadline for the whole fan-out. A branch that can change state (an MCP or API tool call with a side effect) is never one of several speculative parallel branches. The scaffold's graph has no fan-out edge today; this is the rule for adding one, not an implemented feature.
+
+**Deadlines and cancellation.** `BaseWorkflow.execute()` resolves one `deadline` for the request (from an inbound deadline or `request_deadline_seconds`; none when neither is set) and passes it to every agent. The synchronous agent path reaches the asynchronous tool services through `_run_tool()`, which runs the coroutine on the shared bridge loop — never `asyncio.run()`, because a fresh loop per call cannot be cancelled by its parent and breaks per-loop primitives. The wait is bounded by `min(timeout × (retries + 1) + 1, deadline.remaining() + 0.5)`; when it expires the coroutine is **cancelled**, not orphaned, so a timed-out tool call does not keep consuming a bulkhead slot or a connection.
+
+**Side effects and the claim.** Only tool-call intents (`MCP_TOOL_CALL`, `API_TOOL_CALL`) with a score at or above `min_confidence` can have a material effect, so only they take an atomic idempotency claim (`_requires_idempotency_claim()`). RAG, LLM-only and fallback answers are generative reads: they are never claimed and never replayed from a stored answer. After a tool call the agent records the typed outcome in `state['outcome']` (`COMMITTED`, `NOT_COMMITTED` or `UNKNOWN`). A timeout on a non-idempotent write yields `UNKNOWN`: the request was sent exactly once, the key is parked for reconciliation, and a duplicate gets `RECOVERY_REQUIRED` — it is never re-sent blindly.
+
+**Capacity, one owner per resource.**
+
+| Resource | Bound | Owner |
+|---|---|---|
+| Inference (all four peers that call a model) | Tenant + pod permit (`permit_timeout`), then token quota (`quota_timeout`), then the upstream call under `min(llm_max_latency, remaining deadline)`; quota refunded on failure and cancellation | `BaseLLMAgentService` — shared by every agent through `config['llm_service']`; each agent adds no limit of its own |
+| Modality preprocessing (transcription, extraction) | Input size limits `max_audio_duration_seconds` and `max_document_pages`, plus (a deployment obligation, not scaffold code) a preprocessing worker pool sized apart from the inference permits | `ModalityPreprocessor` — independent capacity, so a burst of large audio or documents cannot consume the permits that text requests need |
+| RAG retrieval and index | Index and vector-store connection pool (`db_pool_size`, `http_pool_size`) | `BaseRAGPipeline` adapters |
+| MCP and API tool calls | Per-dependency bulkhead (`bulkhead_max_concurrent`, `bulkhead_acquire_timeout`), circuit breaker (`circuit_failure_threshold`, `circuit_reset_seconds`) and retry budget (`retry_budget_ratio`); a timeout is retried only if the call is idempotent | `BaseToolService` through `ResiliencePolicy` |
+| LLM upstream | Circuit breaker only; admission is the permit and quota above | `BaseLLMAgentService` |
+
+`validate_capacity()` checks these together at startup, so a sizing mistake fails the scaffold-compliance gate instead of surfacing under load: the pod's inference concurrency must fit the HTTP pool, the tenant cap must not exceed the pod cap, and fleet model concurrency including the retry budget must fit the model's limit.
+
+**Optional single-flight.** Duplicate work that is expensive and safe to share can be collapsed with `BaseCacheStore.get_or_load`: concurrent identical retrievals for one RAG query, or repeated transcription or extraction of the same content hash. Followers wait up to `cache_fill_timeout_seconds` (bounded by the deadline) and then follow `cache_fill_on_timeout` (`load`, `stale` or `raise`). It is optional and applies only to deterministic, side-effect-free work. It is never applied to LLM generation or to tool calls, whose duplicates are governed by the claim instead.
+
 ## Multimodal input and model selection
 
 `GenericLLMOnlyAgent` detects modality from whichever of `audio_uri` / `image_uri` / `document_uri` / `text` is present in the request, and resolves the model per modality through the same registry-resolution pattern used everywhere else in the framework:
@@ -121,6 +147,7 @@ Audio and document input go through a composed `ModalityPreprocessor` (transcrip
 - **LLM-only** — resolves entirely inside the Protected Business Logic Tier; no Integration Tier egress, no Knowledge Tier round-trip.
 - **Modality ingestion** (audio/document/image) — a Tier 2 preprocessing step in the same private subnet as `BaseAgent`, never public-facing, for the same reason the Semantic Router and Semantic Firewall are Tier 2. The intake bucket itself sits in the Data & Messaging Perimeter (Tier 3), same isolation as tool payloads.
 - **Fallback** — no infrastructure of its own; runs in-process, in whichever tier the workflow was already executing in.
+- **Capacity placement** — preprocessing runs on its own worker pool in the Tier 2 subnet, scaled independently of the inference gateway; the shared `BaseLLMAgentService` (Tier 2b) is the single place model concurrency and quota are enforced, whichever peer calls it; each tool dependency has its own bulkhead and circuit at the Integration Tier boundary.
 
 Full detail: `docs/e2a-framework-cloud-landing-zone.md`, Sections 3.1.4 and 8.3.
 
@@ -133,6 +160,11 @@ Full detail: `docs/e2a-framework-cloud-landing-zone.md`, Sections 3.1.4 and 8.3.
 | `document_extractor` | `DOCUMENT_EXTRACTOR_PROVIDER` | `None` | `ModalityPreprocessor.extract()` |
 | `max_audio_duration_seconds` | `MAX_AUDIO_DURATION_SECONDS` | `600` | Checked before `transcribe()` |
 | `max_document_pages` | `MAX_DOCUMENT_PAGES` | `50` | Checked before `extract()` |
+| `request_deadline_seconds` | `REQUEST_DEADLINE_SECONDS` | `0` (none) | `BaseWorkflow.execute()` — origin of the request `deadline`, passed to `_run_tool()` |
+| `idempotency_lease_seconds` | `IDEMPOTENCY_LEASE_SECONDS` | `300` | Atomic claim for tool-call intents; an expired claim needs reconciliation |
+| `bulkhead_max_concurrent`, `bulkhead_acquire_timeout` | `BULKHEAD_MAX_CONCURRENT`, `BULKHEAD_ACQUIRE_TIMEOUT` | `16`, `1.0` | Tool-service bulkhead (per dependency) |
+| `permit_timeout`, `quota_timeout` | `LLM_PERMIT_TIMEOUT`, `LLM_QUOTA_TIMEOUT` | `5.0`, `5.0` | `BaseLLMAgentService` — bounded permit and quota waits shared by all agents |
+| `cache_fill_timeout_seconds`, `cache_fill_on_timeout` | `CACHE_FILL_TIMEOUT_SECONDS`, `CACHE_FILL_ON_TIMEOUT` | `5.0`, `load` | Optional single-flight for retrieval and preprocessing |
 
 ## Verification
 
@@ -147,3 +179,16 @@ LLM_ONLY      (score=0.9)  -> {'text': '...', 'metadata': {'model_id': 'default'
 UNKNOWN_INTENT(score=0.9)  -> {'text': '', 'metadata': {'degraded': True, 'reason': 'no_intent_match'}}
 RAG_GROUNDED  (score=0.5)  -> {'text': '', 'metadata': {'degraded': True, 'reason': 'no_intent_match'}}
 ```
+
+### Concurrency verification
+
+`smoke_test_multimodal_concurrency.py` runs the same unmodified `BaseWorkflow` against an in-memory idempotency store and a probe tool service. Its checks: `no asyncio.run left in the orchestrator`; `T-01 duplicate tool-call request replays; the tool was sent once`; `generative intents are not claimed or replayed`; `T-12 slow tool: typed UNKNOWN, sent exactly once, bounded wait`; `T-12 UNKNOWN parks the key; a duplicate is not re-sent`; `request deadline bounds a tool call far below the tool timeout`. Inference admission, quota and cancellation are proven once at the gateway (`smoke_test_concurrency.py`: T-04, T-10, T-11) and capacity-equation checking by `validate_capacity()` in the same suite, rather than re-tested per agent.
+
+Not covered by the scaffold's smoke tests, and to be proven in a load environment before release:
+
+| Test | Expected result |
+|---|---|
+| Mixed-modal fairness: a sustained burst of long audio and large documents alongside a steady stream of text requests | Text p95 latency stays within its objective; preprocessing saturation rejects or queues within its bound and consumes no inference permits |
+| Single-flight under identical concurrent retrievals (when enabled) | One index query; followers return the shared result or follow `cache_fill_on_timeout` |
+| Independent-branch fan-out (when added) | In-flight branches never exceed the bound; one shared deadline cancels the rest; no side-effecting branch is run speculatively |
+| Tool dependency down | Circuit opens, calls fail fast, other dependencies and other modalities unaffected |

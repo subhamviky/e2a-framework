@@ -36,7 +36,7 @@ Through **structural isomorphism**, **single public entry points**, **invariant 
 ├───────────────────────────────┤       ├───────────────────────────────┤
 │ • BaseCommandService (mutate) │       │ • BaseOrchestrator (execute)  │
 │ • Transactional boundaries    │       │ • BaseQueryService (fetch)    │
-│ • Idempotency & lock handles  │       │ • Managed Agents & Tool Hooks │
+│ • Atomic claim & OCC commit   │       │ • Managed Agents & Tool Hooks │
 │ • Outbox event publication    │       │ • Context Discovery & RAG     │
 └───────────────────────────────┘       └───────────────────────────────┘
             │                                       │
@@ -57,7 +57,7 @@ $$\text{Class Visibility Contract} \iff \text{Cloud Landing Zone Perimeter}$$
 By aligning object-oriented access boundaries directly with infrastructure security tiers, the codebase itself reflects the cloud landing zone layout:
 * **Public Interface (`public execute() / validate()`):** Corresponds to the **Ingress DMZ and API Gateway**. It encapsulates rate limiting, authentication verification, correlation minting, and perimeter defense.
 * **Protected Abstract Hooks (`protected abstract executeTransfer()`):** Corresponds to the **Private Compute Tier**. These represent isolated business logic hooks that developers configure to meet specific domain needs without altering the enclosing execution lifecycle.
-* **Private Helper Invariants (`private lockManager.acquire()`):** Corresponds to the **Data and Infrastructure Core**. These methods manage non-negotiable operational standards—such as audit logging, locking, and tracing—safely encapsulated from external tampering.
+* **Private Helper Invariants (`private ownershipGuard.claim()`):** Corresponds to the **Data and Infrastructure Core**. These methods manage non-negotiable operational standards—such as audit logging, ownership control, and tracing—safely encapsulated from external tampering.
 
 ### 1.2 The Single Public Entry Point Rule
 To promote consistent observability and clear system behavior, each service profile in E2A exposes exactly **one public orchestrator method**:
@@ -71,25 +71,27 @@ To promote consistent observability and clear system behavior, each service prof
 By channeling requests through a unified front door, cross-cutting concerns—such as distributed tracing, entry validation, telemetry emission, and exception normalization—are centralized and uniformly applied across the entire estate.
 
 ### 1.3 Invariant Template Pipelines (The Template Method Pattern)
-To ensure consistent operational standards across teams, E2A utilizes the **Template Method Pattern** with `final` lifecycle locks.
+To ensure consistent operational standards across teams, E2A utilizes the **Template Method Pattern** with `final` lifecycle methods.
 
 The base engine coordinates the standard lifecycle:
 1. Context Hydration & W3C Trace Extraction
-2. Distributed Lock Acquisition
-3. Idempotency Check & Deduplication
+2. Admission & Ownership (bounded admission; atomic idempotency claim; a version check or lease only where the invariant requires one)
+3. Duplicate Resolution (replay, in-progress or conflict outcome)
 4. Pre-Flight Policy Evaluation (Protected Hook)
 5. Domain / Model Execution (Protected Abstract Hook)
 6. Transactional Audit Logging
 7. Outbox Event Dispatch
-8. Lock Release & Resource Cleanup
+8. Claim Settlement, Permit/Lease Release & Resource Cleanup
 
 Engineers extending the framework focus their implementation entirely on domain-specific steps (Steps 4 and 5). The operational and regulatory lifecycle surrounding their code executes consistently, ensuring that critical compliance and telemetry steps are reliably preserved.
+
+Steps 2 and 3 are chosen by invariant, not applied unconditionally. Every request passes bounded admission and, if it can change state, an atomic idempotency claim. A version check (optimistic concurrency) is added only where an aggregate has competing writers, and a lease only for scheduled work that needs temporary exclusivity. A lock is not the default answer to a concurrency question, because a lock held by a stalled process outlives its usefulness while an atomic claim does not.
 
 ### 1.4 Stateless Explicit Context Propagation
 In distributed and elastic container environments (Kubernetes, Azure Container Apps, AWS ECS, Google Cloud Run), handling concurrent workloads requires strict state discipline.
 
 E2A establishes a **Six-Field Explicit Propagation Contract**, passing execution context through functional parameters rather than mutable instance state (`self.` or class fields):
-* `correlation_id` (W3C standard `traceparent` for end-to-end tracing)
+* `correlation_id` (the request's join key across every log line, metric and dead-letter entry)
 * `tenant_id` (Multi-tenant data boundary isolation)
 * `idempotency_key` (Replay handling and safe retries)
 * `io_config` (Infrastructure-level directives, timeouts, and cache hints)
@@ -97,6 +99,54 @@ E2A establishes a **Six-Field Explicit Propagation Contract**, passing execution
 * `failed_keys` (Granular error identification)
 
 By keeping classes stateless with respect to runtime execution data, services scale horizontally and avoid cross-thread state bleed under high concurrency.
+
+Two further fields are **additive** and do not change the six above: `trace_context`, the W3C `traceparent` that carries distributed-trace identity across process and cloud boundaries, and an optional request `deadline`, resolved once at the request origin and passed to every wait so that work stops when the caller stops. Absent a deadline, existing callers behave exactly as before.
+
+### 1.5 Concurrency From First Principles: Mechanisms, Cloud Analogues and Owners
+
+Concurrency in E2A is owned by invariant, not by a global manager. A central controller would be a bottleneck and a single point of failure, and it would have to know every resource. Instead, each risk is assigned to the class that already owns the resource. The guarantee the framework makes is **effectively-once material effects under at-least-once delivery** — never exactly-once, which no network provides.
+
+| Invariant | Mechanism | Cloud-native analogue | Owner |
+| :--- | :--- | :--- | :--- |
+| One winner per request | Atomic idempotency claim: tenant-scoped key, request fingerprint, explicit expiry field | Conditional put or create-if-absent on the state store | `BaseIdempotencyStore` |
+| One writer per version | Conditional commit on a version (optimistic concurrency); a loser receives a typed conflict | Condition expression, update-time precondition, ETag `If-Match` | `BaseTransactionalStore` |
+| Temporary exclusivity for scheduled work | Lease with an owner token and a fencing token | Lease item or blob lease; the adapter supplies the fencing token | `BaseDistributedLock`, outbox sweeper, reconciler |
+| One load per hot key | Single-flight cache fill | Per-key request coalescing in front of the cache | `BaseCacheStore` |
+| Bounded work | Admission: bounded permits and quota, each wait timed, rejection typed | Service concurrency limits, gateway throttling, queue visibility | `BaseLLMAgentService`, build admission, consumer runtime |
+| Isolated failure | Bulkhead, circuit breaker and retry budget per dependency | Client-side resilience, service-mesh policy | `ResiliencePolicy` through `BaseToolService` |
+| Work stops when the caller stops | Deadline propagation with native cancellation | Request timeouts, task cancellation | The request origin; `Deadline` |
+| Business order per key | Partition ordering | FIFO message group, ordering key, session | Consumer runtime |
+| Uncertain side effects | Tri-state physical outcome; an unknown outcome is parked and reconciled | Reconciliation job, outbox with CDC | `BaseReconciliationService` |
+| Visible saturation | Permit-wait, pool-wait, queue-age and retry-amplification metrics | Cloud monitoring and alarms | `BaseObservability` |
+
+Four terms are kept distinct. **Idempotency** answers "has this request already been handled?". **Optimistic concurrency** answers "has the thing I read changed?". A **lease** answers "who may run this scheduled job right now?". **Single-flight** answers "can concurrent identical reads share one load?". A system that uses one for another's job fails in a way the owner of the other would have prevented.
+
+### 1.6 Overload and Failure Containment
+
+```
+ request
+   │  deadline set once at the request origin
+   ▼
+ admission ──── timed out? ──▶ typed rejection (no unbounded queue)
+   ▼
+ pool / permit ─ timed out? ─▶ typed rejection (no connection pile-up)
+   ▼
+ dependency ──── bulkhead + circuit breaker + retry budget
+                 (a failure stays local to that dependency)
+
+ every wait above is capped by the time remaining on the deadline
+```
+
+- **Admission.** Each tier admits only what the next tier can absorb, and every wait is bounded. A wait that expires is a typed rejection the caller can act on, not an unbounded queue that turns slowness into an outage. Durable queues absorb bursts that must not be rejected, with a dead-letter policy.
+- **Pool alignment.** Capacity is validated as a system, not per setting: per-instance concurrency must fit the connection pool, tenant limits must fit pod limits, and fleet size multiplied by per-instance concurrency must fit the database, the HTTP pool and the model's quota, retry load included. A mis-sized deployment fails the scaffold-compliance gate before it ships.
+- **Retries.** Retries draw on a shared budget, so a failing dependency receives bounded extra load rather than an amplified storm, and a timed-out call is retried only if it is idempotent.
+- **Circuit breaking.** A dependency that keeps failing is opened and fails fast; its blast radius is its own bulkhead.
+- **Deadline propagation.** One deadline is set at the request origin and caps every later wait. When it expires, in-flight work is cancelled and its permits and connections are released.
+- **Graceful shutdown.** A terminating instance stops admitting work, drains in-flight work within a bound shorter than the platform's termination grace, and leaves unfinished durable work replayable.
+
+### 1.7 Verification
+
+Concurrency claims are tested as races, not asserted. The reference scaffold carries tests for the following scenarios, each next to the primitive it proves: many concurrent identical requests produce one physical effect; two writers from one version produce one commit and one typed conflict; a hot cache miss produces one load; mixed tenants at saturation see bounded, observable admission; a retry storm is bounded by the budget; a stale lease cannot commit when fencing is required; a cancelled request releases its permits; a draining instance stops admitting work; a timeout after a possible commit is reconciled without duplicating the effect; and a duplicate build or concurrent artifact publication is handled without corruption. These run in the reference scaffold against in-memory test doubles. Ordering under redelivery, consumer saturation and rolling deploys need a consumer runtime or a load environment, and validation against live provider services and production load is still to be done; the documents mark which is which.
 
 ---
 
@@ -184,7 +234,7 @@ Architects      Security        Economics        Resilience      Delivery
 * **Primary Focus:** Maintainability, cognitive clarity, low coupling, and blast-radius control.
 * **E2A Value Realization:**
   * **Behavior-First Modeling:** Classes and methods are named for business intent (`ReconcileLedgerBalance`, `EvaluatePolicyCriteria`) rather than generic utility terms, allowing new engineers to understand system behavior quickly.
-  * **Decoupled Lifecycle and Logic:** The Template Method pattern separates fixed operational sequences from variable domain logic. Modifying concrete business logic cannot accidentally bypass audit, locking, or telemetry steps.
+  * **Decoupled Lifecycle and Logic:** The Template Method pattern separates fixed operational sequences from variable domain logic. Modifying concrete business logic cannot accidentally bypass audit, ownership, or telemetry steps.
   * **SDK Isolation:** Cloud-specific libraries are confined to protected execution hooks, shielding core domain models from third-party library updates or deprecations.
 
 ### Lens 2: Chief Information Security Officer (CISO) & Trust Engineering
@@ -206,7 +256,7 @@ Architects      Security        Economics        Resilience      Delivery
 * **E2A Value Realization:**
   * **Unified Distributed Tracing:** Standard W3C `traceparent` propagation ensures that a request crossing between microservices, cloud boundaries, or agentic tools is visible as a connected trace.
   * **Idempotency & Replay Safety:** Explicit idempotency keys and state checks allow failed network operations to be retried safely without duplicating transactions.
-  * **Deterministic Resource Management:** Invariant lifecycle management guarantees that distributed locks, database connections, and system resources are properly cleaned up across both success and failure paths.
+  * **Deterministic Resource Management:** Invariant lifecycle management guarantees that permits, leases, database connections, and system resources are properly released across both success and failure paths.
 
 ### Lens 5: Product Management & Engineering Delivery
 * **Primary Focus:** Time-to-market, feature velocity, onboarding speed, and customer confidence.
@@ -222,7 +272,7 @@ Architects      Security        Economics        Resilience      Delivery
 | Dimension | Prototyping Discovery Phase | E2A Enterprise Production Ingestion | Value to the Organization |
 | :--- | :--- | :--- | :--- |
 | **Ingress Control** | Flexible, ad-hoc endpoints for rapid discovery | Strict Single Public Entry Point (`validate`, `execute`, `mutate`, `fetch`) | Centralized perimeter defense and uniform telemetry across all invocations. |
-| **Lifecycle Design** | Dynamic scripts tailored for exploration | Invariant Template Method Lifecycle (`final` base orchestrators) | Guaranteed execution of audit, locking, and tracing steps across all teams. |
+| **Lifecycle Design** | Dynamic scripts tailored for exploration | Invariant Template Method Lifecycle (`final` base orchestrators) | Guaranteed execution of audit, ownership, and tracing steps across all teams. |
 | **Runtime State** | Fast prototyping using script/instance state | Explicit Six-Field Context Propagation (`correlation_id`, `tenant_id`, etc.) | Thread-safe, horizontally scalable execution across container platforms. |
 | **Technology Strategy** | Optimized for fast local iteration | Deliberate Polyglot Alignment (e.g., Java for ACID paths, Python for Agents) | Pairs transactional consistency with AI and retrieval ecosystem strength. |
 | **Compute Efficiency** | Direct invocation for rapid validation | Pre-compute Validation Gate (`BaseValidationService`) | Preserves compute and model resources by screening invalid requests at the perimeter. |

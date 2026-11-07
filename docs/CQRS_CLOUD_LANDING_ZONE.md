@@ -73,7 +73,7 @@ The topology reuses the three network zones and six compute tiers from [CLOUD_LA
 1. Tier 0/1: HTTP POST validated; `correlation_id` minted; HTTP 202 returned.
 2. Tier 1 → Tier 3: validated payload published to the Intake Topic.
 3. Tier 3 → Tier 2: push-invoke of `BaseOrchestrator`, routed to the matching `BaseCommandService`.
-4. Tier 2: DTO validation → Governance gate → business logic → atomic Outbox commit → synchronous cache invalidation (`_synchronize_cache`).
+4. Tier 2: atomic idempotency claim → DTO validation → Governance gate → business logic → conditional commit of the aggregate (`put_if_version`; a losing writer gets a typed `CONFLICT`) → atomic Outbox commit → synchronous cache invalidation (`_synchronize_cache`). A duplicate request is answered from the stored result and runs none of these steps.
 5. Tier 3 → Tier 4: CDC sweeper fans the committed event out to domain-event consumers.
 6. Tier 3 → Tier 5: Task Queue feeds the Saga edge, which evaluates `failed_keys` and performs commit, compensate, or DLQ routing.
 
@@ -82,7 +82,29 @@ The topology reuses the three network zones and six compute tiers from [CLOUD_LA
 1. Tier 0/1: HTTP GET validated instantly, no Intake Topic hop.
 2. Tier 1 → Tier 2: direct synchronous gRPC/HTTP invoke of `BaseOrchestrator`, routed to the matching `BaseQueryService`.
 3. Tier 2 → Tier 3: cache-aside lookup against Redis. On hit, response is marshaled directly into the output DTO — no Tier 3 database or Tier 5 involvement.
-4. Tier 2 → Tier 3 (Read Replica): on cache miss only, a locked read against a physical read-only replica, followed by a cache hydrate.
+4. Tier 2 → Tier 3 (Read Replica): on cache miss only, one single-flight read per key against a physical read-only replica, followed by a cache hydrate; concurrent misses on the same key wait for that one read.
+
+### 3.5 Capacity, Ordering and Consistency per Boundary
+
+The tier numbering and zones above do not change. This section adds, for each boundary, how much work it admits, in what order, and how consistent the answer is. A solid arrow in the figure is a synchronous bounded wait; a dashed arrow is a durable backlog with redelivery and a dead-letter queue; a flag marks a component that saturates independently.
+
+![E2A CQRS capacity, ordering and consistency per boundary](images/cqrs_capacity_ordering.png)
+
+*Capacity, ordering and consistency per boundary. Command admission, the database and read pools, partitioned consumers and leased repair are each sized and bounded on their own; each Tier 3 component is labelled with its ordering and consistency guarantee.*
+
+| Component | Capacity bound | Ordering | Consistency |
+|---|---|---|---|
+| Command admission (Tier 2) | Claim is atomic, so duplicates cost one store round-trip and no work; `db_pool_size` bounds concurrent commits; the request `deadline` bounds every wait | None across commands | Strong: one winner per idempotency key, one writer per aggregate version |
+| State/Outbox and idempotency store | `db_pool_size` per instance; fleet connections (`replicas × db_pool_size`) must stay under the database's connection limit | Per aggregate through the version | Strong for the claim and the conditional commit. Single-item or single-partition scope: an invariant spanning items must be confined to one item or use a transaction |
+| Query path (Tier 2) | Own pool, so reads never starve commands; `deadline` checked before work | None | Cache-aside: eventually consistent, except that `_synchronize_cache` makes a read after a write on the same resource see the write |
+| Tenant-isolated cache | Sized by distinct keys × value size × TTL, not by request rate, because single-flight collapses concurrent misses | None | Advisory. Expiry is an explicit field; provider TTL deletion can lag and is garbage collection only |
+| Read replica | Read pool bounded separately from the write pool; one load per key on a miss | None | Stale by replication lag; the stale window is the lag plus the cache TTL |
+| Intake Topic | Durable backlog; DLQ after max receives | None needed — duplicates are absorbed by the claim | At-least-once |
+| Fan-out topic and queues | Durable backlog; depth drives consumer scale-out | Per aggregate key (partition by tenant + aggregate), never across aggregates | At-least-once; consumers apply through the idempotency claim |
+| Domain event consumers (Tier 4) | `worker_concurrency` ≤ `db_pool_size`; `worker_prefetch` ≥ `worker_concurrency`; drain bound shorter than the platform's termination grace | Per partition | Effectively-once material effects |
+| Outbox sweeper and reconciler | One leader by lease; renew interval shorter than lease TTL; fencing token on every publish | None | A stale leader is rejected by the downstream store; `UNKNOWN` outcomes stay parked |
+
+Sizing uses Little's Law: in-flight commands = command rate × mean handler time. As an illustration only, at the design peak of about 3,472 RPS and the 80:20 split in Section 9, commands are about 694 per second; at an assumed 0.5 s mean handler time that is roughly 347 in flight across the fleet, which the instance count × `worker_concurrency` and the fleet database connection limit must cover. The illustration is an assumption to be replaced with measured handler time.
 
 ## 4. Network Placement Reasoning
 
@@ -131,6 +153,10 @@ Tier 5 evaluates `failed_keys` the same way it does in the agentic profile: a `C
 | Saga / Compensation Processor | AWS Step Functions | Google Workflows | Azure Logic Apps |
 | Observability Stack (`BaseObservability`) | CloudWatch + X-Ray | Cloud Monitoring + Cloud Trace | Azure Monitor + App Insights |
 | Governance / Semantic Firewall (`BaseGovernanceFramework`) | Lambda@Edge / WAF rule groups + custom guard service | Cloud Armor + custom guard service | Azure Front Door WAF + custom guard service |
+| Idempotency claim and conditional-commit store (state table) | DynamoDB conditional writes | Firestore create-if-absent and preconditions | Cosmos DB create item and ETag `If-Match` |
+| Lease store for sweeper and reconciler | Versioned lease item with expiry attribute | Versioned document | Blob lease or versioned item |
+| Partitioned consumer ordering | SQS FIFO message group | Pub/Sub ordering key | Service Bus session |
+| Sweeper and reconciler schedule | EventBridge Scheduler | Cloud Scheduler | Container Apps job (timer trigger) |
 
 ## 8. Observability & Governance: Abstract-Class Integration
 
@@ -154,9 +180,11 @@ Baseline load assumptions reuse [CLOUD_LANDING_ZONE.md](CLOUD_LANDING_ZONE.md)'s
 
 Each P99 target above is an aspirational ceiling, not a self-enforcing one — the actual per-call cutoff lives in code. `BaseCommandService.mutate()` and `BaseQueryService.fetch()` (Implementation Playbook Sections 6-7) each measure their own wall-clock latency from entry to return and raise `NFRViolationError` once it exceeds `max_latency` (default `1.0s` for both, tunable via the `MAX_LATENCY` environment variable or a per-call override). A breach is not a special case: it falls through `BaseOrchestrator.execute()`'s ordinary `except Exception` handling exactly like a DTO validation failure, so a command-path breach still reaches the DLQ/Saga split in Section 6, while a query-path breach does not, per the read/write DLQ split in Section 8.
 
+Concurrency sizing adds four checks to the figures above. (1) `worker_concurrency` ≤ `db_pool_size` per instance and `replicas × db_pool_size` ≤ the database's connection limit. (2) The read pool is sized apart from the write pool, so a read surge cannot starve commands. (3) Cache capacity follows distinct keys × TTL, not request rate. (4) `drain_timeout_seconds` is shorter than the platform's termination grace — about 10 s on Cloud Run, 30 s default on ECS (configurable to 120 s), 30 s on Container Apps. `validate_capacity()` in the scaffold-compliance gate checks the first of these and its siblings before deploy.
+
 ## 10. Enterprise Safeguards & Resiliency Patterns
 
-**10.1 Cache Stampede Prevention (Distributed Mutex).** On a cache miss for a hot key, `BaseQueryService._read_from_cache()` acquires a short-lived distributed Redis lock before querying the read replica. The winning caller hydrates the cache; sibling callers back off exponentially and retry against the now-warm cache.
+**10.1 Cache Stampede Prevention (Single-Flight).** On a cache miss for a hot key, `BaseQueryService.fetch()` calls `BaseCacheStore.get_or_load`: the first caller loads from the read replica and hydrates the cache, and concurrent callers for the same key wait for that one load instead of taking a lock and retrying. A follower waits up to `cache_fill_timeout_seconds`, bounded by the request deadline, then follows `cache_fill_on_timeout` — `load`, `stale` or `raise`. A loader failure reaches the waiting callers and is not cached. Where no shared cache store is bound, the abstract `_read_from_cache()` hook remains the place for a subclass's own guard.
 
 **10.2 Read-After-Write Consistency.** `BaseCommandService._synchronize_cache()` runs synchronously, inside the same request that performed the write, evicting or hydrating the affected Redis key before the command response is returned — a read immediately following a write against the same resource is guaranteed not to observe stale cached data.
 
@@ -165,6 +193,12 @@ Each P99 target above is an aspirational ceiling, not a self-enforcing one — t
 **10.4 Physical-vs-Logical State Guarantee.** `BaseCommandService` never returns a success-shaped response before `_execute_outbox_commit()` has physically succeeded — there is no narrative layer between the business logic and the outbox write for a deterministic service to diverge from.
 
 **10.5 Multi-Tenant Storage Partitioning.** Pool vs. Silo model, unchanged from [CLOUD_LANDING_ZONE.md](CLOUD_LANDING_ZONE.md)'s Section 10.2.
+
+**10.6 Command Admission, Conflict and Replay.** A command takes an atomic claim on its tenant-scoped idempotency key before any work runs. The same key and payload again returns the stored result (`REPLAYED`) or `IN_PROGRESS`; the same key with a different payload is `CONFLICT`. Two writers with the same expected version race on the store's conditional commit: one commits, the other receives a typed `CONFLICT` and nothing reaches the DLQ or the outbox. A commit whose outcome is unknown after a timeout is parked as `UNKNOWN` for the reconciler — never retried or replayed blindly.
+
+**10.7 Ordering and Poison Messages.** Order is guaranteed only within a partition, keyed by tenant and aggregate. Poison handling differs by broker, so the consumer settles a deterministic failure at once and acknowledges it: on SQS FIFO a poison message blocks its message group until it reaches the DLQ; on Pub/Sub the ordering key's tail is redelivered; on Service Bus it is dead-lettered and the session moves on. Service Bus has no native oldest-message-age metric, so alarm on DLQ count and derive age from the enqueue time of a peeked message.
+
+**10.8 Leases and Reconciliation.** The outbox sweeper and the reconciler each run as a single leader holding a lease with a fencing token; the renew interval is shorter than the lease TTL, and a leader that cannot renew stops. The fencing token travels on every publish so a downstream store can reject a stale leader. No provider offers a native fencing token, so the lease adapter issues one from a versioned counter. The reconciler claims a parked key with `recover=True`, confirms physical truth, and replays only a `NOT_COMMITTED` entry, once.
 
 ## 11. Related Documents
 
