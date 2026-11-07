@@ -13,8 +13,11 @@ import hashlib
 import logging
 import threading
 import contextlib
+import random
+import concurrent.futures
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
  
 logging.basicConfig(level=logging.INFO)
@@ -45,16 +48,197 @@ _BRIDGE = {'loop': None}
 _BRIDGE_LOCK = threading.Lock()
 
 
-def _run_on_bridge_loop(coro):
+def _run_on_bridge_loop(coro, timeout: Optional[float] = None):
     """Run a coroutine to completion on one shared background event
-    loop (created lazily, daemon thread) and return its result."""
+    loop (created lazily, daemon thread) and return its result. The wait
+    is BOUNDED when `timeout` is given: on expiry (or if the calling
+    thread is interrupted) the coroutine is cancelled, so its permits and
+    quota are released by the coroutine's own cleanup — a parent deadline
+    or cancellation is never left orphaned on the bridge loop."""
     with _BRIDGE_LOCK:
         if _BRIDGE['loop'] is None:
             loop = asyncio.new_event_loop()
             threading.Thread(target=loop.run_forever, daemon=True,
                              name='e2a-llm-bridge').start()
             _BRIDGE['loop'] = loop
-    return asyncio.run_coroutine_threadsafe(coro, _BRIDGE['loop']).result()
+    fut = asyncio.run_coroutine_threadsafe(coro, _BRIDGE['loop'])
+    try:
+        return fut.result(timeout)
+    except concurrent.futures.TimeoutError:
+        if fut.done():
+            raise                      # the coroutine's own TimeoutError, not ours
+        fut.cancel()
+        raise DeadlineExceeded(f'bridge call exceeded its {timeout:.2f}s bound; coroutine cancelled')
+    except BaseException:
+        fut.cancel()
+        raise
+
+
+
+# ==================================================
+# CONCURRENCY PRIMITIVES — typed outcomes and small, owner-local helpers.
+# Nothing here is a global concurrency manager: each primitive is used by
+# the class that owns the scarce resource or correctness invariant
+# (LLM service -> permits/quota, stores -> conditional commit / claim,
+# adapters -> retry budget / circuit / bulkhead, workflows -> deadline).
+# ==================================================
+
+class ConcurrencyConflict(Exception):
+    """Typed conflict: an OCC version mismatch, a fenced (stale-owner)
+    write, or an idempotency key reused with a different request
+    fingerprint. Never auto-retried against new state without
+    re-evaluating the caller's preconditions."""
+
+
+class AdmissionTimeout(NFRViolationError):
+    """A bounded wait for a permit or quota expired before admission —
+    reject-early backpressure, not an unbounded queue."""
+
+
+class DeadlineExceeded(NFRViolationError):
+    """The request's remaining deadline reached zero."""
+
+
+class CircuitOpenError(NFRViolationError):
+    """A dependency's circuit is open; the call was never attempted."""
+
+
+class BulkheadFullError(NFRViolationError):
+    """A dependency's bulkhead had no free slot within its bounded wait."""
+
+
+# Deterministic failures (validation / policy) are never retried.
+_DETERMINISTIC_ERRORS = (ValueError, TypeError, PermissionError)
+
+
+class PhysicalOutcome(str, Enum):
+    """Typed commit evidence for a material side effect. Logical/model
+    success is not proof of a system-of-record commit. UNKNOWN (e.g. a
+    timeout after the request may have been committed) is reconciled,
+    never blindly retried or dead-lettered."""
+    COMMITTED = 'COMMITTED'
+    NOT_COMMITTED = 'NOT_COMMITTED'
+    UNKNOWN = 'UNKNOWN'
+
+
+def outcome_of(result: Optional[Dict[str, Any]]) -> 'PhysicalOutcome':
+    """Typed outcome of a tool/command result. physical_success stays the
+    boolean view (True only for COMMITTED)."""
+    result = result or {}
+    if result.get('outcome') is not None:
+        return PhysicalOutcome(result['outcome'])
+    return PhysicalOutcome.COMMITTED if result.get('physical_success') else PhysicalOutcome.NOT_COMMITTED
+
+
+class Deadline:
+    """Additive propagation field `deadline`. Absolute on the local
+    monotonic clock; across a process boundary it travels as REMAINING
+    milliseconds (to_remaining_ms / from_remaining_ms), never as a
+    wall-clock time, so clock skew cannot corrupt it. Cancellation is not
+    a field: it propagates through the runtime (asyncio task
+    cancellation / thread interruption)."""
+    HEADER = 'x-e2a-deadline-ms'
+    __slots__ = ('_at',)
+
+    def __init__(self, at_monotonic: float):
+        self._at = at_monotonic
+
+    @classmethod
+    def after(cls, seconds: float) -> 'Deadline':
+        return cls(time.monotonic() + float(seconds))
+
+    @classmethod
+    def from_remaining_ms(cls, ms) -> 'Deadline':
+        return cls.after(float(ms) / 1000.0)
+
+    @classmethod
+    def coerce(cls, value) -> Optional['Deadline']:
+        """None -> None; Deadline -> itself; number -> remaining seconds."""
+        if value is None or isinstance(value, Deadline):
+            return value
+        return cls.after(float(value))
+
+    def remaining(self) -> float:
+        return max(0.0, self._at - time.monotonic())
+
+    def expired(self) -> bool:
+        return time.monotonic() >= self._at
+
+    def bound(self, timeout: Optional[float]) -> float:
+        """min(timeout, remaining) — every bounded wait uses this."""
+        rem = self.remaining()
+        return rem if timeout is None else min(float(timeout), rem)
+
+    def check(self, what: str = 'operation') -> None:
+        if self.expired():
+            raise DeadlineExceeded(f'request deadline exceeded before {what}')
+
+    def to_remaining_ms(self) -> int:
+        return int(self.remaining() * 1000)
+
+
+class ClaimStatus(str, Enum):
+    CLAIMED = 'CLAIMED'                      # caller owns the work; execute it
+    IN_PROGRESS = 'IN_PROGRESS'              # another owner holds an unexpired claim
+    REPLAY = 'REPLAY'                        # already SUCCEEDED; result is the stored one
+    CONFLICT = 'CONFLICT'                    # same key, different request fingerprint
+    RECOVERY_REQUIRED = 'RECOVERY_REQUIRED'  # owner lease expired / outcome UNKNOWN -> reconcile
+    FAILED_FINAL = 'FAILED_FINAL'            # deterministic failure; never re-executed
+
+
+@dataclass
+class ClaimResult:
+    status: 'ClaimStatus'
+    result: Optional[Dict[str, Any]] = None
+    owner: Optional[str] = None
+
+
+@dataclass
+class CommitResult:
+    """Outcome of BaseTransactionalStore.put_if_version()."""
+    status: str                    # COMMITTED | CONFLICT | FENCED
+    version: Optional[int] = None  # new version when COMMITTED
+    current_version: Optional[int] = None  # store's version when CONFLICT
+
+    @property
+    def committed(self) -> bool:
+        return self.status == 'COMMITTED'
+
+
+@dataclass
+class LeaseHandle:
+    """Returned by BaseDistributedLock.acquire(). owner_token proves
+    ownership for renew()/release(); fencing_token is monotonically
+    increasing per key and must accompany any commit a stale (expired)
+    owner could otherwise still land."""
+    key: str
+    owner_token: str
+    fencing_token: int
+    expires_at: float              # monotonic clock
+
+
+# Metric catalogue — names, types and labels defined once. Emitted through
+# BaseObservability's typed emitters (_emit_counter/_emit_histogram/
+# _emit_gauge) or a class's own _emit_metric() hook. tenant_id is a
+# high-cardinality label: aggregate or sample it in the metrics backend.
+E2A_METRICS: Dict[str, Dict[str, Any]] = {
+    'e2a.llm.inflight': {'type': 'gauge', 'unit': 'requests', 'labels': ['pod']},
+    'e2a.llm.permit_wait_seconds': {'type': 'histogram', 'unit': 's', 'labels': ['tenant_id']},
+    'e2a.llm.quota_wait_seconds': {'type': 'histogram', 'unit': 's', 'labels': ['tenant_id']},
+    'e2a.admission.rejected_total': {'type': 'counter', 'unit': '1', 'labels': ['reason']},
+    'e2a.retry.attempts_total': {'type': 'counter', 'unit': '1', 'labels': ['dependency']},
+    'e2a.retry.budget_exhausted_total': {'type': 'counter', 'unit': '1', 'labels': ['dependency']},
+    'e2a.circuit.state': {'type': 'gauge', 'unit': '0=closed,1=half,2=open', 'labels': ['dependency']},
+    'e2a.bulkhead.wait_seconds': {'type': 'histogram', 'unit': 's', 'labels': ['dependency']},
+    'e2a.occ.conflicts_total': {'type': 'counter', 'unit': '1', 'labels': ['store']},
+    'e2a.idempotency.replays_total': {'type': 'counter', 'unit': '1', 'labels': ['status']},
+    'e2a.lease.lost_total': {'type': 'counter', 'unit': '1', 'labels': ['lease']},
+    'e2a.fencing.rejections_total': {'type': 'counter', 'unit': '1', 'labels': ['store']},
+    'e2a.cache.single_flight_followers_total': {'type': 'counter', 'unit': '1', 'labels': ['cache']},
+    'e2a.queue.depth': {'type': 'gauge', 'unit': 'messages', 'labels': ['queue']},
+    'e2a.queue.oldest_age_seconds': {'type': 'gauge', 'unit': 's', 'labels': ['queue']},
+    'e2a.cancellation.cleanup_total': {'type': 'counter', 'unit': '1', 'labels': ['owner']},
+}
 
 
 # ==================================================
@@ -207,6 +391,51 @@ E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
     _k('prompt_store_url', 'PROMPT_STORE_URL', None, str, 'Workflow / Pipeline', 'BasePromptRegistry.get_prompt()'),
     _k('default_version', 'PROMPT_DEFAULT_VERSION', 'latest', str, 'Workflow / Pipeline', 'BasePromptRegistry.get_prompt()'),
     _k('deployment_strategy', 'DEPLOYMENT_STRATEGY', 'BLUE_GREEN', str, 'Workflow / Pipeline', 'BasePipeline._execute_deployment_rollout()'),
+    # -- Object references added by the concurrency extension --
+    _k('idempotency_store', None, None, str, 'Engines (object references)', 'BaseWorkflow.execute() / BaseOrchestrator.execute() / AIDLCPipelineOrchestrator — the bound BaseIdempotencyStore (atomic claim)'),
+    _k('cache_store', None, None, str, 'Engines (object references)', 'BaseQueryService.fetch() — the bound BaseCacheStore (single-flight get_or_load)'),
+    _k('transactional_store', None, None, str, 'Engines (object references)', 'BaseCommandService._commit_versioned() — the bound BaseTransactionalStore (conditional commit)'),
+    _k('pipeline_state_store', None, None, str, 'Engines (object references)', 'AIDLCPipelineOrchestrator — the bound BaseTransactionalStore (durable phase state)'),
+    # -- Deadlines --
+    _k('request_deadline_seconds', 'REQUEST_DEADLINE_SECONDS', 0.0, float, 'Deadlines', 'BaseWorkflow.execute() / BaseOrchestrator.execute() — origin of the additive deadline field (0 = none)'),
+    # -- LLM service admission (extends the LLM service group) --
+    _k('permit_timeout', 'LLM_PERMIT_TIMEOUT', 5.0, float, 'LLM service', 'bounded wait for the tenant + pod permit — AdmissionTimeout on expiry (also capped by the remaining deadline)'),
+    _k('tenant_idle_evict_seconds', 'LLM_TENANT_IDLE_EVICT_SECONDS', 300.0, float, 'LLM service', 'idle per-tenant permit entries are evicted after this long'),
+    # -- Resilience (retry budget, circuit breaker, bulkhead) — owned by the adapter that calls the dependency --
+    _k('retry_base_backoff', 'RETRY_BASE_BACKOFF', 0.1, float, 'Resilience', 'ResiliencePolicy — full-jitter exponential backoff base (seconds)'),
+    _k('retry_max_backoff', 'RETRY_MAX_BACKOFF', 2.0, float, 'Resilience', 'ResiliencePolicy — backoff ceiling (seconds)'),
+    _k('retry_budget_ratio', 'RETRY_BUDGET_RATIO', 0.2, float, 'Resilience', 'ResiliencePolicy — retry tokens earned per first attempt (caps retry amplification)'),
+    _k('retry_budget_cap', 'RETRY_BUDGET_CAP', 10.0, float, 'Resilience', 'ResiliencePolicy — maximum retry-token balance'),
+    _k('circuit_failure_threshold', 'CIRCUIT_FAILURE_THRESHOLD', 5, int, 'Resilience', 'ResiliencePolicy — consecutive failures that open the circuit'),
+    _k('circuit_reset_seconds', 'CIRCUIT_RESET_SECONDS', 30.0, float, 'Resilience', 'ResiliencePolicy — open duration before a half-open probe'),
+    _k('bulkhead_max_concurrent', 'BULKHEAD_MAX_CONCURRENT', 16, int, 'Resilience', 'ResiliencePolicy — per-dependency in-flight cap (0 = off)'),
+    _k('bulkhead_acquire_timeout', 'BULKHEAD_ACQUIRE_TIMEOUT', 1.0, float, 'Resilience', 'ResiliencePolicy — bounded wait for a bulkhead slot'),
+    # -- Pools and fleet capacity (inputs to validate_capacity()) --
+    _k('db_pool_size', 'DB_POOL_SIZE', 20, int, 'Pools / capacity', 'store adapters — per-instance database connection pool'),
+    _k('http_pool_size', 'HTTP_POOL_SIZE', 50, int, 'Pools / capacity', 'tool / upstream adapters — per-instance HTTP connection pool'),
+    _k('retrieval_pool_size', 'RETRIEVAL_POOL_SIZE', 20, int, 'Pools / capacity', 'BaseRAGPipeline._search_index() adapters — per-instance index connection pool'),
+    _k('fleet_replica_count', 'FLEET_REPLICA_COUNT', 1, int, 'Pools / capacity', 'validate_capacity() — replicas of this service (multiplies per-instance concurrency)'),
+    _k('db_max_connections', 'DB_MAX_CONNECTIONS', 0, int, 'Pools / capacity', 'validate_capacity() — database connection ceiling for the whole fleet (0 = unchecked)'),
+    _k('model_max_inflight', 'MODEL_MAX_INFLIGHT', 0, int, 'Pools / capacity', 'validate_capacity() — provider-side concurrent request ceiling for the whole fleet (0 = unchecked)'),
+    _k('termination_grace_seconds', 'TERMINATION_GRACE_SECONDS', 30.0, float, 'Pools / capacity', 'validate_capacity() — platform SIGTERM-to-SIGKILL window; drain_timeout_seconds must be shorter'),
+    # -- Async workers --
+    _k('worker_concurrency', 'WORKER_CONCURRENCY', 8, int, 'Async workers', 'consumer runtime — in-flight messages per instance'),
+    _k('worker_prefetch', 'WORKER_PREFETCH', 16, int, 'Async workers', 'consumer runtime — broker prefetch / max in-flight window per instance'),
+    _k('drain_timeout_seconds', 'DRAIN_TIMEOUT_SECONDS', 20.0, float, 'Async workers', 'consumer runtime / services — graceful-shutdown drain bound'),
+    # -- Leases --
+    _k('lease_ttl_seconds', 'LEASE_TTL_SECONDS', 60, int, 'Leases', 'BaseOutboxSweeper / BaseReconciliationService — BaseDistributedLock lease TTL'),
+    _k('lease_renew_interval_seconds', 'LEASE_RENEW_INTERVAL_SECONDS', 20, int, 'Leases', 'BaseOutboxSweeper / BaseReconciliationService — renew cadence (must be < lease_ttl_seconds)'),
+    _k('fencing_enabled', 'FENCING_ENABLED', True, _to_bool, 'Leases', 'lease holders pass LeaseHandle.fencing_token to downstream commits'),
+    _k('idempotency_lease_seconds', 'IDEMPOTENCY_LEASE_SECONDS', 300, int, 'Leases', 'BaseIdempotencyStore.claim() — IN_PROGRESS claim expiry; an expired claim needs reconciliation, never blind re-execution'),
+    # -- Cache single-flight --
+    _k('cache_fill_timeout_seconds', 'CACHE_FILL_TIMEOUT_SECONDS', 5.0, float, 'Cache', 'BaseCacheStore.get_or_load() — follower wait for the in-flight fill'),
+    _k('cache_fill_on_timeout', 'CACHE_FILL_ON_TIMEOUT', 'load', str, 'Cache', 'BaseCacheStore.get_or_load() — follower policy on fill timeout: load | stale | raise'),
+    # -- Build admission (AI-DLC) --
+    _k('build_max_inflight', 'BUILD_MAX_INFLIGHT', 4, int, 'Build (AI-DLC)', 'AIDLCPipelineOrchestrator — concurrent builds per instance'),
+    _k('tenant_build_max_inflight', 'TENANT_BUILD_MAX_INFLIGHT', 2, int, 'Build (AI-DLC)', 'AIDLCPipelineOrchestrator — concurrent builds per tenant'),
+    # -- Concurrency observability --
+    _k('slow_wait_threshold_seconds', 'SLOW_WAIT_THRESHOLD_SECONDS', 0.5, float, 'Concurrency observability', 'permit / pool / bulkhead waits above this are logged at WARN'),
+    _k('queue_age_slo_seconds', 'QUEUE_AGE_SLO_SECONDS', 60.0, float, 'Concurrency observability', 'oldest-message age above this is an SLO breach signal'),
 ]}
 
 
@@ -282,6 +511,219 @@ def env_example() -> str:
         lines.append(f'{c.env}={val}')
     return '\n'.join(lines) + '\n'
 
+
+# ==================================================
+# ResiliencePolicy — retry budget + circuit breaker + bulkhead, as ONE small
+# composition helper owned by the ADAPTER that calls a dependency
+# (BaseToolService, BaseLLMAgentService upstream, retrieval adapters).
+# Not a manager: each adapter instance owns one policy per dependency, so
+# a saturated dependency cannot starve another.
+# ==================================================
+
+class RetryBudget:
+    """Token-deposit retry budget: every first attempt earns `ratio`
+    tokens (capped); every retry spends one. Bounds retry amplification
+    to roughly `ratio` of traffic regardless of failure rate."""
+
+    def __init__(self, ratio: float = 0.2, cap: float = 10.0):
+        self._ratio, self._cap = float(ratio), float(cap)
+        self._tokens = self._cap / 2.0
+        self._lock = threading.Lock()
+
+    def deposit(self) -> None:
+        with self._lock:
+            self._tokens = min(self._cap, self._tokens + self._ratio)
+
+    def withdraw(self) -> bool:
+        with self._lock:
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True
+            return False
+
+    @property
+    def balance(self) -> float:
+        return self._tokens
+
+
+class CircuitBreaker:
+    """closed -> (threshold consecutive failures) -> open -> (reset window)
+    -> half-open (one probe) -> closed on success / open on failure."""
+
+    def __init__(self, failure_threshold: int = 5, reset_seconds: float = 30.0, clock=time.monotonic):
+        self._threshold, self._reset, self._clock = int(failure_threshold), float(reset_seconds), clock
+        self._failures, self._opened_at, self._probing = 0, None, False
+        self._lock = threading.Lock()
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            if self._opened_at is None:
+                return 'closed'
+            return 'half_open' if self._clock() - self._opened_at >= self._reset else 'open'
+
+    def allow(self) -> bool:
+        with self._lock:
+            if self._opened_at is None:
+                return True
+            if self._clock() - self._opened_at >= self._reset and not self._probing:
+                self._probing = True      # exactly one half-open probe
+                return True
+            return False
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures, self._opened_at, self._probing = 0, None, False
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._probing or self._failures >= self._threshold:
+                self._opened_at, self._probing = self._clock(), False
+
+
+class Bulkhead:
+    """Per-dependency in-flight cap with a BOUNDED wait."""
+
+    def __init__(self, max_concurrent: int, name: str = 'dependency'):
+        self.name, self.max_concurrent = name, int(max_concurrent)
+        self._sem = asyncio.Semaphore(self.max_concurrent)
+        self.waiting = 0
+
+    @contextlib.asynccontextmanager
+    async def slot(self, timeout: float):
+        self.waiting += 1
+        try:
+            await asyncio.wait_for(self._sem.acquire(), timeout=max(0.0, timeout))
+        except asyncio.TimeoutError:
+            raise BulkheadFullError(f"bulkhead '{self.name}' full ({self.max_concurrent} in flight)")
+        finally:
+            self.waiting -= 1
+        try:
+            yield
+        finally:
+            self._sem.release()
+
+
+class ResiliencePolicy:
+    """One dependency's retry / circuit / bulkhead state.
+
+    call(fn, deadline=, max_retries=, idempotent=) runs the zero-argument
+    coroutine factory `fn`:
+      * circuit open            -> CircuitOpenError, fn never called
+      * bulkhead full (bounded) -> BulkheadFullError
+      * deterministic failures (ValueError/TypeError/PermissionError) and
+        NFR/deadline errors are never retried
+      * a timeout is retried only when the call is idempotent (a timeout
+        after a possible commit is an UNKNOWN outcome for a material
+        write — never blindly re-sent)
+      * each retry spends one retry-budget token, uses full-jitter
+        exponential backoff and never sleeps past the remaining deadline
+    `emit(name, **fields)` is an optional metrics callback."""
+
+    def __init__(self, name: str, config: Dict[str, Any] = None, kwargs: Dict[str, Any] = None,
+                 bulkhead: bool = True, emit: Callable[..., None] = None):
+        c, k = config or {}, kwargs or {}
+        self.name, self._emit = name, emit
+        self.base = float(resolve_config('retry_base_backoff', c, k))
+        self.max_backoff = float(resolve_config('retry_max_backoff', c, k))
+        self.budget = RetryBudget(resolve_config('retry_budget_ratio', c, k),
+                                  resolve_config('retry_budget_cap', c, k))
+        self.breaker = CircuitBreaker(resolve_config('circuit_failure_threshold', c, k),
+                                      resolve_config('circuit_reset_seconds', c, k))
+        n = int(resolve_config('bulkhead_max_concurrent', c, k))
+        self.bulkhead = Bulkhead(n, name) if (bulkhead and n > 0) else None
+        self.bulkhead_timeout = float(resolve_config('bulkhead_acquire_timeout', c, k))
+        self.stats = {'attempts': 0, 'retries': 0, 'budget_exhausted': 0, 'circuit_rejected': 0}
+
+    def _note(self, event: str, **fields) -> None:
+        if self._emit:
+            self._emit(event, dependency=self.name, **fields)
+
+    async def call(self, fn: Callable[[], Any], *, deadline: Optional[Deadline] = None,
+                   max_retries: int = 0, idempotent: bool = False,
+                   retryable: Callable[[BaseException], bool] = None):
+        if deadline:
+            deadline.check(f'calling {self.name}')
+        if self.bulkhead is None:
+            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable)
+        wait = deadline.bound(self.bulkhead_timeout) if deadline else self.bulkhead_timeout
+        async with self.bulkhead.slot(wait):
+            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable)
+
+    async def __attempts(self, fn, deadline, max_retries, idempotent, retryable):
+        self.budget.deposit()
+        attempt = 0
+        while True:
+            if not self.breaker.allow():
+                self.stats['circuit_rejected'] += 1
+                self._note('circuit_open')
+                raise CircuitOpenError(f"circuit open for '{self.name}'")
+            attempt += 1
+            self.stats['attempts'] += 1
+            try:
+                result = await fn()
+                self.breaker.record_success()
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                is_timeout = isinstance(e, (asyncio.TimeoutError, TimeoutError))
+                structural = isinstance(e, (CircuitOpenError, BulkheadFullError, DeadlineExceeded, AdmissionTimeout))
+                if not isinstance(e, _DETERMINISTIC_ERRORS) and not structural:
+                    self.breaker.record_failure()
+                can_retry = (attempt <= max_retries and not isinstance(e, _DETERMINISTIC_ERRORS)
+                             and not structural and not isinstance(e, NFRViolationError)
+                             and (idempotent or not is_timeout)
+                             and (retryable(e) if retryable else True))
+                if can_retry and not self.budget.withdraw():
+                    self.stats['budget_exhausted'] += 1
+                    self._note('retry_budget_exhausted')
+                    can_retry = False
+                if not can_retry:
+                    raise
+                delay = random.uniform(0.0, min(self.max_backoff, self.base * (2 ** (attempt - 1))))
+                if deadline and deadline.remaining() <= delay:
+                    raise
+                self.stats['retries'] += 1
+                self._note('retry', attempt=attempt, delay=round(delay, 4))
+                await asyncio.sleep(delay)
+
+
+def validate_capacity(config: Dict[str, Any] = None, **kwargs) -> List[str]:
+    """Capacity equation as ONE pure, testable rule over the central
+    registry: replicas x per-instance concurrency must not silently exceed
+    pools, ceilings or the shutdown window. Returns violation strings
+    (empty = consistent). Runs as part of BasePipeline's scaffold-compliance
+    gate and may be called at start-up."""
+    r = lambda key: resolve_config(key, config, kwargs)
+    v: List[str] = []
+    replicas = max(1, int(r('fleet_replica_count')))
+    pod, tenant = int(r('pod_concurrency')), int(r('tenant_concurrency'))
+    workers, prefetch = int(r('worker_concurrency')), int(r('worker_prefetch'))
+    db_pool, http_pool = int(r('db_pool_size')), int(r('http_pool_size'))
+    if workers > db_pool:
+        v.append(f'worker_concurrency ({workers}) exceeds db_pool_size ({db_pool}) per instance')
+    if pod > http_pool:
+        v.append(f'pod_concurrency ({pod}) exceeds http_pool_size ({http_pool}) per instance')
+    if tenant > pod:
+        v.append(f'tenant_concurrency ({tenant}) exceeds pod_concurrency ({pod})')
+    if prefetch < workers:
+        v.append(f'worker_prefetch ({prefetch}) is below worker_concurrency ({workers}); workers would starve')
+    db_max = int(r('db_max_connections'))
+    if db_max and replicas * db_pool > db_max:
+        v.append(f'fleet DB connections {replicas} x {db_pool} = {replicas * db_pool} exceed db_max_connections ({db_max})')
+    model_max = int(r('model_max_inflight'))
+    amplified = replicas * pod * (1.0 + float(r('retry_budget_ratio')))
+    if model_max and amplified > model_max:
+        v.append(f'fleet model concurrency {replicas} x {pod} x (1+retry_budget_ratio) = {amplified:.0f} exceeds model_max_inflight ({model_max})')
+    if int(r('lease_renew_interval_seconds')) >= int(r('lease_ttl_seconds')):
+        v.append('lease_renew_interval_seconds must be shorter than lease_ttl_seconds')
+    if float(r('drain_timeout_seconds')) >= float(r('termination_grace_seconds')):
+        v.append('drain_timeout_seconds must be shorter than termination_grace_seconds')
+    return v
+
+
 # ==================================================
 # Shared propagation helpers (mixed into every class below)
 # ==================================================
@@ -326,7 +768,13 @@ class _PropagationMixin:
            a mismatch means a sibling process already wrote a newer
            version, so this write is rejected rather than clobbering it.
         OCC and the failed_keys check are deliberately one gate, not two:
-        both answer 'is it still safe to write this item right now?'"""
+        both answer 'is it still safe to write this item right now?'
+
+        ADVISORY ONLY for competing writers: a version compared here can
+        change before the write lands (check-then-write). The AUTHORITY is
+        BaseTransactionalStore.put_if_version(), an atomic conditional
+        commit returning a typed CommitResult. This gate is the cheap
+        local fast-fail in front of it."""
         config = config or {}
         enabled = resolve_config('commit_gate_enabled', config, kwargs)
         if not enabled:
@@ -364,7 +812,13 @@ class _PropagationMixin:
         same event loop, whatever thread the agent runs on. A FAILED
         inference raises, so the caller's normal except path
         (failed_keys + _handle_error) applies."""
-        return _run_on_bridge_loop(self._infer_async(messages, config, **kwargs))
+        c = config or {}
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        bound = (float(resolve_config('llm_max_latency', c, kwargs)) + float(resolve_config('permit_timeout', c, kwargs))
+                 + float(resolve_config('quota_timeout', c, kwargs)) + 1.0)
+        # slack so the service raises its own typed DeadlineExceeded first
+        timeout = min(bound, deadline.remaining() + 0.5) if deadline else bound
+        return _run_on_bridge_loop(self._infer_async(messages, config, **kwargs), timeout=timeout)
  
 # ==================================================
 # BaseObservability & BaseGovernanceFramework — Foundation classes
@@ -651,6 +1105,15 @@ def _luhn_valid(candidate: str) -> bool:
     return total % 10 == 0
 
 
+class _TenantPermit:
+    """Per-tenant concurrency cap entry. `active` counts holders AND
+    waiters so an entry in use is never evicted."""
+    __slots__ = ('sem', 'cap', 'active', 'last_used')
+
+    def __init__(self, cap: int):
+        self.sem, self.cap, self.active, self.last_used = asyncio.Semaphore(cap), cap, 0, time.monotonic()
+
+
 class BaseLLMAgentService(ABC, _PropagationMixin):
     """E2A LLM Inference Microservice — the single, capacity-governed
     boundary between every agent archetype (BaseAgent, LLMOnlyAgent,
@@ -684,7 +1147,15 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         replicas = max(1, int(self._resolve_param('llm_replica_count', self._config, kwargs)))
         self._pod_semaphore = asyncio.Semaphore(
             max(1, int(self._resolve_param('pod_concurrency', self._config, kwargs))))
-        self._tenant_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._tenant_permits: Dict[str, _TenantPermit] = {}
+        self._inflight = 0
+        self._draining = False
+        self.stats: Dict[str, float] = {
+            'permit_wait_total': 0.0, 'quota_wait_total': 0.0, 'permit_timeouts': 0,
+            'quota_timeouts': 0, 'quota_rejections': 0, 'cancelled_cleanups': 0, 'peak_inflight': 0}
+        # circuit breaker around the upstream call; permits already bound
+        # concurrency, so the policy runs without its own bulkhead
+        self._resilience = ResiliencePolicy('llm-upstream', self._config, kwargs, bulkhead=False)
         # Per-pod share of the fleet quota: configured limit / replica count.
         self._max_rpm = float(self._resolve_param('max_rpm', self._config, kwargs)) / replicas
         self._max_tpm = float(self._resolve_param('max_tpm', self._config, kwargs)) / replicas
@@ -701,12 +1172,16 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             correlation_id: str = None, io_config: Dict[str, Any] = None,
             idempotency_key: str = None, tenant_id: str = None,
             message_log: List[dict] = None, failed_keys: List[str] = None,
-            **kwargs) -> Dict[str, Any]:
+            deadline: Any = None, **kwargs) -> Dict[str, Any]:
         """Template method. Fixed lifecycle: sanitise -> semantic cache ->
-        context budget -> KV prefix cache -> tool schemas -> quota
-        admission -> (tenant + pod) concurrency permit -> upstream call
-        under the latency deadline -> output framing -> egress DLP ->
-        usage accounting. Never raises a request failure past this
+        context budget -> KV prefix cache -> tool schemas -> (tenant + pod)
+        concurrency permit [bounded wait] -> RPM/TPM quota admission
+        [bounded wait] -> upstream call under min(llm_max_latency, remaining
+        deadline) behind a circuit breaker -> output framing -> egress DLP
+        -> usage accounting. `deadline` is the additive propagation field
+        (a Deadline or remaining seconds): every wait is bounded by it, and
+        permits and quota are released in finally-style cleanup on failure,
+        deadline AND cancellation. Never raises a request failure past this
         boundary: errors become {'status': 'FAILED'} plus a failed_keys
         entry, like every other E2A class. Always returns the E2A
         physical_success contract. kwargs (model_id, temperature, tools,
@@ -722,9 +1197,15 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         common = dict(correlation_id=correlation_id, io_config=io_config,
                       tenant_id=tenant_id, message_log=message_log)
         start = time.time()
-        admitted = 0
+        deadline = Deadline.coerce(deadline)
+        quota, dispatched = None, False
+        note = lambda event, **f: self._log(message_log, correlation_id, 'WARN', event, **f)
         payload: Dict[str, Any] = {}
         try:
+            if self._draining:
+                raise AdmissionTimeout('E2A service draining: not accepting new inference')
+            if deadline:
+                deadline.check('inference')
             self.__sanitize_prompts(messages)
 
             tools = kwargs.get('tools')
@@ -752,24 +1233,33 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             model_id = self._resolve_param('model_id', cfg, kwargs)
             temperature = self._resolve_param('temperature', cfg, kwargs)
 
-            admitted = sum(self._estimate_tokens(m) for m in prepared) + max_out
-            await self.__admit_quota(admitted, tenant_id, cfg, kwargs)
+            estimate = sum(self._estimate_tokens(m) for m in prepared) + max_out
+            async with self.__concurrency_permit(tenant_id, cfg, kwargs, deadline, note):
+                quota = await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline)
+                up_timeout = float(self._resolve_param('llm_max_latency', cfg, kwargs))
+                if deadline:
+                    up_timeout = deadline.bound(up_timeout)
 
-            deadline = float(self._resolve_param('llm_max_latency', cfg, kwargs))
-            async with self.__concurrency_permit(tenant_id, cfg, kwargs):
-                try:
-                    raw = await asyncio.wait_for(
-                        self._dispatch_upstream_call(
-                            messages=prepared, model_id=model_id, temperature=temperature,
-                            max_tokens=max_out, tools=compiled_tools,
-                            stop_sequences=stop_sequences, cache_handle=cache_handle,
-                            config=cfg, **common,
-                            **self.__extras(kwargs, 'model_id', 'temperature', 'max_tokens',
-                                            'tools', 'stop_sequences', 'cache_handle', 'config')),
-                        timeout=deadline)
-                except asyncio.TimeoutError:
-                    raise NFRViolationError(
-                        f'LLM inference latency SLO breached: > {deadline:.2f}s')
+                async def _upstream():
+                    nonlocal dispatched
+                    dispatched = True
+                    try:
+                        return await asyncio.wait_for(
+                            self._dispatch_upstream_call(
+                                messages=prepared, model_id=model_id, temperature=temperature,
+                                max_tokens=max_out, tools=compiled_tools,
+                                stop_sequences=stop_sequences, cache_handle=cache_handle,
+                                config=cfg, **common,
+                                **self.__extras(kwargs, 'model_id', 'temperature', 'max_tokens',
+                                                'tools', 'stop_sequences', 'cache_handle', 'config')),
+                            timeout=up_timeout)
+                    except asyncio.TimeoutError:
+                        if deadline and deadline.expired():
+                            raise DeadlineExceeded('request deadline exceeded during the upstream call')
+                        raise NFRViolationError(
+                            f'LLM inference latency SLO breached: > {up_timeout:.2f}s')
+
+                raw = await self._resilience.call(_upstream, deadline=deadline)
 
             payload = self._format_and_validate_output(
                 raw, kwargs.get('response_schema'), model_id, cache_handle is not None,
@@ -778,16 +1268,23 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             payload['metadata'] = {'model_id': model_id, 'tokens_used': payload['tokens_used']}
             if self._resolve_param('dlp_enabled', cfg, kwargs) and 'text' in payload:
                 payload['text'], payload['dlp_redactions'] = self._redact_sensitive(payload['text'])
-            await self.__refund_quota(admitted - payload['tokens_used'])
-            admitted = 0
+            self.__settle_quota(quota, dispatched, used=payload['tokens_used'])
+            quota = None
             if use_cache and payload.get('physical_success') and 'tool_calls' not in payload:
                 await self._store_semantic_cache(
                     messages, payload, cfg, tenant_id=tenant_id, **self.__extras(kwargs))
         except DehydrationInterrupt:
+            self.__settle_quota(quota, dispatched, used=None)
+            raise
+        except asyncio.CancelledError:
+            # BaseException: the `except Exception` below never sees it, so
+            # the admitted quota MUST be returned here (cancellation cleanup)
+            self.__settle_quota(quota, dispatched, used=None)
+            self.stats['cancelled_cleanups'] += 1
+            self._emit_metric('counter', 'e2a.cancellation.cleanup_total', 1, {'owner': 'llm_service'})
             raise
         except Exception as e:
-            if admitted:
-                await self.__refund_quota(admitted)
+            self.__settle_quota(quota, dispatched, used=None)
             key = idempotency_key or correlation_id
             if key not in failed_keys:
                 failed_keys.append(key)
@@ -811,7 +1308,7 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             correlation_id: str = None, io_config: Dict[str, Any] = None,
             idempotency_key: str = None, tenant_id: str = None,
             message_log: List[dict] = None, failed_keys: List[str] = None,
-            **kwargs) -> AsyncGenerator[str, None]:
+            deadline: Any = None, **kwargs) -> AsyncGenerator[str, None]:
         """Streaming sibling of process_inference(). Same admission
         (sanitise, context budget, quota, tenant + pod permit) and the
         same failure bookkeeping, then yields DLP-screened text chunks.
@@ -829,18 +1326,26 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             raise ValueError('tenant_id is required for LLM inference')
         common = dict(correlation_id=correlation_id, io_config=io_config,
                       tenant_id=tenant_id, message_log=message_log)
-        start, emitted, admitted = time.time(), 0, 0
+        start, emitted = time.time(), 0
+        deadline = Deadline.coerce(deadline)
+        quota, dispatched, completed = None, False, False
+        note = lambda event, **f: self._log(message_log, correlation_id, 'WARN', event, **f)
         try:
+            if self._draining:
+                raise AdmissionTimeout('E2A service draining: not accepting new inference')
+            if deadline:
+                deadline.check('stream inference')
             self.__sanitize_prompts(messages)
             prepared = self._manage_context_budget(
                 messages, self._resolve_param('context_budget', cfg, kwargs),
                 kwargs.get('reasoning_budget'), cfg, **common)
             max_out = int(self._resolve_param('max_output_tokens', cfg, kwargs))
-            admitted = sum(self._estimate_tokens(m) for m in prepared) + max_out
-            await self.__admit_quota(admitted, tenant_id, cfg, kwargs)
+            estimate = sum(self._estimate_tokens(m) for m in prepared) + max_out
             holdback = int(self._resolve_param('dlp_holdback_chars', cfg, kwargs))
             dlp_on = self._resolve_param('dlp_enabled', cfg, kwargs)
-            async with self.__concurrency_permit(tenant_id, cfg, kwargs):
+            async with self.__concurrency_permit(tenant_id, cfg, kwargs, deadline, note):
+                quota = await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline)
+                dispatched = True
                 raw_stream = self._dispatch_upstream_stream(
                     messages=prepared,
                     model_id=self._resolve_param('model_id', cfg, kwargs),
@@ -848,9 +1353,16 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                     max_tokens=max_out, config=cfg, **common,
                     **self.__extras(kwargs, 'model_id', 'temperature', 'max_tokens', 'config'))
                 async for chunk in self.__stream_with_dlp(raw_stream, holdback, dlp_on):
+                    if deadline and deadline.expired():
+                        raise DeadlineExceeded('request deadline exceeded mid-stream')
                     emitted += len(chunk)
                     yield chunk
+                completed = True
         except DehydrationInterrupt:
+            raise
+        except asyncio.CancelledError:
+            self.stats['cancelled_cleanups'] += 1
+            self._emit_metric('counter', 'e2a.cancellation.cleanup_total', 1, {'owner': 'llm_service'})
             raise
         except Exception as e:
             key = idempotency_key or correlation_id
@@ -859,6 +1371,8 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             self._handle_error(e, messages, cfg, **common, failed_keys=failed_keys)
             raise
         finally:
+            # runs on completion, failure, cancellation and aclose()
+            self.__settle_quota(quota, dispatched, used=(emitted // 4 + 1) if completed else None)
             self._log(message_log, correlation_id, 'INFO', 'llm_stream_complete',
                       latency=round(time.time() - start, 3), chars_emitted=emitted)
 
@@ -937,6 +1451,11 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         applies in addition."""
         return True
 
+    async def _release_shared_quota(self, tokens, tenant_id, config, **kwargs) -> None:
+        """Hook: return fleet-wide quota taken by _acquire_shared_quota()
+        when local admission then failed. Default no-op."""
+        return None
+
     def _format_and_validate_output(self, raw, response_schema, model_id, cached_hit,
                                     correlation_id, tenant_id, config, **kwargs):
         out: Dict[str, Any] = {
@@ -1007,50 +1526,160 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         return max(1, sum(self._estimate_tokens(m) for m in prepared)
                    + len(str((raw or {}).get('text', ''))) // 4)
 
-    def __concurrency_permit(self, tenant_id, config, kwargs):
-        """Tenant-fairness cap (optional) then the pod semaphore."""
-        stack = contextlib.AsyncExitStack()
-        service = self
+    def _emit_metric(self, kind: str, name: str, value: float, dimensions: Dict[str, Any] = None) -> None:
+        """Hook (default no-op): forward a metric from the E2A_METRICS
+        catalogue to BaseObservability's typed emitters / the metrics
+        backend. kind: counter | histogram | gauge."""
 
-        class _Permit:
-            async def __aenter__(_self):
-                cap = int(service._resolve_param('tenant_concurrency', config, kwargs))
-                if cap > 0:
-                    sem = service._tenant_semaphores.setdefault(tenant_id, asyncio.Semaphore(cap))
-                    await stack.enter_async_context(sem)
-                await stack.enter_async_context(service._pod_semaphore)
+    def __observe_wait(self, kind: str, waited: float, tenant_id: str, note=None) -> None:
+        self.stats[f'{kind}_wait_total'] += waited
+        self._emit_metric('histogram', f'e2a.llm.{kind}_wait_seconds', waited, {'tenant_id': tenant_id})
+        slow = float(self._resolve_param('slow_wait_threshold_seconds', self._config, {}))
+        if note and waited >= slow:
+            note('llm_slow_wait', kind=kind, waited=round(waited, 3))
 
-            async def __aexit__(_self, *exc):
-                return await stack.__aexit__(*exc)
-        return _Permit()
+    @property
+    def ready(self) -> bool:
+        """Readiness signal: False once drain() has started, so the
+        platform stops routing new traffic before in-flight work ends."""
+        return not self._draining
 
-    async def __admit_quota(self, tokens, tenant_id, config, kwargs) -> None:
-        """Dual token bucket (requests/min and tokens/min). Fails fast
-        with NFRViolationError after quota_timeout rather than queueing
-        a caller indefinitely."""
+    async def drain(self, timeout: float = None, config: Dict[str, Any] = None) -> bool:
+        """Graceful shutdown: flip readiness, reject new inference, wait up
+        to drain_timeout_seconds (which must be shorter than the platform's
+        SIGTERM-to-SIGKILL window — see validate_capacity()) for in-flight
+        work. Returns True if everything finished; the caller cancels the
+        remainder otherwise, and cancellation cleanup releases their
+        permits and quota."""
+        self._draining = True
+        limit = float(timeout if timeout is not None
+                      else self._resolve_param('drain_timeout_seconds', {**self._config, **(config or {})}, {}))
+        end = time.monotonic() + limit
+        while self._inflight > 0 and time.monotonic() < end:
+            await asyncio.sleep(0.01)
+        return self._inflight == 0
+
+    @property
+    def inflight(self) -> int:
+        """Requests currently holding a pod permit (gauge e2a.llm.inflight)."""
+        return self._inflight
+
+    async def __bounded_acquire(self, sem, timeout, deadline, what) -> None:
+        if not sem.locked():
+            await sem.acquire()
+            return
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=max(0.0, timeout))
+        except asyncio.TimeoutError:
+            self.stats['permit_timeouts'] += 1
+            self._emit_metric('counter', 'e2a.admission.rejected_total', 1, {'reason': 'permit_timeout'})
+            if deadline and deadline.expired():
+                raise DeadlineExceeded(f'request deadline exceeded waiting for the {what}')
+            raise AdmissionTimeout(f'E2A Admission Timeout: no {what} within {max(0.0, timeout):.2f}s')
+
+    def __tenant_entry(self, tenant_id, cap, config, kwargs) -> _TenantPermit:
+        now = time.monotonic()
+        evict = float(self._resolve_param('tenant_idle_evict_seconds', config, kwargs))
+        for k in [k for k, e in self._tenant_permits.items() if e.active == 0 and now - e.last_used > evict]:
+            del self._tenant_permits[k]          # idle tenants do not accumulate
+        entry = self._tenant_permits.get(tenant_id)
+        if entry is None or (entry.cap != cap and entry.active == 0):
+            entry = self._tenant_permits[tenant_id] = _TenantPermit(cap)   # picks up a changed cap once idle
+        return entry
+
+    @contextlib.asynccontextmanager
+    async def __concurrency_permit(self, tenant_id, config, kwargs, deadline=None, note=None):
+        """Optional tenant-fairness cap, then the pod semaphore. The WAIT is
+        bounded by min(permit_timeout, remaining deadline); nothing is
+        queued indefinitely. Always released, including on cancellation."""
+        timeout = float(self._resolve_param('permit_timeout', config, kwargs))
+        budget = deadline.bound(timeout) if deadline else timeout
+        t0 = time.monotonic()
+        entry, tenant_held = None, False
+        try:
+            cap = int(self._resolve_param('tenant_concurrency', config, kwargs))
+            if cap > 0:
+                entry = self.__tenant_entry(tenant_id, cap, config, kwargs)
+                entry.active += 1
+                await self.__bounded_acquire(entry.sem, budget - (time.monotonic() - t0), deadline, 'tenant permit')
+                tenant_held = True
+            await self.__bounded_acquire(self._pod_semaphore, budget - (time.monotonic() - t0), deadline, 'pod permit')
+        except BaseException:
+            if tenant_held:
+                entry.sem.release()
+            if entry:
+                entry.active -= 1
+                entry.last_used = time.monotonic()
+            raise
+        self.__observe_wait('permit', time.monotonic() - t0, tenant_id, note)
+        self._inflight += 1
+        self.stats['peak_inflight'] = max(self.stats['peak_inflight'], self._inflight)
+        self._emit_metric('gauge', 'e2a.llm.inflight', self._inflight, {})
+        try:
+            yield
+        finally:
+            self._inflight -= 1
+            self._pod_semaphore.release()
+            if tenant_held:
+                entry.sem.release()
+            if entry:
+                entry.active -= 1
+                entry.last_used = time.monotonic()
+
+    async def __admit_quota(self, tokens, tenant_id, config, kwargs, deadline=None):
+        """Dual token bucket (requests/min and tokens/min). Fails fast with
+        a typed AdmissionTimeout after min(quota_timeout, remaining
+        deadline) rather than queueing a caller indefinitely. The wait is
+        computed from the refill rate, not busy-polled. Returns the
+        (rpm_units, tpm_tokens) actually consumed, for settlement."""
         timeout = float(self._resolve_param('quota_timeout', config, kwargs))
+        budget = deadline.bound(timeout) if deadline else timeout
         start = time.monotonic()
         if not await self._acquire_shared_quota(tokens, tenant_id, config):
-            raise NFRViolationError('E2A Quota Exhaustion: shared fleet quota denied.')
-        while True:
-            async with self._bucket_lock:
-                now = time.monotonic()
-                elapsed, self._last_bucket_update = now - self._last_bucket_update, now
-                self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + elapsed * self._max_rpm / 60.0)
-                self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + elapsed * self._max_tpm / 60.0)
-                if self._rpm_tokens >= 1.0 and self._tpm_tokens >= min(tokens, self._max_tpm):
-                    self._rpm_tokens -= 1.0
-                    self._tpm_tokens -= min(tokens, self._max_tpm)
-                    return
-            if time.monotonic() - start > timeout:
-                raise NFRViolationError(
-                    'E2A Quota Exhaustion: timed out waiting for RPM/TPM quota.')
-            await asyncio.sleep(0.02)
+            self.stats['quota_rejections'] += 1
+            self._emit_metric('counter', 'e2a.admission.rejected_total', 1, {'reason': 'shared_quota'})
+            raise AdmissionTimeout('E2A Quota Exhaustion: shared fleet quota denied.')
+        need_tpm = min(tokens, self._max_tpm)
+        try:
+            while True:
+                async with self._bucket_lock:
+                    now = time.monotonic()
+                    elapsed, self._last_bucket_update = now - self._last_bucket_update, now
+                    self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + elapsed * self._max_rpm / 60.0)
+                    self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + elapsed * self._max_tpm / 60.0)
+                    if self._rpm_tokens >= 1.0 and self._tpm_tokens >= need_tpm:
+                        self._rpm_tokens -= 1.0
+                        self._tpm_tokens -= need_tpm
+                        self.__observe_wait('quota', time.monotonic() - start, tenant_id)
+                        return (1.0, need_tpm)
+                    rpm_rate, tpm_rate = self._max_rpm / 60.0, self._max_tpm / 60.0
+                    wait = max((1.0 - self._rpm_tokens) / rpm_rate if (self._rpm_tokens < 1.0 and rpm_rate > 0) else 0.0,
+                               (need_tpm - self._tpm_tokens) / tpm_rate if (self._tpm_tokens < need_tpm and tpm_rate > 0) else 0.0)
+                remaining = budget - (time.monotonic() - start)
+                if remaining <= 0 or wait == float('inf'):
+                    self.stats['quota_timeouts'] += 1
+                    self._emit_metric('counter', 'e2a.admission.rejected_total', 1, {'reason': 'quota_timeout'})
+                    if deadline and deadline.expired():
+                        raise DeadlineExceeded('request deadline exceeded waiting for RPM/TPM quota')
+                    raise AdmissionTimeout('E2A Quota Exhaustion: timed out waiting for RPM/TPM quota.')
+                await asyncio.sleep(max(0.005, min(wait, remaining, 1.0)))
+        except BaseException:
+            await self._release_shared_quota(tokens, tenant_id, config)   # local admission failed: give the fleet quota back
+            raise
 
-    async def __refund_quota(self, tokens) -> None:
-        if tokens > 0:
-            async with self._bucket_lock:
-                self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + tokens)
+    def __settle_quota(self, quota, dispatched, used) -> None:
+        """Return admitted-but-unused quota. Synchronous on purpose: it must
+        run on the cancellation path too. RPM is returned only if the call
+        never reached the upstream; tokens are returned for the unused part
+        (all of it when the outcome is a failure/cancellation)."""
+        if not quota:
+            return
+        rpm, tpm = quota
+        if not dispatched:
+            self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + rpm)
+        refund = tpm if used is None else max(0, tpm - used)
+        if refund > 0:
+            self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + refund)
 
     async def __stream_with_dlp(self, raw_stream, holdback, enabled):
         """Hold back the trailing `holdback` characters so a sensitive
@@ -1213,12 +1842,27 @@ class BaseWorkflow(ABC, _PropagationMixin):
         correlation_id = kwargs.get(
             'correlation_id', state.get('correlation_id', str(uuid.uuid4())))
         io_config = self._resolve_io_config(config, **kwargs)
+        deadline = self.__resolve_deadline(config, kwargs)
         idempotency_key = self.__resolve_idempotency(state, config, **kwargs)
         message_log: List[dict] = []
         failed_keys: List[str] = []
         state['tenant_id'] = tenant_id
         state['correlation_id'] = correlation_id
         state['idempotency_key'] = idempotency_key
+        # Atomic claim: exactly one caller owns a material request. A
+        # duplicate gets a typed outcome (REPLAYED / IN_PROGRESS / CONFLICT /
+        # RECOVERY_REQUIRED / FAILED_FINAL), never a second execution.
+        store = config.get('idempotency_store')
+        owned, dehydrated, last_error = False, False, None
+        if isinstance(store, BaseIdempotencyStore) and self._requires_idempotency_claim(state, config, **kwargs):
+            claim = store.claim(
+                idempotency_key, config, tenant_id=tenant_id, owner=correlation_id,
+                fingerprint=self._request_fingerprint(state, config, **kwargs),
+                lease_seconds=int(resolve_config('idempotency_lease_seconds', config, kwargs)),
+                ttl_seconds=int(resolve_config('idempotency_ttl_seconds', config, kwargs)))
+            if claim.status != ClaimStatus.CLAIMED:
+                return self.__short_circuit(state, claim, message_log, correlation_id, config)
+            owned = True
         try:
             workflow = self._build_workflow(
                 config, correlation_id=correlation_id, io_config=io_config,
@@ -1236,11 +1880,13 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 state, config, correlation_id=correlation_id,
                 io_config=io_config, idempotency_key=idempotency_key,
                 tenant_id=tenant_id, message_log=message_log,
-                failed_keys=failed_keys, **kwargs)
+                failed_keys=failed_keys, deadline=deadline, **kwargs)
         except DehydrationInterrupt as d:
             self._log(message_log, correlation_id, 'INFO', 'workflow_dehydrated', reason=str(d))
             state['status'] = 'AWAITING_WEBHOOK'
+            dehydrated = True
         except Exception as e:
+            last_error = e
             failed_keys.append(idempotency_key)
             self._handle_error(e, state, config, correlation_id=correlation_id,
                                 message_log=message_log,
@@ -1251,6 +1897,9 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 obs_engine.record_telemetry(message_log, correlation_id, config, tenant_id=tenant_id)
             else:
                 self._flush_logs(message_log, config)  # fallback when no engine configured
+            if owned:
+                self.__settle_claim(store, idempotency_key, tenant_id, correlation_id, state,
+                                    failed_keys, dehydrated, last_error, config)
             if failed_keys:
                 self._send_to_dlq(failed_keys, config)
             state['message_log'] = message_log
@@ -1278,28 +1927,78 @@ class BaseWorkflow(ABC, _PropagationMixin):
     def _handle_error(self, error, state, config=None, **kwargs):
         pass
  
+    # PROTECTED hooks with defaults — a subclass overrides only to specialise
+    def _requires_idempotency_claim(self, state, config=None, **kwargs) -> bool:
+        """Hook: does this request carry a MATERIAL effect (a write /
+        side effect that must happen at most once)? Default True. A
+        workflow with read-only or purely generative intents overrides it
+        so those are not replayed from a stored answer."""
+        return True
+
+    def _request_fingerprint(self, state, config=None, **kwargs) -> str:
+        """Stable hash of the request's business content. The same
+        idempotency key with a different fingerprint is a CONFLICT, never a
+        replay. Volatile/propagation fields are excluded."""
+        volatile = {'correlation_id', 'idempotency_key', 'message_log', 'failed_keys', 'deadline',
+                    'status', 'response', 'outcome', 'cumulative_tokens_used', 'trace_context'}
+        body = {k: v for k, v in state.items() if k not in volatile}
+        return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
+    def _replayable_result(self, state, config=None, **kwargs) -> Dict[str, Any]:
+        """What a duplicate caller gets back on REPLAY. Taken AFTER egress
+        redaction, so a stored result never re-exposes redacted fields."""
+        return {k: state[k] for k in ('response', 'outcome', 'cumulative_tokens_used') if k in state}
+
+    def _physical_outcome(self, state, config=None, **kwargs) -> Optional['PhysicalOutcome']:
+        """Typed commit evidence for the request, or None when the request
+        had no material side effect. Default reads state['outcome'] (set by
+        the agent from a tool's typed result)."""
+        o = state.get('outcome')
+        if o is None and isinstance(state.get('response'), dict):
+            o = state['response'].get('outcome')
+        return PhysicalOutcome(o) if o else None
+
     # PRIVATE — base-owned, never overridden
+    def __resolve_deadline(self, config, kwargs) -> Optional['Deadline']:
+        d = kwargs.pop('deadline', None)
+        if d is not None:
+            return Deadline.coerce(d)
+        secs = float(resolve_config('request_deadline_seconds', config, kwargs))
+        return Deadline.after(secs) if secs > 0 else None
+
     def __resolve_idempotency(self, state, config=None, **kwargs) -> str:
-        """1. Client-supplied key wins if present and well-formed.
-        2. A matching, non-expired store entry means 'retain existing'
-           (this is a replay). 3. Otherwise mint a new key via the
-        subclass's domain logic and persist it before returning."""
-        config = config or {}
+        """Client-supplied key wins; otherwise the subclass's domain logic
+        mints one. Resolution only DERIVES the key — ownership is the
+        atomic claim in execute(), never a lookup-then-persist."""
         client_key = kwargs.get('idempotency_key', state.get('idempotency_key'))
-        if client_key:
-            existing = self.__lookup_idempotency_store(client_key, config)
-            if existing and not existing.get('expired'):
-                return existing['idempotency_key']
-        new_key = self._generate_idempotency_key(state, config, **kwargs)
-        self.__persist_idempotency_store(new_key, config)
-        return new_key
- 
-    def __lookup_idempotency_store(self, key, config=None):
-        return None  # DynamoDB/Redis lookup via config['idempotency_store_url']
- 
-    def __persist_idempotency_store(self, key, config=None):
-        pass  # persisted with TTL = config['idempotency_ttl_seconds']
- 
+        return client_key if client_key else self._generate_idempotency_key(state, config, **kwargs)
+
+    def __short_circuit(self, state, claim, message_log, correlation_id, config):
+        st = {ClaimStatus.REPLAY: 'REPLAYED', ClaimStatus.IN_PROGRESS: 'IN_PROGRESS',
+              ClaimStatus.CONFLICT: 'CONFLICT', ClaimStatus.RECOVERY_REQUIRED: 'RECOVERY_REQUIRED',
+              ClaimStatus.FAILED_FINAL: 'FAILED_FINAL'}[claim.status]
+        state['status'] = st
+        state['idempotency_status'] = claim.status.value
+        if claim.status == ClaimStatus.REPLAY and claim.result:
+            state.update({k: v for k, v in claim.result.items() if k in ('response', 'outcome', 'cumulative_tokens_used')})
+            state['replayed'] = True
+        self._log(message_log, correlation_id, 'INFO', 'idempotent_short_circuit', claim_status=claim.status.value)
+        self._flush_logs(message_log, config)
+        state['message_log'], state['failed_keys'] = message_log, []
+        return state
+
+    def __settle_claim(self, store, key, tenant_id, owner, state, failed_keys, dehydrated, error, config):
+        kw = dict(config=config, tenant_id=tenant_id, owner=owner)
+        outcome = self._physical_outcome(state, config)
+        if dehydrated:
+            store.fail(key, retryable=True, **kw)            # paused, not failed: claimable again on resume
+        elif outcome == PhysicalOutcome.UNKNOWN:
+            store.fail(key, retryable=False, outcome=PhysicalOutcome.UNKNOWN, **kw)   # parked for reconciliation
+        elif failed_keys:
+            store.fail(key, retryable=not isinstance(error, _DETERMINISTIC_ERRORS), **kw)
+        else:
+            store.complete(key, self._replayable_result(state, config), **kw)
+
 # ==================================================
 # BaseRAGPipeline
 # ==================================================
@@ -1446,15 +2145,51 @@ class BaseToolService(ABC, _PropagationMixin):
     def _validate_input(self, payload, config=None, **kwargs):
         """kwargs: schema, required_fields"""
  
-    # PRIVATE — framework owns HTTP mechanics
+    # PRIVATE — framework owns HTTP mechanics, resilience and outcome typing
+    def _resilience_policy(self, config=None, kwargs=None) -> 'ResiliencePolicy':
+        """One ResiliencePolicy (retry budget, circuit, bulkhead) per tool
+        service instance = per dependency, so one slow dependency saturates
+        only its own bulkhead."""
+        pol = self.__dict__.get('_e2a_policy')
+        if pol is None:
+            pol = self.__dict__['_e2a_policy'] = ResiliencePolicy(type(self).__name__, config, kwargs)
+        return pol
+
     async def __http_post(self, endpoint, body, config=None, **kwargs):
-        timeout = resolve_config('timeout', config, kwargs)
-        retries = resolve_config('retries', config, kwargs)
+        timeout = float(resolve_config('timeout', config, kwargs))
+        retries = int(resolve_config('retries', config, kwargs))
         token = resolve_config('auth_token', config, kwargs)
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        # A call is replay-safe only with an idempotency key (or an explicit
+        # safe_to_retry for reads); only then may a timeout be retried.
+        replay_safe = bool(kwargs.get('idempotency_key')) or bool(kwargs.get('safe_to_retry'))
+
+        async def attempt():
+            t = deadline.bound(timeout) if deadline else timeout
+            return await asyncio.wait_for(
+                self._send_request(endpoint, body, token=token, timeout=t, config=config, **kwargs),
+                timeout=t)
+        try:
+            result = await self._resilience_policy(config, kwargs).call(
+                attempt, deadline=deadline, max_retries=retries if replay_safe else 0,
+                idempotent=replay_safe)
+        except (asyncio.TimeoutError, TimeoutError):
+            # The request may or may not have been committed: typed UNKNOWN,
+            # never a plain failure that a retry would re-execute.
+            return {'status': 'UNKNOWN', 'endpoint': endpoint, 'physical_success': False,
+                    'outcome': PhysicalOutcome.UNKNOWN,
+                    'error': 'timeout after the request may have been committed; reconcile, do not blindly retry'}
         # physical_success reflects the real network/API outcome —
         # callers must check this, never an agent's narrative about it.
-        return {'status': 'ok', 'endpoint': endpoint, 'physical_success': True}  # aiohttp/httpx call
- 
+        result.setdefault('outcome', PhysicalOutcome.COMMITTED if result.get('physical_success') else PhysicalOutcome.NOT_COMMITTED)
+        return result
+
+    async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **kwargs):
+        """Protected transport hook (aiohttp/httpx call in a real subclass).
+        Return {'status', 'physical_success': bool, ...}; raise on
+        transport failure. Default is the reference stub."""
+        return {'status': 'ok', 'endpoint': endpoint, 'physical_success': True}
+
 class RestToolService(BaseToolService):
     """Classic REST/HTTP tool."""
  
@@ -1597,9 +2332,20 @@ def _get_tool_service(tool_name: str, config: Dict[str, Any] = None,
     entry = registry.get(tool_name, {})
     transport = kwargs.get('transport') or entry.get(
         'transport', resolve_config('default_transport', config, kwargs))
-    if transport == 'mcp':
-        return MCPToolService()
-    return RestToolService()
+    # One long-lived instance per (transport, tool): its ResiliencePolicy
+    # (retry budget, circuit, bulkhead) must be SHARED by every call to the
+    # same dependency — a fresh instance per request would give each
+    # request its own, empty breaker and budget.
+    cache_key = (transport, tool_name)
+    with _TOOL_SERVICE_LOCK:
+        svc = _TOOL_SERVICE_CACHE.get(cache_key)
+        if svc is None:
+            svc = _TOOL_SERVICE_CACHE[cache_key] = MCPToolService() if transport == 'mcp' else RestToolService()
+    return svc
+
+
+_TOOL_SERVICE_CACHE: Dict[Any, 'BaseToolService'] = {}
+_TOOL_SERVICE_LOCK = threading.Lock()
  
 # ======================================================================
 # LLMOnlyAgent — abstract peer to BaseAgent, BaseRAGPipeline, and
@@ -1748,70 +2494,272 @@ class BasePromptRegistry(ABC):
 # ==================================================
  
 class BaseTransactionalStore(ABC):
-    """Vendor-neutral durable read/write contract."""
- 
+    """Vendor-neutral durable read/write contract. put_if_version() is the
+    AUTHORITY for competing writers (optimistic concurrency): a version
+    check done earlier (e.g. _commit_gate's expected_version fast-fail) is
+    advisory, because the state can change between check and write; only a
+    conditional commit inside the store is atomic."""
+
     @abstractmethod
     def get(self, key: str, config: Dict[str, Any] = None, **kwargs) -> Optional[Dict[str, Any]]:
         """kwargs: table_or_collection_name."""
- 
+
     @abstractmethod
     def put(self, key: str, value: Dict[str, Any], config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: table_or_collection_name."""
- 
+        """Unconditional write — for records with a single writer by
+        construction. Competing writers use put_if_version().
+        kwargs: table_or_collection_name."""
+
     @abstractmethod
     def delete(self, key: str, config: Dict[str, Any] = None, **kwargs) -> bool:
         """kwargs: table_or_collection_name."""
- 
- 
+
+    @abstractmethod
+    def get_versioned(self, key: str, config: Dict[str, Any] = None, **kwargs):
+        """Return (value, version) or None. kwargs: table_or_collection_name."""
+
+    @abstractmethod
+    def put_if_version(self, key: str, value: Dict[str, Any], expected_version: Optional[int],
+                       config: Dict[str, Any] = None, **kwargs) -> 'CommitResult':
+        """Atomic conditional commit. expected_version None means
+        'create only if absent'. Returns CommitResult COMMITTED (new
+        version) or CONFLICT (current_version) — never silently
+        overwrites. kwargs: table_or_collection_name, fencing_token (when
+        given, a token older than the highest one the store has accepted
+        for this key must return status FENCED). On CONFLICT the caller
+        reloads and RE-EVALUATES its preconditions; it never blindly
+        retries the same decision against new state."""
+
+
 class BaseCacheStore(ABC):
     """Vendor-neutral cache contract. Separate from
     BaseTransactionalStore — TTL/eviction semantics differ from
     durable-store semantics. A subclass implementing two-tier
     (L1 in-process / L2 shared) caching does so entirely inside
-    get()/set(); no separate abstract method for that."""
- 
+    get()/set(); no separate abstract method for that.
+
+    get_or_load()/aget_or_load() are base-owned template methods adding
+    per-key SINGLE-FLIGHT inside one process: concurrent misses for the
+    same key share one loader call. This is deduplication of expensive
+    work, not mutual exclusion — no lock is held around cache reads. A
+    short distributed fill lease is only justified when a cross-replica
+    stampede materially matters, and is then a subclass concern."""
+
     @abstractmethod
     def get(self, key: str, config: Dict[str, Any] = None, **kwargs) -> Optional[Any]:
         """kwargs: default_ttl_seconds."""
- 
+
     @abstractmethod
     def set(self, key: str, value: Any, ttl_seconds: int = None,
             config: Dict[str, Any] = None, **kwargs) -> bool:
         """kwargs: default_ttl_seconds."""
- 
+
     @abstractmethod
     def delete(self, key: str, config: Dict[str, Any] = None, **kwargs) -> bool:
         pass
- 
- 
+
+    # ---- single-flight (base-owned) ----
+    def __sf(self) -> Dict[str, Any]:
+        with _SINGLE_FLIGHT_INIT_LOCK:
+            st = self.__dict__.get('_e2a_single_flight')
+            if st is None:
+                st = {'lock': threading.Lock(), 'flights': {}, 'followers': 0, 'loads': 0}
+                self.__dict__['_e2a_single_flight'] = st
+            return st
+
+    @property
+    def single_flight_stats(self) -> Dict[str, int]:
+        st = self.__sf()
+        return {'loads': st['loads'], 'followers': st['followers']}
+
+    def get_or_load(self, key: str, loader: Callable[[], Any], ttl_seconds: int = None,
+                    config: Dict[str, Any] = None, **kwargs) -> Any:
+        """Cache-aside read with per-key single-flight (threads). Followers
+        wait up to cache_fill_timeout_seconds (bounded by kwargs['deadline']),
+        then follow cache_fill_on_timeout: load | stale | raise."""
+        value = self.get(key, config, **kwargs)
+        if value is not None:
+            return value
+        st = self.__sf()
+        with st['lock']:
+            flight = st['flights'].get(key)
+            leader = flight is None
+            if leader:
+                flight = st['flights'][key] = _Flight()
+                st['loads'] += 1
+            else:
+                st['followers'] += 1
+        if leader:
+            try:
+                value = loader()
+                if value is not None:
+                    self.set(key, value, ttl_seconds, config, **kwargs)
+                flight.finish(value=value)
+                return value
+            except BaseException as e:
+                flight.finish(error=e)
+                raise
+            finally:
+                with st['lock']:
+                    st['flights'].pop(key, None)
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        timeout = float(resolve_config('cache_fill_timeout_seconds', config, kwargs))
+        timeout = deadline.bound(timeout) if deadline else timeout
+        if flight.event.wait(timeout):
+            if flight.error is not None and not isinstance(flight.error, _FlightAborted):
+                raise flight.error
+            if flight.error is None:
+                return flight.value
+        return self.__follower_fallback(key, loader, config, kwargs)
+
+    def __follower_fallback(self, key, loader, config, kwargs):
+        policy = str(resolve_config('cache_fill_on_timeout', config, kwargs)).lower()
+        if policy == 'raise':
+            raise AdmissionTimeout(f'cache fill for {key!r} did not complete in time')
+        if policy == 'stale':
+            return self.get(key, config, **kwargs)
+        return loader()
+
+    async def aget_or_load(self, key: str, loader: Callable[[], Any], ttl_seconds: int = None,
+                           config: Dict[str, Any] = None, **kwargs) -> Any:
+        """asyncio variant of get_or_load(); `loader` is an async callable.
+        get()/set() are the store's own (synchronous) calls."""
+        value = self.get(key, config, **kwargs)
+        if value is not None:
+            return value
+        st = self.__sf()
+        loop = asyncio.get_running_loop()
+        fkey = (id(loop), key)
+        fut = st['flights'].get(fkey)
+        if fut is None:
+            fut = loop.create_future()
+            st['flights'][fkey] = fut
+            st['loads'] += 1
+            try:
+                value = await loader()
+                if value is not None:
+                    self.set(key, value, ttl_seconds, config, **kwargs)
+                fut.set_result(value)
+                return value
+            except asyncio.CancelledError:
+                fut.set_exception(_FlightAborted())   # followers fall back; they are not cancelled
+                raise
+            except BaseException as e:
+                fut.set_exception(e)
+                raise
+            finally:
+                st['flights'].pop(fkey, None)
+                if fut.done() and not fut.cancelled():
+                    fut.exception()      # mark retrieved: no 'never retrieved' warning when nobody followed
+        st['followers'] += 1
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        timeout = float(resolve_config('cache_fill_timeout_seconds', config, kwargs))
+        timeout = deadline.bound(timeout) if deadline else timeout
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout)
+        except _FlightAborted:
+            pass
+        except asyncio.TimeoutError:
+            pass
+        policy = str(resolve_config('cache_fill_on_timeout', config, kwargs)).lower()
+        if policy == 'raise':
+            raise AdmissionTimeout(f'cache fill for {key!r} did not complete in time')
+        if policy == 'stale':
+            return self.get(key, config, **kwargs)
+        return await loader()
+
+
+_SINGLE_FLIGHT_INIT_LOCK = threading.Lock()
+
+
+class _FlightAborted(Exception):
+    """Leader was cancelled; followers degrade instead of inheriting the cancellation."""
+
+
+class _Flight:
+    def __init__(self):
+        self.event, self.value, self.error = threading.Event(), None, None
+
+    def finish(self, value=None, error=None):
+        self.value = value
+        self.error = _FlightAborted() if isinstance(error, (KeyboardInterrupt, SystemExit)) else error
+        self.event.set()
+
+
 class BaseIdempotencyStore(ABC):
-    """Formalizes the conditional-write pattern already described
-    informally in Section 2.1 (__ensure_idempotency) as a reusable,
-    injectable port."""
- 
+    """Atomic idempotency CLAIM with a small state machine:
+        ABSENT -> IN_PROGRESS(owner, lease) -> SUCCEEDED(result)
+                                            -> FAILED_RETRYABLE | FAILED_FINAL
+                                            -> UNKNOWN (outcome needs reconciliation)
+    The ABSENT -> IN_PROGRESS transition MUST be one atomic conditional
+    write: a duplicate caller never executes the action merely because it
+    saw no cached result before another claimant committed ownership.
+    Keys are scoped by tenant_id; a request fingerprint makes the same
+    key with a different payload a typed CONFLICT. This is NOT a lock:
+    it answers 'has this request already been (or is it being) done?'."""
+
     @abstractmethod
+    def claim(self, idempotency_key: str, config: Dict[str, Any] = None, **kwargs) -> 'ClaimResult':
+        """kwargs: tenant_id, fingerprint, owner, lease_seconds,
+        ttl_seconds, recover (True lets a reconciler take over a
+        RECOVERY_REQUIRED record). CLAIMED -> caller owns the work;
+        IN_PROGRESS -> another unexpired owner; REPLAY -> stored result;
+        CONFLICT -> fingerprint mismatch; RECOVERY_REQUIRED -> expired
+        lease or UNKNOWN outcome; FAILED_FINAL -> never re-executed.
+        TTL is garbage collection only — correctness uses an explicit
+        expiry field, never a store's TTL deletion timing."""
+
+    @abstractmethod
+    def complete(self, idempotency_key: str, result: Dict[str, Any],
+                 config: Dict[str, Any] = None, **kwargs) -> bool:
+        """IN_PROGRESS -> SUCCEEDED, only for the current owner (a stale
+        owner whose lease was taken over returns False). Store the
+        post-redaction result. kwargs: tenant_id, owner."""
+
+    @abstractmethod
+    def fail(self, idempotency_key: str, retryable: bool = True,
+             config: Dict[str, Any] = None, **kwargs) -> bool:
+        """IN_PROGRESS -> FAILED_RETRYABLE (claimable again) or
+        FAILED_FINAL (deterministic failure). kwargs: tenant_id, owner,
+        outcome — PhysicalOutcome.UNKNOWN parks the record as
+        RECOVERY_REQUIRED for the reconciler."""
+
     def check_and_set(self, idempotency_key: str, config: Dict[str, Any] = None,
-                       **kwargs) -> bool:
-        """kwargs: ttl_seconds. Atomic check-and-claim — returns True
-        only for the caller that wins the race."""
- 
- 
+                      **kwargs) -> bool:
+        """Compatibility shim: True only for the caller that wins the
+        atomic claim. Callers that need replay or in-progress
+        distinction use claim()."""
+        return self.claim(idempotency_key, config, **kwargs).status == ClaimStatus.CLAIMED
+
+
 class BaseDistributedLock(ABC):
-    """Extracted from the inline cache-stampede mutex (Section 2.15)
-    into a standalone coordination primitive. Deliberately minimal —
-    short-lived, TTL-bound, no reentrancy, no distributed-transaction
-    semantics."""
- 
+    """Temporary EXCLUSIVE OWNERSHIP as a lease: time-bound, renewable,
+    owner-checked. Used by scheduled/reconciliation work that needs one
+    active worker (BaseOutboxSweeper, BaseReconciliationService). It is
+    not used for ordinary writes (use put_if_version), de-duplication
+    (use BaseIdempotencyStore) or cache fills (use get_or_load).
+
+    A lease alone does not stop an expired-but-still-running owner from
+    reaching a downstream store. Where that matters the holder passes
+    LeaseHandle.fencing_token with each commit and the store rejects a
+    token older than one it has already accepted."""
+
     @abstractmethod
     def acquire(self, lock_key: str, ttl_seconds: int,
-                config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: lock_backend."""
- 
+                config: Dict[str, Any] = None, **kwargs) -> Optional['LeaseHandle']:
+        """Return a LeaseHandle (truthy) or None if held elsewhere.
+        fencing_token is strictly increasing per key. kwargs: lock_backend."""
+
     @abstractmethod
-    def release(self, lock_key: str, config: Dict[str, Any] = None, **kwargs) -> None:
-        pass
- 
- 
+    def renew(self, handle: 'LeaseHandle', ttl_seconds: int = None,
+              config: Dict[str, Any] = None, **kwargs) -> bool:
+        """Extend the lease; False if it was lost (expired and taken)."""
+
+    @abstractmethod
+    def release(self, handle: 'LeaseHandle', config: Dict[str, Any] = None, **kwargs) -> None:
+        """Owner-checked: releasing a lease that was lost/taken over is a no-op."""
+
+
 class BaseWebhookDispatcher(ABC, _PropagationMixin):
     """PRIMARY class — dispatch() is the single public entry point.
     Outbound counterpart to BaseToolService: pushes a notification
@@ -1887,88 +2835,157 @@ class BaseMemoryManager(ABC):
 class BaseOutboxSweeper(ABC, _PropagationMixin):
     """PRIMARY class — sweep() is the single public entry point.
     Invoked on a fixed cadence (EventBridge Scheduler / cron),
-    not per request."""
- 
+    not per request. Exclusivity is a LEASE (BaseDistributedLock): the
+    sweeper renews it between records and stops with LEASE_LOST if it can
+    no longer prove ownership. Each publish carries the lease's
+    fencing_token so a downstream store can reject a stale sweeper."""
+
     def __init__(self, lock: 'BaseDistributedLock' = None):
         self.lock = lock  # injected BaseDistributedLock (2.16)
- 
+
     def sweep(self, config: Dict[str, Any] = None, correlation_id: str = None,
               **kwargs) -> Dict[str, Any]:
         """Template method. kwargs: batch_size, max_age_seconds."""
         config = config or {}
         correlation_id = correlation_id or str(uuid.uuid4())
-        if self.lock and not self.lock.acquire('outbox_sweeper', ttl_seconds=60, config=config):
-            return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
+        handle = None
+        if self.lock:
+            handle = self.lock.acquire('outbox_sweeper', ttl_seconds=int(resolve_config('lease_ttl_seconds', config, kwargs)),
+                                        config=config)
+            if not handle:
+                return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
         try:
+            fencing = (handle.fencing_token if handle and resolve_config('fencing_enabled', config, kwargs) else None)
+            renew_every = float(resolve_config('lease_renew_interval_seconds', config, kwargs))
+            last_renew = time.monotonic()
             pending = self._fetch_pending_records(config, **kwargs)
             published, failed = 0, []
             for record in pending:
-                if self._publish_pending_record(record, config, **kwargs):
+                if handle and time.monotonic() - last_renew >= renew_every:
+                    if not self.lock.renew(handle, config=config):
+                        handle = None   # lease lost: stop, do not release someone else's
+                        return {'status': 'LEASE_LOST', 'correlation_id': correlation_id,
+                                'published': published, 'failed_keys': failed}
+                    last_renew = time.monotonic()
+                if self._publish_pending_record(record, config, fencing_token=fencing, **kwargs):
                     published += 1
                 else:
                     failed.append(record.get('id'))
             return {'status': 'SWEPT', 'correlation_id': correlation_id,
                     'published': published, 'failed_keys': failed}
         finally:
-            if self.lock:
-                self.lock.release('outbox_sweeper', config=config)
- 
+            if self.lock and handle:
+                self.lock.release(handle, config=config)
+
     @abstractmethod
     def _fetch_pending_records(self, config: Dict[str, Any] = None, **kwargs) -> list:
         """kwargs: batch_size, max_age_seconds. Reads pending records
         from the Outbox table (Landing Zone Section 3.1.3 / 8.1)."""
- 
+
     @abstractmethod
     def _publish_pending_record(self, record: Dict[str, Any],
                                  config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: destination_topic."""
- 
- 
+        """kwargs: destination_topic, fencing_token (the lease's token, or
+        None when fencing is off — pass it on to any store write a stale
+        sweeper could otherwise land)."""
+
+
 class BaseReconciliationService(ABC, _PropagationMixin):
     """PRIMARY class — reconcile() is the single public entry point.
-    Same scheduled-cadence, same lock-acquisition pattern as
-    BaseOutboxSweeper."""
- 
+    Same scheduled-cadence, same lease pattern as BaseOutboxSweeper.
+
+    For each entry it takes over the idempotency record (claim with
+    recover=True), CONFIRMS PHYSICAL TRUTH through
+    _confirm_physical_outcome() before any replay, and only then replays
+    a NOT_COMMITTED entry. An UNKNOWN outcome stays parked for the next
+    run — it is never replayed blindly (that is how a duplicate material
+    effect happens)."""
+
     def __init__(self, lock: 'BaseDistributedLock' = None,
                  idempotency_store: 'BaseIdempotencyStore' = None):
         self.lock = lock
         self.idempotency_store = idempotency_store  # (2.16)
- 
+
     def reconcile(self, config: Dict[str, Any] = None, correlation_id: str = None,
                   **kwargs) -> Dict[str, Any]:
         """Template method. kwargs: dlq_source, max_replay_count."""
         config = config or {}
         correlation_id = correlation_id or str(uuid.uuid4())
-        if self.lock and not self.lock.acquire('reconciliation_service', ttl_seconds=60, config=config):
-            return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
+        handle = None
+        if self.lock:
+            handle = self.lock.acquire('reconciliation_service',
+                                        ttl_seconds=int(resolve_config('lease_ttl_seconds', config, kwargs)),
+                                        config=config)
+            if not handle:
+                return {'status': 'SKIPPED_LOCKED', 'correlation_id': correlation_id}
+        store = self.idempotency_store
         try:
+            fencing = (handle.fencing_token if handle and resolve_config('fencing_enabled', config, kwargs) else None)
+            renew_every = float(resolve_config('lease_renew_interval_seconds', config, kwargs))
+            last_renew = time.monotonic()
+            lease_s = int(resolve_config('idempotency_lease_seconds', config, kwargs))
             entries = self._fetch_dlq_entries(config, **kwargs)
-            replayed, exhausted = 0, []
+            replayed, exhausted, unresolved = 0, [], []
             for entry in entries:
-                if self.idempotency_store and not self.idempotency_store.check_and_set(
-                        entry.get('idempotency_key'), config=config):
-                    continue  # already reconciled by a prior run
-                if self._replay_dlq_entry(entry, config, **kwargs):
+                if handle and time.monotonic() - last_renew >= renew_every:
+                    if not self.lock.renew(handle, config=config):
+                        handle = None
+                        return {'status': 'LEASE_LOST', 'correlation_id': correlation_id,
+                                'replayed': replayed, 'failed_keys': exhausted, 'unresolved': unresolved}
+                    last_renew = time.monotonic()
+                key, tenant = entry.get('idempotency_key'), entry.get('tenant_id')
+                owned = False
+                if store and key:
+                    cr = store.claim(key, config, tenant_id=tenant, owner=correlation_id,
+                                     fingerprint=entry.get('fingerprint'), lease_seconds=lease_s, recover=True)
+                    if cr.status != ClaimStatus.CLAIMED:
+                        continue  # already reconciled, being worked, or finally failed
+                    owned = True
+                    outcome = self._confirm_physical_outcome(entry, config, fencing_token=fencing, **kwargs)
+                    if outcome == PhysicalOutcome.COMMITTED:
+                        store.complete(key, entry.get('result') or {'outcome': 'COMMITTED'}, config,
+                                       tenant_id=tenant, owner=correlation_id)
+                        continue    # the effect already happened — nothing to replay
+                    if outcome == PhysicalOutcome.UNKNOWN:
+                        store.fail(key, retryable=False, config=config, tenant_id=tenant,
+                                   owner=correlation_id, outcome=PhysicalOutcome.UNKNOWN)
+                        unresolved.append(entry.get('id'))
+                        continue
+                if self._replay_dlq_entry(entry, config, fencing_token=fencing, **kwargs):
                     replayed += 1
+                    if owned:
+                        store.complete(key, entry.get('result') or {'outcome': 'COMMITTED'}, config,
+                                       tenant_id=tenant, owner=correlation_id)
                 else:
                     exhausted.append(entry.get('id'))
+                    if owned:
+                        store.fail(key, retryable=True, config=config, tenant_id=tenant, owner=correlation_id)
             return {'status': 'RECONCILED', 'correlation_id': correlation_id,
-                    'replayed': replayed, 'failed_keys': exhausted}
+                    'replayed': replayed, 'failed_keys': exhausted, 'unresolved': unresolved}
         finally:
-            if self.lock:
-                self.lock.release('reconciliation_service', config=config)
- 
+            if self.lock and handle:
+                self.lock.release(handle, config=config)
+
+    def _confirm_physical_outcome(self, entry: Dict[str, Any], config: Dict[str, Any] = None,
+                                  **kwargs) -> 'PhysicalOutcome':
+        """Hook: ask the system of record whether the entry's material
+        effect actually committed (by idempotency key / business key).
+        Default UNKNOWN — a safe, never-replay default for a subclass that
+        has not bound a confirmation query. kwargs: fencing_token."""
+        return PhysicalOutcome.UNKNOWN
+
     @abstractmethod
     def _fetch_dlq_entries(self, config: Dict[str, Any] = None, **kwargs) -> list:
         """kwargs: dlq_source, max_replay_count."""
- 
+
     @abstractmethod
     def _replay_dlq_entry(self, entry: Dict[str, Any],
                            config: Dict[str, Any] = None, **kwargs) -> bool:
-        """kwargs: target_idempotency_store. Re-submits through the
-        same BaseIdempotencyStore check every live request uses."""
- 
- 
+        """kwargs: target_idempotency_store, fencing_token. Re-submits
+        through the same BaseIdempotencyStore claim every live request
+        uses, and through the same governance/policy path."""
+
+
 # ==================================================
 # BasePipeline — control-plane class. CI/CD lifecycle engine,
 # the code-level counterpart to Landing Zone Section 9.
@@ -2014,6 +3031,10 @@ class BasePipeline(ABC, _PropagationMixin):
             report['stages']['test_execution'] = 'PASSED'
             self._log(message_log, correlation_id, 'INFO', 'test_suite_passed')
  
+            capacity = self._validate_capacity_budget(config, **kwargs)
+            report['capacity_violations'] = capacity
+            if capacity:
+                raise ValueError('Capacity budget violated: ' + '; '.join(capacity))
             if not self._verify_scaffold_contracts(config, **kwargs):
                 raise ValueError('Scaffold verification failed: Single Public Entry Point Rule violated.')
             report['stages']['scaffold_compliance'] = 'PASSED'
@@ -2054,6 +3075,13 @@ class BasePipeline(ABC, _PropagationMixin):
             report['message_log'] = message_log
         return report
  
+    def _validate_capacity_budget(self, config, **kwargs) -> List[str]:
+        """Part of the scaffold-compliance gate: the capacity equation
+        (replicas x per-instance concurrency vs pools, ceilings, retry
+        amplification, lease and shutdown windows). Returns violations;
+        override only to add project-specific rules."""
+        return validate_capacity(config, **kwargs)
+
     @abstractmethod
     def _run_static_security_scans(self, config, **kwargs) -> bool:
         """SAST + secret detection (e.g. gitleaks) for exposed LLM API keys."""

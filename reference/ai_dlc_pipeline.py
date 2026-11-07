@@ -13,12 +13,16 @@
 # convention every other E2A/A2C workflow class already uses.
 
 import os
+import json
 import uuid
 import time
+import hashlib
 import logging
+import threading
 from typing import Any, Dict, List, Optional, TypedDict
 
-from e2a_base import BasePipeline, resolve_config
+from e2a_base import (BasePipeline, resolve_config, ClaimStatus, BaseIdempotencyStore,
+                      BaseTransactionalStore, Deadline, ConcurrencyConflict, AdmissionTimeout)
 from developer_platform_workflow import DeveloperPlatformWorkflow
 from a2c_base import SDLCWorkflow
 
@@ -135,6 +139,59 @@ class AIDLCStaticPipeline(BasePipeline):
 
 
 # ==================================================
+# _BuildAdmission — bounded build admission (per instance + per tenant)
+# ==================================================
+
+class _BuildAdmission:
+    """Caps concurrent builds: build_max_inflight per instance and
+    tenant_build_max_inflight per tenant, with a BOUNDED wait
+    (permit_timeout, capped by the remaining deadline). A build that
+    cannot be admitted in time is REJECTED (retryable), never queued
+    without bound, so one tenant's burst cannot occupy every build slot.
+    Idle tenant entries are evicted so the table does not grow without
+    bound."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._global, self._global_cap = None, None
+        self._tenants: Dict[str, List[Any]] = {}      # tenant -> [semaphore, active]
+
+    def acquire(self, tenant_id, config, deadline=None):
+        gcap = int(resolve_config('build_max_inflight', config))
+        tcap = int(resolve_config('tenant_build_max_inflight', config))
+        timeout = float(resolve_config('permit_timeout', config))
+        budget = deadline.bound(timeout) if deadline else timeout
+        end = time.monotonic() + budget
+        with self._lock:
+            if self._global is None:
+                self._global, self._global_cap = threading.BoundedSemaphore(gcap), gcap
+            entry = self._tenants.setdefault(tenant_id, [threading.BoundedSemaphore(max(1, tcap)), 0])
+            entry[1] += 1                                # waiter or holder: not evictable
+        got_t = got_g = False
+        try:
+            got_t = entry[0].acquire(timeout=max(0.0, end - time.monotonic()))
+            if not got_t:
+                raise AdmissionTimeout(f'E2A Admission Timeout: tenant {tenant_id!r} build limit reached')
+            got_g = self._global.acquire(timeout=max(0.0, end - time.monotonic()))
+            if not got_g:
+                raise AdmissionTimeout('E2A Admission Timeout: instance build limit reached')
+        except BaseException:
+            self._release(entry, tenant_id, got_t, got_g)
+            raise
+        return lambda: self._release(entry, tenant_id, True, True)
+
+    def _release(self, entry, tenant_id, got_t, got_g):
+        if got_g:
+            self._global.release()
+        if got_t:
+            entry[0].release()
+        with self._lock:
+            entry[1] -= 1
+            if entry[1] == 0 and len(self._tenants) > 1024:
+                self._tenants.pop(tenant_id, None)
+
+
+# ==================================================
 # AIDLCPipelineOrchestrator — Tier 2 composing orchestrator
 # ==================================================
 
@@ -146,6 +203,7 @@ class AIDLCPipelineOrchestrator:
 
     def __init__(self, config: Dict[str, Any] = None):
         self.config = config or {}
+        self._admission = _BuildAdmission()
 
     def execute_pipeline(self, request: 'AIDLCPipelineRequest',
                           config: Dict[str, Any] = None,
@@ -162,6 +220,12 @@ class AIDLCPipelineOrchestrator:
         }
         generator_key = self.__generate_key(request)
         result['generator_key'] = generator_key
+        tenant_id = request.get('tenant_id') or '-'
+        secs = float(resolve_config('request_deadline_seconds', config))
+        deadline = Deadline.coerce(request.get('deadline')) if request.get('deadline') is not None \
+            else (Deadline.after(secs) if secs > 0 else None)
+        store = config.get('idempotency_store')
+        owned, release_slot = False, None
 
         try:
             # Step 1 — Governance gate
@@ -171,13 +235,32 @@ class AIDLCPipelineOrchestrator:
                     request, config.get('io_config', {}), config,
                     correlation_id=correlation_id, tenant_id=request.get('tenant_id'))
 
-            # Step 2 — Idempotency check
-            if config.get('idempotency', True) and self.__already_built(generator_key, config):
-                self._log(message_log, correlation_id, 'INFO', 'pipeline_skipped_idempotent')
-                result['success'] = True
-                result['phase_reached'] = 'SKIPPED_IDEMPOTENT'
-                return result
+            # Step 2 — Atomic idempotency CLAIM (one winner per generator_key;
+            # never a check-then-build). Duplicates get a typed outcome.
+            if config.get('idempotency', True) and isinstance(store, BaseIdempotencyStore):
+                claim = store.claim(
+                    generator_key, config, tenant_id=tenant_id, owner=correlation_id,
+                    fingerprint=self.__fingerprint(request),
+                    lease_seconds=int(resolve_config('idempotency_lease_seconds', config)))
+                if claim.status == ClaimStatus.REPLAY:
+                    self._log(message_log, correlation_id, 'INFO', 'pipeline_skipped_idempotent')
+                    result['success'] = True
+                    result['phase_reached'] = 'SKIPPED_IDEMPOTENT'
+                    return result
+                if claim.status != ClaimStatus.CLAIMED:
+                    result['phase_reached'] = {
+                        ClaimStatus.IN_PROGRESS: 'SKIPPED_IN_PROGRESS', ClaimStatus.CONFLICT: 'REJECTED_CONFLICT',
+                        ClaimStatus.RECOVERY_REQUIRED: 'RECOVERY_REQUIRED',
+                        ClaimStatus.FAILED_FINAL: 'FAILED_FINAL'}[claim.status]
+                    self._log(message_log, correlation_id, 'INFO', 'pipeline_duplicate', claim=claim.status.value)
+                    return result
+                owned = True
 
+            # Bounded build admission: reject (retryable) rather than queue forever
+            release_slot = self._admission.acquire(tenant_id, config, deadline)
+
+            if deadline:
+                deadline.check('Phase A')
             # Step 3 — Phase A: G2C + P0. P0's bootstrap() runs inline
             # inside DeveloperPlatformWorkflow.generate() (via the
             # inherited-class generator's own phases 7–8) — never
@@ -203,6 +286,7 @@ class AIDLCPipelineOrchestrator:
             generator_result = DeveloperPlatformWorkflow(config=g2c_config).generate(
                 g2c_request, g2c_config)
             result['generator_result'] = generator_result
+            self.__register_artifact_ref(result, config)      # shared abstract class: atomic reference
             self.__persist_state(result, 'G2C_P0_ATTEMPTED', config)
             self._log(message_log, correlation_id, 'INFO', 'phase_a_complete',
                        success=generator_result.get('success', False))
@@ -219,6 +303,8 @@ class AIDLCPipelineOrchestrator:
             # scaffold_result.dev_request, produced inline by P0's
             # bootstrap() Step 16 because config['a2c']['enabled']=True
             # was set above (P0 Sec 2.2 / 9.2) — never rebuilt here.
+            if deadline:
+                deadline.check('Phase B')
             dev_request = (generator_result.get('scaffold_result') or {}).get('dev_request')
             if request.get('a2c_sdlc', {}).get('enabled') and dev_request:
                 result['dev_request'] = dev_request
@@ -236,6 +322,8 @@ class AIDLCPipelineOrchestrator:
             # Step 5 — Phase C: E2A static verification. Routed through
             # BasePipeline's ONE public method — never by reaching into
             # its protected stage hooks from outside the class.
+            if deadline:
+                deadline.check('Phase C')
             static_pipeline = config.get('static_pipeline') or AIDLCStaticPipeline()
             pipeline_report = static_pipeline.run_pipeline(
                 config, correlation_id=correlation_id,
@@ -248,14 +336,28 @@ class AIDLCPipelineOrchestrator:
             result['success'] = True
             self.__persist_state(result, 'E2A_VERIFIED', config)
 
+        except AdmissionTimeout as e:
+            # Overload, not a build failure: nothing ran, nothing to compensate
+            # or dead-letter. The caller retries; the claim is released below.
+            result['phase_reached'] = 'REJECTED_OVERLOAD'
+            result.setdefault('errors', []).append(str(e))
+            self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_overload', detail=str(e))
         except Exception as e:
             failed_keys.append(generator_key)
             self._handle_error(e, request, result, config,
                                 correlation_id=correlation_id, message_log=message_log)
         finally:
+            if release_slot:
+                release_slot()
             if failed_keys:
                 self._send_to_dlq(failed_keys, config)
                 self.__trigger_compensation(result, config, correlation_id=correlation_id)
+            if owned:      # settle AFTER compensation, so the key is never claimable mid-cleanup
+                kw = dict(config=config, tenant_id=tenant_id, owner=correlation_id)
+                if result['success']:
+                    store.complete(generator_key, {'phase_reached': result['phase_reached']}, **kw)
+                else:
+                    store.fail(generator_key, retryable=True, **kw)
             obs_engine = config.get('observability_engine')
             if obs_engine:
                 obs_engine.record_telemetry(message_log, correlation_id, config,
@@ -275,15 +377,14 @@ class AIDLCPipelineOrchestrator:
         return (f"{ctx.get('project_name','?')}:{ctx.get('runtime','?')}:"
                 f"{ctx.get('build_tool','?')}:{ctx.get('platform','?')}")
 
-    def __already_built(self, generator_key, config) -> bool:
-        store = config.get('idempotency_store')  # a BaseIdempotencyStore
-        if not store:
-            return False
-        # check_and_set() returns True only for the caller that wins the
-        # race — False here means another request already claimed this key.
-        return not store.check_and_set(generator_key, config=config)
+    def __fingerprint(self, request) -> str:
+        body = {'context': request.get('context', {}), 'a2c_sdlc': request.get('a2c_sdlc', {})}
+        return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
 
     def __persist_state(self, result, phase, config):
+        """Durable phase state, written with a CONDITIONAL commit so a lost
+        update (two writers for one correlation_id) surfaces as a typed
+        ConcurrencyConflict instead of silently overwriting."""
         store = config.get('pipeline_state_store')  # a BaseTransactionalStore
         if not store:
             return
@@ -293,8 +394,35 @@ class AIDLCPipelineOrchestrator:
             'phase': phase,
             'updated_at': time.time(),
         }
-        store.put(result['correlation_id'], record, config=config,
-                  table_or_collection_name='pipeline_state')
+        cur = store.get_versioned(result['correlation_id'], config, table_or_collection_name='pipeline_state')
+        res = store.put_if_version(result['correlation_id'], record, cur[1] if cur else None, config,
+                                   table_or_collection_name='pipeline_state')
+        if not res.committed:
+            raise ConcurrencyConflict(f"pipeline state for {result['correlation_id']} changed concurrently")
+
+    def __register_artifact_ref(self, result, config):
+        """Record that this generator_key references the shared abstract
+        class. First registrant of a FRESHLY generated artifact becomes its
+        creator. All changes are compare-and-set loops, so concurrent
+        builds and concurrent compensations cannot lose a reference."""
+        store, gr = config.get('artifact_store'), result.get('generator_result') or {}
+        path, me = gr.get('abstract_class_path'), result['generator_key']
+        if not store or not path:
+            return
+        key = f'artifact:{path}'
+        for _ in range(8):
+            cur = store.get_versioned(key, config)
+            if cur is None or cur[0].get('deleted'):
+                rec = {'refs': [me], 'created_by': me if gr.get('abstract_class_generated_fresh') else None, 'deleted': False}
+                res = store.put_if_version(key, rec, cur[1] if cur else None, config)
+            else:
+                rec, ver = cur
+                if me in rec['refs']:
+                    return
+                res = store.put_if_version(key, dict(rec, refs=rec['refs'] + [me]), ver, config)
+            if res.committed:
+                return
+        raise ConcurrencyConflict(f'could not register artifact reference {key!r}')
 
     def __trigger_compensation(self, result, config, correlation_id=None):
         compensator = config.get('saga_compensator') or AIDLCSagaCompensator()
@@ -367,10 +495,37 @@ class AIDLCSagaCompensator:
         return 'inherited_class_deleted'
 
     def _delete_abstract_class_if_orphaned(self, result, config) -> str:
-        # Only deletes common/e2a_base.py (or a2c_base.py) if this
-        # generator_key is its sole known reference — checked against the
-        # Pipeline State table before any delete.
-        return 'abstract_class_untouched_or_orphan_deleted'
+        """Deletes the shared abstract class ONLY if it was generated fresh
+        by a build in this system AND the last referencing generator_key is
+        being compensated (a completed build never releases its reference,
+        so an empty reference set means every referencing build failed). The
+        reference check and the decision are ONE compare-and-set on the
+        ownership record, so two concurrent compensations cannot both
+        delete, and a sibling build that registered a reference first
+        always keeps the artifact. Only the CAS winner performs the delete."""
+        store, gr = config.get('artifact_store'), result.get('generator_result') or {}
+        path, me = gr.get('abstract_class_path'), result.get('generator_key')
+        if not store or not path:
+            return 'abstract_class_untouched'
+        key = f'artifact:{path}'
+        for _ in range(8):
+            cur = store.get_versioned(key, config)
+            if cur is None:
+                return 'abstract_class_untouched'
+            rec, ver = cur
+            refs = [r for r in rec.get('refs', []) if r != me]
+            orphan = (not refs) and rec.get('created_by') is not None and not rec.get('deleted')
+            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan), ver, config)
+            if res.committed:
+                if orphan:
+                    self._delete_object(path, config)
+                    return 'abstract_class_orphan_deleted'
+                return 'abstract_class_untouched'
+        raise ConcurrencyConflict(f'could not release artifact reference {key!r}')
+
+    def _delete_object(self, path, config) -> None:
+        """Hook: delete the object at `path` from the object store."""
+        return None
 
     def _delete_a2c_artifacts(self, result, config) -> str:
         return 'a2c_artifacts_deleted'

@@ -6,13 +6,18 @@
 # non-LLM request paths.
 
 import os
+import json
 import uuid
 import time
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, ValidationError
-from e2a_base import resolve_config   # central config registry (E2A_CONFIG) — shared with the agentic profile
+from e2a_base import (resolve_config,   # central config registry (E2A_CONFIG) — shared with the agentic profile
+                      Deadline, ClaimStatus, BaseIdempotencyStore, BaseCacheStore,
+                      BaseTransactionalStore, ConcurrencyConflict, CommitResult,
+                      PhysicalOutcome, _DETERMINISTIC_ERRORS)   # shared concurrency contracts
 
 logging.basicConfig(level=logging.INFO)
 
@@ -62,8 +67,11 @@ class _PropagationMixin:
             logging.warning(f'DLQ dispatch -> {queue_url}: {failed_keys}')
 
     def _commit_gate(self, key, failed_keys, config=None, **kwargs):
-        """Base-owned commit gate. Enforces batch isolation and Optimistic
-        Concurrency Control (OCC) via expected_version checks."""
+        """Base-owned commit gate. Enforces batch isolation and a cheap,
+        ADVISORY Optimistic Concurrency fast-fail via expected_version. The
+        authority for competing writers is the store's atomic conditional
+        commit (BaseTransactionalStore.put_if_version), driven from
+        BaseCommandService._commit_versioned()."""
         config = config or {}
         enabled = kwargs.get('commit_gate_enabled', config.get('commit_gate_enabled', True))
         if not enabled:
@@ -262,6 +270,7 @@ class BaseOrchestrator(ABC, _PropagationMixin):
 
         correlation_id = kwargs.get('correlation_id', state.get('correlation_id', str(uuid.uuid4())))
         io_config = self._resolve_io_config(config, **kwargs)
+        deadline = self.__resolve_deadline(config, kwargs)
         idempotency_key = self.__resolve_idempotency(state, config, **kwargs)
 
         message_log: List[dict] = []
@@ -270,7 +279,24 @@ class BaseOrchestrator(ABC, _PropagationMixin):
 
         common = dict(correlation_id=correlation_id, tenant_id=tenant_id,
                       io_config=io_config, idempotency_key=idempotency_key,
-                      message_log=message_log, failed_keys=failed_keys)
+                      message_log=message_log, failed_keys=failed_keys, deadline=deadline)
+        for _k in ('expected_version', 'fencing_token'):     # caller-supplied OCC / lease evidence
+            _v = kwargs.get(_k, state.get(_k))
+            if _v is not None:
+                common[_k] = _v
+
+        # Commands claim their idempotency key atomically; reads need no claim.
+        store = config.get('idempotency_store')
+        owned, dehydrated, last_error, conflicted = False, False, None, False
+        if not is_read and isinstance(store, BaseIdempotencyStore):
+            claim = store.claim(
+                idempotency_key, config, tenant_id=tenant_id, owner=correlation_id,
+                fingerprint=self._request_fingerprint(state, config, **kwargs),
+                lease_seconds=int(resolve_config('idempotency_lease_seconds', config, kwargs)),
+                ttl_seconds=int(resolve_config('idempotency_ttl_seconds', config, kwargs)))
+            if claim.status != ClaimStatus.CLAIMED:
+                return self.__short_circuit(state, claim, message_log, correlation_id)
+            owned = True
 
         try:
             gov_engine = config.get('governance_engine')
@@ -289,7 +315,16 @@ class BaseOrchestrator(ABC, _PropagationMixin):
         except DehydrationInterrupt as d:
             self._log(message_log, correlation_id, 'INFO', 'orchestrator_dehydrated', reason=str(d))
             state['status'] = 'AWAITING_WEBHOOK'
+            dehydrated = True
+        except ConcurrencyConflict as c:
+            # A typed outcome, not a failure: nothing is dead-lettered. The
+            # caller reloads and re-evaluates its preconditions.
+            conflicted = True
+            state['status'] = 'CONFLICT'
+            state['conflict'] = str(c)
+            self._log(message_log, correlation_id, 'WARN', 'concurrency_conflict', detail=str(c))
         except Exception as e:
+            last_error = e
             failed_keys.append(idempotency_key)
             self._handle_error(e, state, config, **common)
         finally:
@@ -299,6 +334,9 @@ class BaseOrchestrator(ABC, _PropagationMixin):
             else:
                 for entry in message_log:
                     logging.info(entry)  # fallback
+            if owned:
+                self.__settle_claim(store, idempotency_key, tenant_id, correlation_id, state,
+                                    failed_keys, dehydrated or conflicted, last_error, config)
             if failed_keys and not is_read:
                 self._send_to_dlq(failed_keys, config)
             state['message_log'] = message_log
@@ -317,18 +355,54 @@ class BaseOrchestrator(ABC, _PropagationMixin):
     @abstractmethod
     def _handle_error(self, error: Exception, state: Dict[str, Any], config: Dict[str, Any], **kwargs) -> None: pass
 
-    def __resolve_idempotency(self, state, config=None, **kwargs) -> str:
-        client_key = kwargs.get('idempotency_key', state.get('idempotency_key'))
-        if client_key:
-            existing = self.__lookup_idempotency_store(client_key, config)
-            if existing and not existing.get('expired'):
-                return existing['idempotency_key']
-        new_key = self._generate_idempotency_key(state, config, **kwargs)
-        self.__persist_idempotency_store(new_key, config)
-        return new_key
+    def _request_fingerprint(self, state, config=None, **kwargs) -> str:
+        """Stable hash of the command's business content; the same key with
+        a different fingerprint is a CONFLICT, never a replay."""
+        volatile = {'correlation_id', 'idempotency_key', 'message_log', 'failed_keys', 'deadline',
+                    'status', 'result', 'outcome', 'conflict'}
+        body = {k: v for k, v in state.items() if k not in volatile}
+        return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
 
-    def __lookup_idempotency_store(self, key, config=None): return None
-    def __persist_idempotency_store(self, key, config=None): pass
+    def _replayable_result(self, state, config=None, **kwargs) -> Dict[str, Any]:
+        """What a duplicate caller receives on REPLAY (post-redaction)."""
+        return {k: state[k] for k in ('result', 'outcome') if k in state}
+
+    def __resolve_deadline(self, config, kwargs):
+        d = kwargs.pop('deadline', None)
+        if d is not None:
+            return Deadline.coerce(d)
+        secs = float(resolve_config('request_deadline_seconds', config, kwargs))
+        return Deadline.after(secs) if secs > 0 else None
+
+    def __resolve_idempotency(self, state, config=None, **kwargs) -> str:
+        """Client key wins, else the subclass mints one. Only DERIVES the
+        key; ownership is the atomic claim in execute()."""
+        client_key = kwargs.get('idempotency_key', state.get('idempotency_key'))
+        return client_key if client_key else self._generate_idempotency_key(state, config, **kwargs)
+
+    def __short_circuit(self, state, claim, message_log, correlation_id):
+        state['status'] = {ClaimStatus.REPLAY: 'REPLAYED', ClaimStatus.IN_PROGRESS: 'IN_PROGRESS',
+                           ClaimStatus.CONFLICT: 'CONFLICT', ClaimStatus.RECOVERY_REQUIRED: 'RECOVERY_REQUIRED',
+                           ClaimStatus.FAILED_FINAL: 'FAILED_FINAL'}[claim.status]
+        state['idempotency_status'] = claim.status.value
+        if claim.status == ClaimStatus.REPLAY and claim.result:
+            state.update({k: v for k, v in claim.result.items() if k in ('result', 'outcome')})
+            state['replayed'] = True
+        self._log(message_log, correlation_id, 'INFO', 'idempotent_short_circuit', claim_status=claim.status.value)
+        state['message_log'], state['failed_keys'] = message_log, []
+        return state
+
+    def __settle_claim(self, store, key, tenant_id, owner, state, failed_keys, released, error, config):
+        kw = dict(config=config, tenant_id=tenant_id, owner=owner)
+        outcome = state.get('outcome')
+        if released:
+            store.fail(key, retryable=True, **kw)      # paused or conflicted: claimable again
+        elif outcome == PhysicalOutcome.UNKNOWN:
+            store.fail(key, retryable=False, outcome=PhysicalOutcome.UNKNOWN, **kw)
+        elif failed_keys:
+            store.fail(key, retryable=not isinstance(error, _DETERMINISTIC_ERRORS), **kw)
+        else:
+            store.complete(key, self._replayable_result(state, config), **kw)
 
 
 # ==================================================
@@ -341,7 +415,7 @@ class BaseCommandService(ABC, _PropagationMixin):
     def mutate(self, payload: Dict[str, Any], config: Dict[str, Any] = None, **kwargs) -> dict:
         config = config or {}
         key = kwargs.get('idempotency_key')
-        failed_keys = kwargs.get('failed_keys', [])
+        failed_keys = kwargs.pop('failed_keys', [])   # popped: _commit_gate() takes it positionally
         message_log = kwargs.get('message_log', [])
         correlation_id = kwargs.get('correlation_id')
         start = time.time()
@@ -356,7 +430,13 @@ class BaseCommandService(ABC, _PropagationMixin):
             self._log(message_log, correlation_id, 'WARN', 'commit_gate_rejected')
             return self.output_dto_model(status='blocked', reason='commit_gate_rejection').dict()
 
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        if deadline:
+            deadline.check('command execution')
         processed_dto = self._execute_business_logic(validated_input, config, **kwargs)
+        # Conditional commit BEFORE the outbox write: the store's atomic
+        # compare-and-set is the authority; a loser raises ConcurrencyConflict.
+        self._commit_versioned(processed_dto, config, **kwargs)
         self._execute_outbox_commit(processed_dto, config, **kwargs)
         self._synchronize_cache(processed_dto, config, **kwargs)
 
@@ -366,6 +446,31 @@ class BaseCommandService(ABC, _PropagationMixin):
         if latency > max_latency:
             raise NFRViolationError(f'Command latency SLO breached: {latency:.2f}s > {max_latency}s')
         return processed_dto.dict()
+
+    def _entity_key(self, processed_dto: BaseModel, **kwargs) -> Optional[str]:
+        """Protected hook: the durable key of the aggregate this command
+        changes. Default None = no versioned aggregate, no conditional
+        commit. A subclass returns the key to opt in to OCC."""
+        return None
+
+    def _commit_versioned(self, processed_dto: BaseModel, config: dict, **kwargs) -> Optional[CommitResult]:
+        """Base-owned conditional commit through config['transactional_store']
+        (a BaseTransactionalStore): put_if_version(expected_version). A
+        CONFLICT or FENCED result raises ConcurrencyConflict — it is never
+        silently overwritten and never retried blindly against new state. A
+        store that can commit the aggregate and the outbox record in ONE
+        transaction overrides this and folds _execute_outbox_commit in."""
+        key = self._entity_key(processed_dto, **kwargs)
+        store = (config or {}).get('transactional_store')
+        if key is None or not isinstance(store, BaseTransactionalStore):
+            return None
+        expected = kwargs.get('expected_version', (config or {}).get('expected_version'))
+        res = store.put_if_version(key, processed_dto.dict(), expected, config,
+                                   fencing_token=kwargs.get('fencing_token'))
+        if not res.committed:
+            raise ConcurrencyConflict(
+                f'{res.status}: {key!r} expected version {expected}, store has {res.current_version}')
+        return res
 
     @abstractmethod
     def _execute_business_logic(self, validated_input: BaseModel, config: dict, **kwargs) -> BaseModel: pass
@@ -389,16 +494,34 @@ class BaseQueryService(ABC, _PropagationMixin):
         io_config = kwargs.get('io_config', {})
         start = time.time()
 
+        deadline = Deadline.coerce(kwargs.get('deadline'))
+        if deadline:
+            deadline.check('query execution')
         cache_key = self._generate_cache_key(query_params, tenant_id)
-        cached_data = self._read_from_cache(cache_key, io_config)
-        if cached_data:
-            self._log(message_log, correlation_id, 'INFO', 'query_cache_hit', latency=round(time.time() - start, 3))
-            return self.output_dto_model(**cached_data).dict()
+        cache_store = config.get('cache_store')
+        if isinstance(cache_store, BaseCacheStore):
+            # Per-key SINGLE-FLIGHT: concurrent misses share one database
+            # read (no distributed lock on the read path).
+            loaded = []
+            def _load():
+                loaded.append(True)
+                self._log(message_log, correlation_id, 'INFO', 'query_cache_miss')
+                return self._execute_db_read(query_params, config, **kwargs)
+            db_data = cache_store.get_or_load(
+                cache_key, _load, None, config, deadline=deadline)   # TTL: the cache store's default_ttl_seconds
+            if not loaded:
+                self._log(message_log, correlation_id, 'INFO', 'query_cache_hit', latency=round(time.time() - start, 3))
+                return self.output_dto_model(**db_data).dict()
+        else:
+            cached_data = self._read_from_cache(cache_key, io_config)
+            if cached_data:
+                self._log(message_log, correlation_id, 'INFO', 'query_cache_hit', latency=round(time.time() - start, 3))
+                return self.output_dto_model(**cached_data).dict()
 
-        self._log(message_log, correlation_id, 'INFO', 'query_cache_miss')
-        db_data = self._execute_db_read(query_params, config, **kwargs)
-        if db_data:
-            self._write_to_cache(cache_key, db_data, io_config)
+            self._log(message_log, correlation_id, 'INFO', 'query_cache_miss')
+            db_data = self._execute_db_read(query_params, config, **kwargs)
+            if db_data:
+                self._write_to_cache(cache_key, db_data, io_config)
 
         latency = time.time() - start
         max_latency = resolve_config('max_latency', config, kwargs, scope='CQRS')

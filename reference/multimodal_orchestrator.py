@@ -17,6 +17,9 @@ from typing import Any, Dict, Optional, TypedDict
 from langgraph.graph import StateGraph, END
 
 from src.e2a_base import (
+    Deadline,
+    _run_on_bridge_loop,
+    resolve_config,
     BaseLLMAgentService,
     BaseAgent,
     BaseWorkflow,
@@ -41,6 +44,17 @@ class OrchestratorState(TypedDict, total=False):
     document_uri: str
     text: str
     response: Dict[str, Any]
+
+
+def _run_tool(coro, config, kwargs):
+    """Run a tool-service coroutine from the synchronous agent path on the
+    shared bridge loop (never asyncio.run: a fresh loop per call cannot be
+    cancelled by a parent and breaks per-loop primitives). The wait is
+    bounded by the request deadline, else by timeout x (retries + 1); on
+    expiry the coroutine is CANCELLED, not orphaned."""
+    deadline = Deadline.coerce(kwargs.get('deadline'))
+    bound = float(resolve_config('timeout', config, kwargs)) * (int(resolve_config('retries', config, kwargs)) + 1) + 1.0
+    return _run_on_bridge_loop(coro, timeout=min(bound, deadline.remaining() + 0.5) if deadline else bound)
 
 
 class ModalityPreprocessor:
@@ -114,8 +128,9 @@ class APIToolAgent(BaseAgent):
         # mcp_server_registry auto-detection _resolve_tool_call() does
         # and force REST regardless of what's registered for this tool.
         service = _get_tool_service(state["tool_name"], config, transport="http")
-        state["tool_result"] = asyncio.run(service.execute(
-            state.get("tool_payload", {}), config, tenant_id=tenant_id, **kwargs))
+        state["tool_result"] = _run_tool(service.execute(
+            state.get("tool_payload", {}), config, tenant_id=tenant_id, **kwargs), config, kwargs)
+        state["outcome"] = state["tool_result"].get("outcome")  # typed: COMMITTED / NOT_COMMITTED / UNKNOWN
 
     def _evaluate_output(self, response, state, config=None, **kwargs):
         # Logical-vs-Physical rule (Section 2.6): only physical_success
@@ -141,11 +156,12 @@ class MCPToolAgent(BaseAgent):
         # follow the same kwargs MCPToolService.get_endpoint() and
         # ._build_payload() already read (Section 3, MCPToolService).
         service = _get_tool_service(state["tool_name"], config, transport="mcp")
-        state["tool_result"] = asyncio.run(service.execute(
+        state["tool_result"] = _run_tool(service.execute(
             state.get("tool_payload", {}), config, tenant_id=tenant_id,
             mcp_server_url=state.get("mcp_server_url"),
             mcp_tool_name=state.get("mcp_tool_name", state.get("tool_name")),
-            **kwargs))
+            **kwargs), config, kwargs)
+        state["outcome"] = state["tool_result"].get("outcome")
 
     def _evaluate_output(self, response, state, config=None, **kwargs):
         return 1.0 if state.get("tool_result", {}).get("physical_success") else 0.0
@@ -321,6 +337,13 @@ class MultiAgentOrchestratorWorkflow(BaseWorkflow):
         if intent not in agent_registry or score < self.min_confidence:
             return self.fallback_agent
         return agent_registry[intent]
+
+    def _requires_idempotency_claim(self, state, config=None, **kwargs) -> bool:
+        """Only tool-call intents can have a material side effect. RAG,
+        LLM-only and fallback answers are generative reads and are never
+        replayed from a stored answer."""
+        return state.get("intent") in ("MCP_TOOL_CALL", "API_TOOL_CALL") \
+            and kwargs.get("intent_score", 1.0) >= self.min_confidence
 
     def _generate_idempotency_key(self, state, config=None, **kwargs) -> str:
         import hashlib
