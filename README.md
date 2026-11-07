@@ -72,6 +72,10 @@ The spikes therefore have two roles in the history of the work:
 
 This repository uses careful evidence language throughout. Architectural feasibility, reference-runtime validation, and actual production evidence are not treated as interchangeable.
 
+### Concurrency evolution
+
+E2A owns concurrency by invariant rather than through a global manager: atomic idempotency claims for duplicates, conditional commits for competing writers, leases with fencing for scheduled repair, bounded admission and quota for capacity, and deadlines for cancellation. The guarantee is effectively-once material effects under at-least-once delivery, not exactly-once. These mechanisms are implemented in the reference scaffold (`reference/`) and covered by smoke tests against in-memory test doubles; they have not been validated against live provider services or production load. See [`docs/IMPLEMENTATION_PLAYBOOK.md`](docs/IMPLEMENTATION_PLAYBOOK.md) §2.19 and the reference tests for detail.
+
 ---
 
 ## 2. The Enterprise-to-Agentic Problem
@@ -365,7 +369,7 @@ Agentic systems still depend on conventional distributed-systems patterns for th
 Optimizes for correctness and controlled mutation:
 
 - Validation and authorization
-- Idempotency
+- Atomic idempotency claim
 - Optimistic concurrency where appropriate
 - Atomic state mutation
 - Transactional outbox
@@ -378,7 +382,7 @@ Optimizes for scalable reads:
 
 - Read models / replicas
 - Tenant-scoped cache-aside
-- Distributed mutex where cache-stampede protection is justified
+- Per-key single-flight where cache-stampede protection is justified
 - Explicit staleness policy
 
 ### Event path
@@ -465,6 +469,8 @@ E2A distinguishes failure classes instead of applying retries indiscriminately.
 | Low-quality model output | Repair, fallback, or escalation |
 | Retrieval insufficiency | Clarify, fallback, or human review |
 | Partial physical effect | Compensate or reconcile |
+| Overload or saturation | Bounded wait, then typed rejection; no unbounded queue |
+| Uncertain side effect (timeout after a possible commit) | Park as UNKNOWN; reconcile against the system of record; never blind retry |
 | Poison asynchronous work | DLQ + operational investigation |
 | Cost-budget violation | Stop, downgrade, or route |
 
