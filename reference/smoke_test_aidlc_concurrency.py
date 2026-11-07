@@ -4,18 +4,41 @@ Run: python smoke_test_aidlc_concurrency.py"""
 import sys, threading, time, types
 sys.path.insert(0, '.')
 
-calls = {'g2c': 0}
+calls = {'g2c': 0, 'last_req': None, 'sdlc_in': None}
 GEN = {'success': True, 'abstract_class_path': 'common/e2a_base.py', 'abstract_class_generated_fresh': True,
        'scaffold_result': {}}
 gate = threading.Event()
 class _DPW:
+    """Stands in for G2C: like the real DeveloperPlatformWorkflow it registers
+    its own generator_key on the shared abstract class through
+    config['artifact_registry'] (compare-and-set) when generation succeeds."""
     def __init__(self, config=None): pass
     def generate(self, req, cfg):
-        calls['g2c'] += 1; gate.wait(2); time.sleep(0.05); return dict(GEN)
+        calls['g2c'] += 1; calls['last_req'] = dict(req); gate.wait(2); time.sleep(0.05)
+        out = dict(GEN, generator_key='g2c-' + req['scaffold']['project_name'])
+        if req.get('generator_type') in ('e2a_inherited', 'a2c_inherited'):
+            out['scaffold_result'] = {'success': True, 'dev_request': {
+                'project_name': req['scaffold']['project_name'], 'project_type': 'svc',
+                'mandatory_nfrs': [], 'target_cloud': 'aws'}}
+        reg = cfg.get('artifact_registry')
+        if reg is not None:
+            while True:
+                cur = reg.get_versioned(out['abstract_class_path'])
+                rec, ver = (cur if cur else ({'refs': [], 'creator': None, 'deleted': False}, None))
+                if out['generator_key'] in rec['refs']: break
+                creator = rec['creator'] or (out['generator_key'] if out['abstract_class_generated_fresh'] and not rec['refs'] else None)
+                if reg.compare_and_set(out['abstract_class_path'], dict(rec, refs=rec['refs'] + [out['generator_key']], creator=creator), ver): break
+        return out
 class _SDLC:
     def __init__(self, config=None): pass
+    def execute(self, dev_request, config):
+        calls['sdlc_in'] = dev_request; dev_request['generated_code'] = 'x'; return dev_request
+class _Validator:
+    def validate(self, agent_name, state, config=None, correlation_id=None):
+        missing = [k for k in ('project_name', 'project_type', 'mandatory_nfrs', 'target_cloud', 'tenant_id') if k not in state]
+        return {'valid': not missing, 'errors': [f'missing field: {k}' for k in missing]}
 m = types.ModuleType('developer_platform_workflow'); m.DeveloperPlatformWorkflow = _DPW
-n = types.ModuleType('a2c_base'); n.SDLCWorkflow = _SDLC
+n = types.ModuleType('a2c_base'); n.SDLCWorkflow = _SDLC; n.DevPlatformValidationService = _Validator
 sys.modules['developer_platform_workflow'], sys.modules['a2c_base'] = m, n
 
 from e2a_base import ConcurrencyConflict, Deadline
@@ -68,21 +91,27 @@ gate.set()
 rA = orch.execute_pipeline(req('A'), cfg)            # fails Phase C after G2C -> phase E2A? compensation by phase
 cfgB = dict(cfg, static_pipeline=StaticOK()); rB = orch.execute_pipeline(req('B'), cfgB)
 rec = cfg['artifact_store'].get_versioned('artifact:common/e2a_base.py')[0]
-check('T-14 sibling build keeps shared artifact referenced', 'B' in str(rec['refs']) or any('B:' in x for x in rec['refs']))
+check('T-14 one ownership record, G2C identity: failed A released, B registered', rec['refs'] == ['g2c-B'])
 check('T-14 artifact not deleted while referenced', deleted == [])
-# direct race: two compensations of two keys on one artifact, only creator+orphan may delete, never twice
-store = InMemoryTransactionalStore(); cfg2 = {'artifact_store': store}
-store.put_if_version('artifact:x', {'refs': ['k1', 'k2'], 'created_by': 'k1', 'deleted': False}, None)
-comp = Comp(); deleted.clear()
-def go(k): comp._delete_abstract_class_if_orphaned({'generator_key': k, 'generator_result': {'abstract_class_path': 'x'}}, cfg2)
-ths = [threading.Thread(target=go, args=(k,)) for k in ('k1', 'k2')]
-[t.start() for t in ths]; [t.join() for t in ths]
-check('T-14 racing compensations of k1,k2: exactly one deletes, exactly once', deleted == ['x'])
+# direct: releases by G2C key; deletion opt-in, creator only, last reference only, at most once
+store = InMemoryTransactionalStore(); comp = Comp()
+def rel(k, path, cfg_): return comp._delete_abstract_class_if_orphaned(
+    {'generator_result': {'generator_key': k, 'abstract_class_path': path}}, cfg_)
+off, on = {'artifact_store': store}, {'artifact_store': store, 'compensation_delete_orphan_abstract': True}
+store.put_if_version('artifact:w', {'refs': ['k1'], 'created_by': 'k1', 'deleted': False}, None)
+deleted.clear(); r = rel('k1', 'w', off)
+check('T-14 default: creator releasing the last reference keeps the file', r == 'abstract_reference_released' and deleted == [])
 store.put_if_version('artifact:y', {'refs': ['k1', 'k2'], 'created_by': 'k1', 'deleted': False}, None)
-deleted.clear(); comp._delete_abstract_class_if_orphaned({'generator_key': 'k1', 'generator_result': {'abstract_class_path': 'y'}}, cfg2)
-check('T-14 one referrer leaving while another remains: not deleted', deleted == [])
-comp._delete_abstract_class_if_orphaned({'generator_key': 'k2', 'generator_result': {'abstract_class_path': 'y'}}, cfg2)
-check('T-14 last referrer leaving deletes it', deleted == ['y'])
+deleted.clear(); rel('k2', 'y', on); rel('k1', 'y', on)
+check('T-14 opt-in: creator leaving last deletes it', deleted == ['y'])
+store.put_if_version('artifact:z', {'refs': ['k1', 'k2'], 'created_by': 'k1', 'deleted': False}, None)
+deleted.clear(); rel('k1', 'z', on); rel('k2', 'z', on)
+check('T-14 opt-in: a non-creator leaving last never deletes', deleted == [])
+store.put_if_version('artifact:x', {'refs': ['k1', 'k2'], 'created_by': 'k1', 'deleted': False}, None)
+deleted.clear()
+ths = [threading.Thread(target=rel, args=(k, 'x', on)) for k in ('k1', 'k2')]
+[t.start() for t in ths]; [t.join() for t in ths]
+check('T-14 racing releases: at most one delete, never twice', deleted in ([], ['x']))
 
 # admission: bounded, typed rejection, no leak
 cfg = mk(); a = _BuildAdmission()
@@ -110,4 +139,35 @@ check('overload releases claim; retry then succeeds', r2['success'])
 cfg = mk(); orch = AIDLCPipelineOrchestrator(cfg); calls['g2c'] = 0
 time.sleep(0.01); r = orch.execute_pipeline(dict(req('d'), deadline=Deadline.after(-1)), cfg)
 check('expired deadline: no build started', calls['g2c'] == 0 and not r['success'])
+# ---- cross-framework fixes (E2A family system design X-1..X-8, X-11)
+gate.set()
+cfg = mk(); orch = AIDLCPipelineOrchestrator(cfg); calls['last_req'] = None
+r = orch.execute_pipeline(dict(req('ix'), a2c_sdlc={'enabled': True}, harness={'generator_type': 'e2a_abstract'}), cfg)
+check('X-1 A2C requested with an abstract-only harness -> REJECTED_INVALID, nothing runs',
+      r['phase_reached'] == 'REJECTED_INVALID' and calls['last_req'] is None
+      and cfg['idempotency_store'].state_of('aidlc:ix:py:pip:aws', 't1') is None)
+calls['last_req'] = None
+r = orch.execute_pipeline(dict(req('tx'), deadline=Deadline.after(120), harness={'generator_type': 'e2a_inherited'}), cfg)
+check('X-2 tenant_id and deadline_ms reach the G2C request',
+      calls['last_req']['tenant_id'] == 't1' and 0 < calls['last_req']['deadline_ms'] <= 120000)
+check('X-4 build claim is namespaced aidlc:', cfg['idempotency_store'].state_of('aidlc:tx:py:pip:aws', 't1') == 'SUCCEEDED'
+      and r['build_key'] == 'tx:py:pip:aws')
+r = orch.execute_pipeline(dict(req('a2'), harness={'generator_type': 'e2a_inherited'},
+                               a2c_sdlc={'enabled': True, 'project_type': 'svc'}), cfg)
+check('X-3 dev_request validated, then A2C runs', r['phase_reached'] == 'E2A_VERIFIED' and calls['sdlc_in'] is not None)
+check('X-8 A2C gets a copy: the build result is not enriched', 'generated_code' not in r['dev_request'])
+check('X-3 validated dev_request carries the build tenant', r['dev_request']['tenant_id'] == 't1')
+class LeaseSpy(InMemoryIdempotencyStore):
+    def claim(self, key, config=None, **kw):
+        self.lease = kw.get('lease_seconds'); return super().claim(key, config, **kw)
+cfg = mk(idempotency_store=LeaseSpy()); orch = AIDLCPipelineOrchestrator(cfg)
+orch.execute_pipeline(dict(req('ls'), deadline=Deadline.after(900)), cfg)
+check('X-7 build lease outlives the deadline', cfg['idempotency_store'].lease >= 900)
+deleted.clear()
+cfg = mk(saga_compensator=Comp(), static_pipeline=StaticBad(), compensation_delete_orphan_abstract=True)
+orch = AIDLCPipelineOrchestrator(cfg)
+r = orch.execute_pipeline(dict(req('solo'), harness={'generator_type': 'e2a_inherited'}), cfg)
+rec = cfg['artifact_store'].get_versioned('artifact:common/e2a_base.py')[0]
+check('X-11 Phase C failure after Phase A releases the reference', r['phase_reached'] == 'G2C_P0_DONE' and rec['refs'] == [])
+check('X-11 sole creator, opt-in: orphaned base deleted once', deleted == ['common/e2a_base.py'])
 print(f'{ok} checks passed')

@@ -12,6 +12,7 @@
 # signature below is inferred from that description and from the calling
 # convention every other E2A/A2C workflow class already uses.
 
+import copy
 import os
 import json
 import uuid
@@ -24,7 +25,11 @@ from typing import Any, Dict, List, Optional, TypedDict
 from e2a_base import (BasePipeline, resolve_config, ClaimStatus, BaseIdempotencyStore,
                       BaseTransactionalStore, Deadline, ConcurrencyConflict, AdmissionTimeout)
 from developer_platform_workflow import DeveloperPlatformWorkflow
-from a2c_base import SDLCWorkflow
+from a2c_base import SDLCWorkflow, DevPlatformValidationService
+
+# Harness generator types that run P0 and therefore produce a dev_request;
+# Phase B (A2C) needs one.
+INHERITED_GENERATOR_TYPES = ('e2a_inherited', 'a2c_inherited')
 
 logging.basicConfig(level=logging.INFO)
 
@@ -52,17 +57,23 @@ class AIDLCPipelineRequest(TypedDict, total=False):
     model_id: str
     critic_model_id: str
 
+    deadline: Any             # Deadline or seconds; else request_deadline_seconds
+
     # Written by AIDLCPipelineOrchestrator — do not supply
-    generator_key: str
+    build_key: str
+    generator_key: str        # deprecated alias of build_key (not G2C's generator_key)
     correlation_id: str
 
 
 class AIDLCPipelineResult(TypedDict, total=False):
     success: bool
-    generator_key: str
+    build_key: str            # project_name:runtime:build_tool:platform; claimed as aidlc:<build_key>
+    generator_key: str        # deprecated alias of build_key
     correlation_id: str
     phase_reached: str          # QUEUED | G2C_P0_DONE | A2C_DONE | E2A_VERIFIED
                                  # | FAILED_G2C_P0 | FAILED_A2C | SKIPPED_IDEMPOTENT
+                                 # | SKIPPED_IN_PROGRESS | REJECTED_CONFLICT | REJECTED_INVALID
+                                 # | REJECTED_OVERLOAD | RECOVERY_REQUIRED | FAILED_FINAL
     generator_result: dict      # GeneratorResult from Phase A (G2C)
     dev_request: dict           # DevRequest handed to A2C, if Phase B ran
     sdlc_result: dict           # updated DevRequest returned by Phase B
@@ -82,7 +93,8 @@ class PipelineStateRecord(TypedDict, total=False):
     of at a generic row store."""
     correlation_id: str
     tenant_id: str
-    generator_key: str
+    build_key: str
+    generator_key: str          # deprecated alias of build_key
     phase: str
     artifact_pointers: Dict[str, str]
     created_at: float
@@ -218,14 +230,28 @@ class AIDLCPipelineOrchestrator:
             'correlation_id': correlation_id, 'message_log': message_log,
             'failed_keys': failed_keys, 'success': False, 'phase_reached': 'QUEUED',
         }
-        generator_key = self.__generate_key(request)
-        result['generator_key'] = generator_key
+        build_key = self.__generate_key(request)
+        result['build_key'] = build_key
+        result['generator_key'] = build_key       # deprecated alias
+        claim_key = f'aidlc:{build_key}'          # namespaced: never collides with g2c:/p0:/a2c: keys
+        generator_key = build_key                 # identity used in failed_keys / DLQ
         tenant_id = request.get('tenant_id') or '-'
         secs = float(resolve_config('request_deadline_seconds', config))
         deadline = Deadline.coerce(request.get('deadline')) if request.get('deadline') is not None \
             else (Deadline.after(secs) if secs > 0 else None)
         store = config.get('idempotency_store')
         owned, release_slot = False, None
+
+        # A requested phase that cannot run is a rejected request, not a
+        # build that later reports success without it.
+        problem = self.__request_problem(request)
+        if problem:
+            result['phase_reached'] = 'REJECTED_INVALID'
+            result['errors'] = [problem]
+            self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_invalid', detail=problem)
+            result['latency_ms'] = round((time.time() - start) * 1000, 1)
+            result['trace_id'] = correlation_id
+            return result
 
         try:
             # Step 1 — Governance gate
@@ -238,10 +264,14 @@ class AIDLCPipelineOrchestrator:
             # Step 2 — Atomic idempotency CLAIM (one winner per generator_key;
             # never a check-then-build). Duplicates get a typed outcome.
             if config.get('idempotency', True) and isinstance(store, BaseIdempotencyStore):
+                # The lease must outlive the whole build: at least the request
+                # deadline plus a margin, never less than the configured lease.
+                lease = int(resolve_config('idempotency_lease_seconds', config))
+                if deadline:
+                    lease = max(lease, int(deadline.remaining()) + 60)
                 claim = store.claim(
-                    generator_key, config, tenant_id=tenant_id, owner=correlation_id,
-                    fingerprint=self.__fingerprint(request),
-                    lease_seconds=int(resolve_config('idempotency_lease_seconds', config)))
+                    claim_key, config, tenant_id=tenant_id, owner=correlation_id,
+                    fingerprint=self.__fingerprint(request), lease_seconds=lease)
                 if claim.status == ClaimStatus.REPLAY:
                     self._log(message_log, correlation_id, 'INFO', 'pipeline_skipped_idempotent')
                     result['success'] = True
@@ -268,7 +298,17 @@ class AIDLCPipelineOrchestrator:
             g2c_request = dict(request.get('harness', {}))
             g2c_request['scaffold'] = request.get('context', {})
             g2c_request.update(request.get('prompt', {}))
+            # The build's tenant and remaining deadline reach every Phase A step
+            # (G2C claims, the gateway, P0 and the dev_request it builds).
+            if request.get('tenant_id'):
+                g2c_request.setdefault('tenant_id', request['tenant_id'])
+            if deadline:
+                g2c_request['deadline_ms'] = deadline.to_remaining_ms()
             g2c_config = dict(config)
+            # One artifact-ownership record per shared abstract class: G2C
+            # registers its references in this build's artifact_store.
+            if config.get('artifact_store') is not None:
+                g2c_config['artifact_registry'] = _ArtifactRegistryAdapter(config['artifact_store'], config)
             if request.get('a2c_sdlc', {}).get('enabled'):
                 # Rides through DeveloperPlatformWorkflow -> ... -> P0's
                 # bootstrap() unchanged, exactly as P0's own
@@ -286,7 +326,6 @@ class AIDLCPipelineOrchestrator:
             generator_result = DeveloperPlatformWorkflow(config=g2c_config).generate(
                 g2c_request, g2c_config)
             result['generator_result'] = generator_result
-            self.__register_artifact_ref(result, config)      # shared abstract class: atomic reference
             self.__persist_state(result, 'G2C_P0_ATTEMPTED', config)
             self._log(message_log, correlation_id, 'INFO', 'phase_a_complete',
                        success=generator_result.get('success', False))
@@ -306,9 +345,29 @@ class AIDLCPipelineOrchestrator:
             if deadline:
                 deadline.check('Phase B')
             dev_request = (generator_result.get('scaffold_result') or {}).get('dev_request')
-            if request.get('a2c_sdlc', {}).get('enabled') and dev_request:
+            if request.get('a2c_sdlc', {}).get('enabled'):
+                if not dev_request:
+                    # Requested but impossible: never skip silently.
+                    failed_keys.append(generator_key)
+                    result['phase_reached'] = 'FAILED_A2C'
+                    result.setdefault('errors', []).append(
+                        'a2c_sdlc.enabled but Phase A produced no dev_request '
+                        '(needs an inherited generator with a scaffold)')
+                    return result
+                if request.get('tenant_id'):
+                    dev_request.setdefault('tenant_id', request['tenant_id'])
                 result['dev_request'] = dev_request
-                sdlc_result = SDLCWorkflow(config=config).execute(dev_request, config)
+                # Validation tier before the workflow (BaseValidationService).
+                validator = config.get('a2c_validation_service') or DevPlatformValidationService()
+                verdict = validator.validate('SDLCWorkflow', dev_request, config,
+                                             correlation_id=correlation_id)
+                if not verdict['valid']:
+                    failed_keys.append(generator_key)
+                    result['phase_reached'] = 'FAILED_A2C'
+                    result.setdefault('errors', []).extend(verdict['errors'])
+                    return result
+                # A copy: A2C enriches its state in place.
+                sdlc_result = SDLCWorkflow(config=config).execute(copy.deepcopy(dev_request), config)
                 result['sdlc_result'] = sdlc_result
                 self._log(message_log, correlation_id, 'INFO', 'phase_b_complete',
                            critic_score=(sdlc_result.get('critic_report') or {}).get('score'))
@@ -355,9 +414,9 @@ class AIDLCPipelineOrchestrator:
             if owned:      # settle AFTER compensation, so the key is never claimable mid-cleanup
                 kw = dict(config=config, tenant_id=tenant_id, owner=correlation_id)
                 if result['success']:
-                    store.complete(generator_key, {'phase_reached': result['phase_reached']}, **kw)
+                    store.complete(claim_key, {'phase_reached': result['phase_reached']}, **kw)
                 else:
-                    store.fail(generator_key, retryable=True, **kw)
+                    store.fail(claim_key, retryable=True, **kw)
             obs_engine = config.get('observability_engine')
             if obs_engine:
                 obs_engine.record_telemetry(message_log, correlation_id, config,
@@ -390,7 +449,8 @@ class AIDLCPipelineOrchestrator:
             return
         record: PipelineStateRecord = {
             'correlation_id': result['correlation_id'],
-            'generator_key': result['generator_key'],
+            'build_key': result['build_key'],
+            'generator_key': result['build_key'],
             'phase': phase,
             'updated_at': time.time(),
         }
@@ -400,29 +460,14 @@ class AIDLCPipelineOrchestrator:
         if not res.committed:
             raise ConcurrencyConflict(f"pipeline state for {result['correlation_id']} changed concurrently")
 
-    def __register_artifact_ref(self, result, config):
-        """Record that this generator_key references the shared abstract
-        class. First registrant of a FRESHLY generated artifact becomes its
-        creator. All changes are compare-and-set loops, so concurrent
-        builds and concurrent compensations cannot lose a reference."""
-        store, gr = config.get('artifact_store'), result.get('generator_result') or {}
-        path, me = gr.get('abstract_class_path'), result['generator_key']
-        if not store or not path:
-            return
-        key = f'artifact:{path}'
-        for _ in range(8):
-            cur = store.get_versioned(key, config)
-            if cur is None or cur[0].get('deleted'):
-                rec = {'refs': [me], 'created_by': me if gr.get('abstract_class_generated_fresh') else None, 'deleted': False}
-                res = store.put_if_version(key, rec, cur[1] if cur else None, config)
-            else:
-                rec, ver = cur
-                if me in rec['refs']:
-                    return
-                res = store.put_if_version(key, dict(rec, refs=rec['refs'] + [me]), ver, config)
-            if res.committed:
-                return
-        raise ConcurrencyConflict(f'could not register artifact reference {key!r}')
+    def __request_problem(self, request) -> Optional[str]:
+        """A requested phase that cannot run makes the request invalid."""
+        if request.get('a2c_sdlc', {}).get('enabled'):
+            gtype = request.get('harness', {}).get('generator_type')
+            if gtype not in INHERITED_GENERATOR_TYPES:
+                return (f"a2c_sdlc.enabled needs an inherited generator in the harness "
+                        f"({' or '.join(INHERITED_GENERATOR_TYPES)}), got {gtype!r}")
+        return None
 
     def __trigger_compensation(self, result, config, correlation_id=None):
         compensator = config.get('saga_compensator') or AIDLCSagaCompensator()
@@ -450,27 +495,69 @@ class AIDLCPipelineOrchestrator:
 # AIDLCSagaCompensator — Tier 5 Saga compensation engine
 # ==================================================
 
+class _ArtifactRegistryAdapter:
+    """Presents this build's artifact_store (a BaseTransactionalStore) as
+    the registry G2C's DeveloperPlatformWorkflow expects (get_versioned /
+    compare_and_set). Records stay in the AI-DLC schema
+    artifact:<path> -> {refs, created_by, deleted}, so G2C's registration
+    and this compensator's release work on ONE record with ONE identity
+    (G2C's generator_key)."""
+
+    def __init__(self, store, config=None):
+        self.store, self.config = store, config or {}
+
+    def get_versioned(self, path):
+        cur = self.store.get_versioned(f'artifact:{path}', self.config)
+        if cur is None:
+            return None
+        rec, ver = cur
+        return ({'refs': list(rec.get('refs', [])), 'creator': rec.get('created_by'),
+                 'deleted': bool(rec.get('deleted'))}, ver)
+
+    def get(self, path):
+        cur = self.get_versioned(path)
+        return cur[0] if cur else None
+
+    def compare_and_set(self, path, record, expected_version) -> bool:
+        res = self.store.put_if_version(
+            f'artifact:{path}', {'refs': list(record['refs']), 'created_by': record.get('creator'),
+                                 'deleted': bool(record.get('deleted'))},
+            expected_version, self.config)
+        return bool(res.committed)
+
+
 class AIDLCSagaCompensator:
     """PRIMARY class — compensate() is the single public entry point.
-    Scoped so it only ever reverts artifacts this specific generator_key
-    produced. common/e2a_base.py or common/a2c_base.py is never touched
-    here — that file is reused-by-reference across generator_keys and may
-    already be a dependency of other, unrelated, already-completed builds."""
+    Scoped so it only ever reverts artifacts this specific build produced.
+
+    Rule: compensation never deletes an output whose producing step settled
+    SUCCEEDED (a P0 scaffold that succeeded, a generated abstract class).
+    Those claims would otherwise replay paths that no longer exist. A failed
+    build releases its reference on the shared abstract class instead.
+    Deleting an orphaned abstract class is opt-in
+    (config['compensation_delete_orphan_abstract']) and allowed only to the
+    build that created it fresh, after the last reference is released; G2C
+    and P0 report a replay whose output is missing as recovery_required."""
 
     def compensate(self, result: 'AIDLCPipelineResult', config: Dict[str, Any] = None,
                     correlation_id: str = None, **kwargs) -> Dict[str, Any]:
         config = config or {}
         phase = result.get('phase_reached', 'QUEUED')
+        gr = result.get('generator_result') or {}
         actions: List[str] = []
 
         if phase in ('QUEUED', 'FAILED_G2C_P0'):
-            # Nothing durable was written yet, or only a partial scaffold —
-            # delete the inherited-class file and the P0 scaffold for this
-            # generator_key only. The shared abstract class is untouched
-            # unless it was generated fresh for this request and no other
-            # generator_key references it yet (checked inside the helper).
-            actions.append(self._delete_scaffold(result, config))
+            # Delete only what no settled claim vouches for: a scaffold whose
+            # P0 step did not succeed, and the inherited class of a failed
+            # generation (written only if the failure came after the write).
+            if not (gr.get('scaffold_result') or {}).get('success'):
+                actions.append(self._delete_scaffold(result, config))
             actions.append(self._delete_inherited_class(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
+
+        elif phase == 'G2C_P0_DONE':
+            # Phase C failed with no Phase B: scaffold and classes are valid,
+            # replayable outputs — keep them; release this build's reference.
             actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         elif phase == 'FAILED_A2C':
@@ -479,48 +566,53 @@ class AIDLCSagaCompensator:
             # and the ephemeral Git branch are reverted.
             actions.append(self._delete_a2c_artifacts(result, config))
             actions.append(self._revert_git_branch(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         elif phase == 'A2C_DONE':
             # Phase C (static verification) failed after A2C succeeded —
             # revert only the staged A2C commit; scaffold and classes stand.
             actions.append(self._revert_git_branch(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         self._route_to_dlq(result, config, correlation_id=correlation_id)
         return {'phase_compensated': phase, 'actions': actions}
 
     def _delete_scaffold(self, result, config) -> str:
-        return 'scaffold_deleted'  # object-store delete under generator_key prefix
+        return 'scaffold_deleted'  # object-store delete under the build_key prefix
 
     def _delete_inherited_class(self, result, config) -> str:
         return 'inherited_class_deleted'
 
     def _delete_abstract_class_if_orphaned(self, result, config) -> str:
-        """Deletes the shared abstract class ONLY if it was generated fresh
-        by a build in this system AND the last referencing generator_key is
-        being compensated (a completed build never releases its reference,
-        so an empty reference set means every referencing build failed). The
-        reference check and the decision are ONE compare-and-set on the
-        ownership record, so two concurrent compensations cannot both
-        delete, and a sibling build that registered a reference first
-        always keeps the artifact. Only the CAS winner performs the delete."""
+        """Release this build's reference on the shared abstract class (one
+        compare-and-set on the ownership record). The identity is G2C's
+        generator_key, the one G2C registered. The class is deleted only if
+        deletion is enabled, this build CREATED it fresh, and no other
+        reference remains; the CAS makes that decision exactly once."""
         store, gr = config.get('artifact_store'), result.get('generator_result') or {}
-        path, me = gr.get('abstract_class_path'), result.get('generator_key')
+        path = gr.get('abstract_class_path')
+        me = gr.get('generator_key') or result.get('build_key') or result.get('generator_key')
         if not store or not path:
             return 'abstract_class_untouched'
+        allow_delete = bool(config.get('compensation_delete_orphan_abstract', False))
         key = f'artifact:{path}'
         for _ in range(8):
             cur = store.get_versioned(key, config)
             if cur is None:
                 return 'abstract_class_untouched'
             rec, ver = cur
-            refs = [r for r in rec.get('refs', []) if r != me]
-            orphan = (not refs) and rec.get('created_by') is not None and not rec.get('deleted')
-            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan), ver, config)
+            if me not in rec.get('refs', []):
+                return 'abstract_class_untouched'
+            refs = [r for r in rec['refs'] if r != me]
+            orphan = (allow_delete and not refs and rec.get('created_by') == me
+                      and not rec.get('deleted'))
+            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan),
+                                       ver, config)
             if res.committed:
                 if orphan:
                     self._delete_object(path, config)
                     return 'abstract_class_orphan_deleted'
-                return 'abstract_class_untouched'
+                return 'abstract_reference_released'
         raise ConcurrencyConflict(f'could not release artifact reference {key!r}')
 
     def _delete_object(self, path, config) -> None:
@@ -536,4 +628,4 @@ class AIDLCSagaCompensator:
     def _route_to_dlq(self, result, config, **kwargs) -> None:
         queue_url = resolve_config('dlq_queue_url', config)
         if queue_url:
-            logging.warning(f"DLQ (compensation) -> {queue_url}: {result.get('generator_key')}")
+            logging.warning(f"DLQ (compensation) -> {queue_url}: {result.get('build_key')}")
