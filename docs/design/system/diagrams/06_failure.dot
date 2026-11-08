@@ -1,0 +1,14 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Failure across the build — who settles, who compensates</b>>, fontcolor="#1F3864", nodesep=0.35, ranksep=0.35, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10, fontcolor="#1F3864", margin="0.12,0.05"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9];
+  q [label="QUEUED"]; a [label="G2C_P0_DONE"]; b [label="A2C_DONE"]; v [label="E2A_VERIFIED", fillcolor="#E3F1E3", color="#3B7D3B"];
+  fa [label="FAILED_G2C_P0\nG2C / P0 claims: retryable / final / UNKNOWN\nsaga: delete scaffold only if P0 failed;\ndelete class; release base reference", fillcolor="#FBE9E7", color="#C0504D"];
+  fb [label="FAILED_A2C (incl. no or invalid dev_request)\nA2C claim: retryable / final / UNKNOWN\nsaga: delete A2C artifacts, revert branch,\nrelease base reference", fillcolor="#FBE9E7", color="#C0504D"];
+  fc [label="Phase C failure\nA2C_DONE: revert A2C commit;\nG2C_P0_DONE: keep outputs;\nboth release base reference", fillcolor="#FFF8E1", color="#D4A017"];
+  q -> a [label="Phase A ok"]; a -> b [label="Phase B ok"]; b -> v [label="Phase C ok"];
+  q -> fa [label="Phase A fails"]; a -> fb [label="Phase B fails"]; b -> fc [label="Phase C fails"];
+  a -> v [style=dashed, label="a2c_sdlc off"];
+  inv [label="REJECTED_INVALID\nA2C requested, harness not inherited\n(before the claim)", fillcolor="#FFF8E1", color="#D4A017"];
+  q -> inv [style=dashed];
+}

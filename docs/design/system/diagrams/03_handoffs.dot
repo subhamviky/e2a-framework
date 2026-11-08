@@ -1,0 +1,17 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Hand-off contracts — what crosses each boundary</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.32, pad=0.2];
+  node [shape=note, style="filled", fillcolor="#FFFFFF", color="#1F3864", fontname="DejaVu Sans", fontsize=10, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  r [label="AIDLCPipelineRequest\nharness · context · prompt · a2c_sdlc · tenant_id"];
+  g [label="GeneratorRequest (G2C)\nharness ∪ prompt; scaffold = context", fillcolor="#F4F8FC"];
+  s [label="ScaffoldRequest (P0)\nscaffold + defaults from the GeneratorRequest", fillcolor="#F4F8FC"];
+  sr [label="ScaffoldResult\nproject_root · dev_request", fillcolor="#F4F8FC"];
+  gr [label="GeneratorResult\nsuccess · abstract_class_path · fresh · scaffold_result", fillcolor="#F4F8FC"];
+  d [label="DevRequest (A2C)\nproject_name · type · nfrs · cloud · language ·\ntenant_id · project_root", fillcolor="#E6F4F5", color="#0F7C8C"];
+  dr [label="DevRequest (enriched)\nresponse{generated_*, critic_report, artifacts} · status", fillcolor="#E6F4F5", color="#0F7C8C"];
+  res [label="AIDLCPipelineResult\nphase_reached · generator_result · sdlc_result · report"];
+  cfg [label="config['a2c']\nenabled · project_type ·\nmandatory_nfrs · target_cloud", shape=box, style="rounded,filled", fillcolor="#FFF8E1", color="#D4A017"];
+  r -> g [label=" AI-DLC builds"]; g -> s [label=" inherited generator\n defaults + tenant"]; s -> sr [label=" bootstrap()"];
+  cfg -> sr [style=dashed, label=" __build_dev_request()"]; sr -> gr [label=" embedded"]; gr -> d [label=" scaffold_result.dev_request"];
+  d -> dr [label=" SDLCWorkflow.execute()"]; dr -> res; gr -> res;
+}

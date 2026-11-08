@@ -1,0 +1,20 @@
+@startuml
+!include ../../common/style.puml
+title Idempotency record life cycle (BaseIdempotencyStore)
+[*] --> ABSENT
+ABSENT --> IN_PROGRESS : claim() atomic\n→ CLAIMED
+IN_PROGRESS --> SUCCEEDED : complete(result)\nowner-checked
+IN_PROGRESS --> FAILED_RETRYABLE : fail(retryable=True)\nexception / conflict / dehydration
+IN_PROGRESS --> FAILED_FINAL : fail(retryable=False)\ndeterministic error
+IN_PROGRESS --> UNKNOWN : fail(retryable=False,\noutcome=UNKNOWN)
+IN_PROGRESS --> RECOVERY : lease expired
+FAILED_RETRYABLE --> IN_PROGRESS : claim() → CLAIMED
+UNKNOWN --> RECOVERY
+RECOVERY --> IN_PROGRESS : claim(recover=True)\nreconciler only
+SUCCEEDED --> SUCCEEDED : claim() → REPLAY
+FAILED_FINAL --> FAILED_FINAL : claim() → FAILED_FINAL
+state RECOVERY : claim() → RECOVERY_REQUIRED
+state IN_PROGRESS : claim() by other owner → IN_PROGRESS\nsame key + other fingerprint → CONFLICT
+SUCCEEDED --> [*] : TTL garbage collection
+FAILED_FINAL --> [*] : TTL garbage collection
+@enduml

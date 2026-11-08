@@ -1,0 +1,36 @@
+@startuml
+!include ../../common/style.puml
+title Store ports used by the CQRS profile (e2a_base.py)
+abstract class BaseIdempotencyStore <<port>> {
+  +claim(key, config, **kw) : ClaimResult
+  +complete(key, result, config, **kw) : bool
+  +fail(key, retryable=True, config, **kw) : bool
+  +check_and_set(key, config, **kw) : bool
+}
+abstract class BaseTransactionalStore <<port>> {
+  +get(key, config, **kw) : dict | None
+  +put(key, value, config, **kw) : bool
+  +delete(key, config, **kw) : bool
+  +get_versioned(key, config, **kw) : (dict, int) | None
+  +put_if_version(key, value, expected_version,\n  config, **kw) : CommitResult
+}
+abstract class BaseCacheStore <<port>> {
+  +get(key, config, **kw)
+  +set(key, value, ttl_seconds, config, **kw) : bool
+  +delete(key, config, **kw) : bool
+  ..base-owned single-flight..
+  +get_or_load(key, loader, ttl, config, **kw)
+  +aget_or_load(key, loader, ttl, config, **kw)
+  +single_flight_stats : Dict[str, int]
+}
+class _Flight <<internal>> {
+  +event : threading.Event
+  +value
+  +error
+  +finish(value=None, error=None)
+}
+class _FlightAborted <<internal exception>>
+BaseCacheStore *-- "0..*" _Flight : in-flight loads per key
+_Flight ..> _FlightAborted : leader cancelled
+BaseIdempotencyStore -[hidden]right- BaseTransactionalStore
+@enduml

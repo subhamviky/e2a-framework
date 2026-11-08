@@ -1,0 +1,12 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>One claim store, four key namespaces (all tenant-scoped)</b>>, fontcolor="#1F3864", nodesep=0.25, ranksep=0.8, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  a [label="AI-DLC build\naidlc:project_name:runtime:build_tool:platform"];
+  g [label="G2C\ng2c:name:type:runtime:platform"];
+  p [label="P0\np0:project_name:runtime:build_tool:platform"];
+  c [label="A2C\na2c:project_name:project_type:target_cloud"];
+  q [label="CQRS / agents\ncaller's idempotency_key"];
+  st [label="BaseIdempotencyStore\nkey = tenant : key\nclaim · complete · fail", shape=cylinder, fillcolor="#E6F4F5", color="#0F7C8C"];
+  a -> st; g -> st; p -> st; c -> st; q -> st;
+}

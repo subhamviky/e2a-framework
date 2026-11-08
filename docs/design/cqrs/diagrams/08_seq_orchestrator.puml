@@ -1,0 +1,49 @@
+@startuml
+!include ../../common/style.puml
+title BaseOrchestrator.execute() — admission, routing and settlement
+participant "Caller" as C
+participant "BaseOrchestrator" as O
+participant "BaseIdempotencyStore" as IS
+participant "BaseGovernanceFramework" as G
+participant "Command / Query\nservice" as S
+participant "BaseObservability" as OB
+C -> O : execute(state, config, **kw)
+O -> O : require tenant_id (ValueError if absent)
+O -> O : correlation_id, io_config,\nresolve deadline + idempotency key
+O -> O : is_read = _is_read_scenario()
+alt command AND idempotency_store bound
+  O -> IS : claim(key, tenant_id, owner=correlation_id,\nfingerprint, lease_seconds, ttl_seconds)
+  alt status != CLAIMED
+    IS --> O : REPLAY | IN_PROGRESS | CONFLICT |\nRECOVERY_REQUIRED | FAILED_FINAL
+    O -> O : short-circuit (status from claim)
+    O --> C : state(status, replayed result?)
+  else CLAIMED
+    IS --> O : CLAIMED (owned = True)
+  end
+end
+group try
+  opt governance_engine bound
+    O -> G : enforce_governance_gate(state, io_config, config, **common)
+    G --> O : sanitised state
+  end
+  O -> S : fetch(...) or mutate(...)
+  S --> O : DTO dict (becomes state)
+end
+alt except DehydrationInterrupt
+  O -> O : status = AWAITING_WEBHOOK
+else except ConcurrencyConflict
+  O -> O : status = CONFLICT ; conflict = str(c)\n(no failed_keys, no DLQ)
+else except Exception
+  O -> O : last_error = e ; failed_keys += key\n_handle_error(e, state, config)
+end
+group finally
+  O -> OB : record_telemetry(message_log, correlation_id)
+  opt owned
+    O -> IS : settle claim: complete() or fail(retryable, outcome)
+  end
+  opt failed_keys and command
+    O -> O : _send_to_dlq(failed_keys)
+  end
+end
+O --> C : state (+ message_log, failed_keys)
+@enduml

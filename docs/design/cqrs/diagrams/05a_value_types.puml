@@ -1,0 +1,44 @@
+@startuml
+!include ../../common/style.puml
+title Shared value types and enums (e2a_base.py)
+class Deadline <<value · monotonic>> {
+  +HEADER = "x-e2a-deadline-ms"
+  -_at : float
+  +{static} after(seconds) : Deadline
+  +{static} from_remaining_ms(ms) : Deadline
+  +{static} coerce(value) : Deadline | None
+  +remaining() : float
+  +expired() : bool
+  +bound(timeout) : float
+  +check(what)
+  +to_remaining_ms() : int
+}
+enum ClaimStatus {
+  CLAIMED
+  IN_PROGRESS
+  REPLAY
+  CONFLICT
+  RECOVERY_REQUIRED
+  FAILED_FINAL
+}
+enum PhysicalOutcome {
+  COMMITTED
+  NOT_COMMITTED
+  UNKNOWN
+}
+class ClaimResult <<dataclass>> {
+  +status : ClaimStatus
+  +result : dict | None
+  +owner : str | None
+}
+class CommitResult <<dataclass>> {
+  +status : "COMMITTED|CONFLICT|FENCED"
+  +version : int | None
+  +current_version : int | None
+  +committed : bool
+}
+ClaimResult --> ClaimStatus
+Deadline -[hidden]right- ClaimResult
+CommitResult -[hidden]up- ClaimResult
+PhysicalOutcome -[hidden]up- ClaimStatus
+@enduml

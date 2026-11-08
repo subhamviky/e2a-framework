@@ -1,0 +1,32 @@
+@startuml
+!include ../../common/style.puml
+title Collaborations — what each CQRS class depends on (injected through config)
+hide members
+abstract class BaseValidationService <<Tier 1>>
+class ValidationResult <<dict>>
+abstract class BaseOrchestrator <<Tier 2>>
+abstract class BaseCommandService <<write>>
+abstract class BaseQueryService <<read>>
+abstract class BaseGovernanceFramework <<cross-cutting>>
+abstract class BaseObservability <<cross-cutting>>
+package "e2a_base.py — shared ports and values" {
+  abstract class BaseIdempotencyStore <<port>>
+  abstract class BaseTransactionalStore <<port>>
+  abstract class BaseCacheStore <<port>>
+  class Deadline <<value>>
+  class "resolve_config()" as RC <<function>>
+}
+BaseValidationService ..> ValidationResult : returns
+BaseValidationService -[hidden]-> BaseOrchestrator
+BaseOrchestrator ..> BaseGovernanceFramework : governance_engine\nenforce_governance_gate()
+BaseOrchestrator ..> BaseObservability : observability_engine\nrecord_telemetry()
+BaseOrchestrator ..> BaseIdempotencyStore : idempotency_store\nclaim / complete / fail
+BaseOrchestrator --> BaseCommandService
+BaseOrchestrator --> BaseQueryService
+BaseCommandService ..> BaseTransactionalStore : transactional_store\nput_if_version()
+BaseQueryService ..> BaseCacheStore : cache_store\nget_or_load()
+BaseOrchestrator ..> Deadline : mints
+BaseCommandService ..> Deadline : check()
+BaseQueryService ..> Deadline : check()
+BaseOrchestrator ..> RC
+@enduml

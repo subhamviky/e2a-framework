@@ -1,0 +1,26 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>System context — a CQRS service built on the E2A Deterministic CQRS Profile</b>>, fontcolor="#1F3864", nodesep=0.35, ranksep=0.6, pad=0.25];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.18,0.08"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  clients [label="Tenant clients\n(UI, partner APIs, batch)", shape=box, fillcolor="#FFFFFF"];
+  idp [label="Identity provider\n(JWT issuer)", fillcolor="#FFFFFF"];
+  subgraph cluster_sys { label=<<b>CQRS service (this design)</b>>; style="rounded,filled"; fillcolor="#EAF2FA"; color="#2E75B6"; fontcolor="#1F3864";
+    edge_ [label="Edge\nT0 gateway · T1 validation"];
+    core [label="Tier 2 core\nBaseOrchestrator\nBaseCommandService · BaseQueryService", fillcolor="#DCE8F5"];
+    data [label="Tier 3 perimeter\nstate/outbox · idempotency\ncache · topics · queues", fillcolor="#E6F4F5", color="#0F7C8C"];
+    edge_ -> core [label="commands via topic\nqueries direct"];
+    core -> data;
+  }
+  replica [label="Read replica\n(read-only credential)", shape=cylinder, fillcolor="#E6F4F5", color="#0F7C8C"];
+  downstream [label="Bounded-context consumers\n(billing, shipping, inventory)", fillcolor="#FFFFFF"];
+  saga [label="Saga / compensation\nengine (T5)", fillcolor="#FFFFFF"];
+  ext [label="External APIs\n(sandboxed egress)", fillcolor="#FFFFFF"];
+  obs [label="Telemetry backend\n(logs · metrics · traces)", fillcolor="#FFFFFF"];
+  clients -> edge_ [label="HTTPS + JWT"];
+  idp -> edge_ [style=dashed, label="keys"];
+  core -> replica [label="cache-miss reads"];
+  data -> downstream [label="domain events\n(at-least-once)"];
+  data -> saga [label="batch + failed_keys"];
+  core -> ext [style=dashed, label="optional"];
+  core -> obs [style=dashed, label="record_telemetry()"];
+}

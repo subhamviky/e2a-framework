@@ -1,0 +1,35 @@
+digraph G {
+  graph [rankdir=TB, compound=true, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Landing-zone topology — three zones, six tiers (no inference tier)</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.55, pad=0.25, newrank=true];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  internet [label="Internet\nclients", shape=ellipse, fillcolor="#FFFFFF"];
+  subgraph cluster_dmz { label=<<b>Public VPC / DMZ</b>>; style="rounded,filled"; fillcolor="#FBF3E6"; color="#D4A017"; fontcolor="#7A5A00";
+    t0 [label="T0 API Gateway + WAF\nJWT · tenant_id · rate limit"];
+    t1 [label="T1 Validation function\nBaseValidationService.validate()"];
+  }
+  subgraph cluster_data { label=<<b>Data &amp; Messaging Perimeter</b>>; style="rounded,filled"; fillcolor="#E6F4F5"; color="#0F7C8C"; fontcolor="#0F5C66";
+    it [label="Intake topic\n(push, commands)", shape=cds];
+    st [label="State / Outbox table\n+ idempotency records", shape=cylinder];
+    rc [label="Tenant-isolated\nRedis cache", shape=cylinder];
+    rr [label="Read replica", shape=cylinder];
+    fo [label="Fan-out topic", shape=cds];
+    tq [label="Task queue + DLQ", shape=cds];
+  }
+  subgraph cluster_app { label=<<b>Private VPC (Application)</b>>; style="rounded,filled"; fillcolor="#EAF2FA"; color="#2E75B6"; fontcolor="#1F3864";
+    t2 [label="T2 Orchestration compute\nBaseOrchestrator\nCommand / Query services", fillcolor="#DCE8F5"];
+    t4 [label="T4 Domain-event consumers\n(pull, autoscaled on depth)"];
+    t5 [label="T5 Saga edge\ncommit · compensate · DLQ"];
+    sw [label="Outbox sweeper /\nReconciler (leased)"];
+  }
+  internet -> t0 -> t1;
+  t1 -> it [label="WRITE"];
+  t1 -> t2 [label="READ (sync)", style=bold];
+  it -> t2 [label="push"];
+  t2 -> st [xlabel="claim · CAS\n· outbox"];
+  t2 -> rc [xlabel="get_or_load"];
+  t2 -> rr [xlabel="miss"];
+  st -> fo [label="CDC"];
+  fo -> t4 [label="pull"];
+  st -> tq; tq -> t5 [label="pull"];
+  sw -> st [style=dashed, xlabel="repair"];
+}

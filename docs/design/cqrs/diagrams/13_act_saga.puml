@@ -1,0 +1,20 @@
+@startuml
+!include ../../common/style.puml
+title Tier 5 Saga decision flow — command path only
+start
+:Task Queue delivers batch result\n(correlation_id, failed_keys);
+if (failed_keys empty?) then (yes)
+  :StandardDatabaseCommit;
+  stop
+else (no)
+  fork
+    :isolate failed item;
+  fork again
+    :run compensating transaction;
+  fork again
+    :route item to DLQ;
+  end fork
+  :successful siblings commit;
+  stop
+endif
+@enduml

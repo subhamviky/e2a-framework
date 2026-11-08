@@ -1,0 +1,26 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Tier 4 consumer handler contract (runtime obligation)</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.32, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.16,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  r [label="receive m from partition p\n(≤ worker_concurrency in flight)", fillcolor="#DCE8F5"];
+  dl [label="deadline = from_remaining_ms(m) or after(handler_budget)"];
+  c [label="claim(m.event_id, tenant_id, owner=worker_id,\nfingerprint=hash(body), lease_seconds)"];
+  st [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="claim\nstatus"];
+  rp [label="REPLAY\nack (already applied)"];
+  ip [label="IN_PROGRESS\nnack with delay"];
+  rr [label="RECOVERY_REQUIRED\nack · reconciler owns it"];
+  ap [label="CLAIMED → apply m under deadline"];
+  o [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="result"];
+  ok [label="complete(); ack", fillcolor="#E3F1E3", color="#3B7D3B"];
+  de [label="deterministic error\nfail(retryable=False); ack\n(poison parked, partition flows)", fillcolor="#FBE9E7", color="#C0504D"];
+  un [label="timeout after possible commit\nfail(retryable=False, outcome=UNKNOWN); ack"];
+  ot [label="other error\nfail(retryable=True); nack → redeliver"];
+  r -> dl -> c -> st;
+  st -> rp; st -> ip; st -> rr; st -> ap [label=" CLAIMED"];
+  ap -> o; o -> ok; o -> de; o -> un; o -> ot;
+  {rank=same; rp; ip; rr}
+  rr -> ap [style=invis];
+  {rank=same; ok; de}
+  {rank=same; un; ot}
+  ok -> un [style=invis]; de -> ot [style=invis];
+}

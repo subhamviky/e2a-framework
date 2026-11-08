@@ -1,0 +1,19 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>The E2A framework family — roles and dependencies</b>>, fontcolor="#1F3864", nodesep=0.35, ranksep=0.5, pad=0.25, compound=true];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.07"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  aidlc [label="AI-DLC profile\nAIDLCPipelineOrchestrator\ncomposes a governed build (Phases A · B · C)", fillcolor="#DCE8F5"];
+  g2c [label="G2C — Generate-to-Class\nclass files: abstract + inherited"];
+  a2c [label="A2C — Architecture-to-Code\ncode · Terraform · CI/CD (SDLCWorkflow)"];
+  p0 [label="P0 — Phase Zero bootstrap\nproject workspace + dev_request"];
+  cqrs [label="E2A CQRS profile\ncommand / query services"];
+  subgraph cluster_e2a { label="E2A core (e2a_base.py) — the contract every class follows"; fontname="DejaVu Sans"; fontsize=11; fontcolor="#0F7C8C"; color="#0F7C8C"; style="rounded";
+    core [label="BaseAgent · BaseWorkflow · BaseRAGPipeline · BaseToolService\nBaseLLMAgentService (gateway) · BaseValidationService · BasePipeline", fillcolor="#E6F4F5", color="#0F7C8C"];
+    infra [label="BaseIdempotencyStore · BaseTransactionalStore · Deadline\nconfig registry · resilience · observability", fillcolor="#E6F4F5", color="#0F7C8C"];
+  }
+  aidlc -> g2c [label="Phase A"]; aidlc -> a2c [label="Phase B"]; aidlc -> core [label="Phase C\nBasePipeline", lhead=cluster_e2a];
+  g2c -> p0 [label="inline"]; g2c -> a2c [style=dashed, label="generates a2c_base"];
+  p0 -> a2c [style=dashed, label="dev_request\n(BootstrapAndGenerateWorkflow)"];
+  a2c -> core [lhead=cluster_e2a, label="extends"]; g2c -> core [lhead=cluster_e2a, style=dashed, label="follows · gateway"]; cqrs -> core [lhead=cluster_e2a, label="extends"];
+  p0 -> infra [style=dashed, label="claim surface", lhead=cluster_e2a];
+}

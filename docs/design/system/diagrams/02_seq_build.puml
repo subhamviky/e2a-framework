@@ -1,0 +1,32 @@
+@startuml
+!include ../../common/style.puml
+title One governed build — AI-DLC over G2C, P0 and A2C
+participant "AI-DLC\norchestrator" as O
+participant "Claim store\n(one, shared)" as S
+participant "G2C inherited\ngenerator" as G
+participant "P0" as P
+participant "A2C\nSDLCWorkflow" as A
+participant "Phase C\nBasePipeline" as C
+O -> S : claim build key (tenant)
+O -> O : governance gate · admission
+== Phase A — class file and workspace ==
+O -> G : DeveloperPlatformWorkflow(config).generate(GeneratorRequest + scaffold)
+G -> S : claim g2c:<generator_key>
+G -> G : abstract base (shared per tenant)
+G -> P : bootstrap(ScaffoldRequest)
+P -> S : claim p0:<scaffold_key>
+P --> G : ScaffoldResult{project_root, dev_request}
+G -> G : inherited class into the scaffold
+G -> S : complete
+G --> O : GeneratorResult
+== Phase B — artifacts (when a2c_sdlc.enabled) ==
+O -> A : execute(dev_request, config)
+A -> S : claim a2c:<generation_key>
+A -> A : agents · critic · conditional writes
+A -> S : complete
+A --> O : DevRequest{critic_report, artifacts}
+== Phase C — verification ==
+O -> C : run_pipeline(workspace)
+C --> O : report
+O -> S : complete(build) → E2A_VERIFIED
+@enduml

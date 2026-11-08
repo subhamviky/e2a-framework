@@ -1,0 +1,12 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Two ways to run the family</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.6, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  subgraph cluster_a { label="A — one process (library composition)"; fontname="DejaVu Sans"; fontsize=11; color="#2E75B6"; style=rounded;
+    o1 [label="AI-DLC orchestrator"]; l1 [label="G2C · P0 · A2C modules\n(import path: a2c-framework +\ne2a-framework/reference)"]; o1 -> l1 [label="in-process calls"]; }
+  subgraph cluster_b { label="B — control plane and agent plane"; fontname="DejaVu Sans"; fontsize=11; color="#0F7C8C"; style=rounded;
+    o2 [label="Control plane\norchestrator · admission ·\nPhase C · saga"]; g2 [label="Agent plane\nG2C router (/api/v1/g2c/*)\nA2C service"]; o2 -> g2 [label="HTTP"]; }
+  st [label="Shared stores\nclaims · state · artifacts", shape=cylinder, fillcolor="#E6F4F5", color="#0F7C8C"];
+  gw [label="Inference gateway", fillcolor="#E6F4F5", color="#0F7C8C"];
+  l1 -> st; l1 -> gw; o2 -> st; g2 -> st; g2 -> gw;
+}

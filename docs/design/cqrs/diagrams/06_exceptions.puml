@@ -1,0 +1,40 @@
+@startuml
+!include ../../common/style.puml
+title Exception taxonomy and how BaseOrchestrator.execute() treats each type
+left to right direction
+class Exception <<builtin>>
+class DehydrationInterrupt <<signal>>
+class NFRViolationError <<NFR breach>>
+class ConcurrencyConflict <<typed outcome>>
+class DeadlineExceeded
+class AdmissionTimeout
+class CircuitOpenError
+class BulkheadFullError
+class "ValueError / TypeError / PermissionError" as DET <<_DETERMINISTIC_ERRORS>>
+Exception <|-- DehydrationInterrupt
+Exception <|-- NFRViolationError
+Exception <|-- ConcurrencyConflict
+Exception <|-- DET
+NFRViolationError <|-- DeadlineExceeded
+NFRViolationError <|-- AdmissionTimeout
+NFRViolationError <|-- CircuitOpenError
+NFRViolationError <|-- BulkheadFullError
+note right of DehydrationInterrupt
+  status = AWAITING_WEBHOOK
+  claim -> fail(retryable=True)
+  not dead-lettered
+end note
+note right of ConcurrencyConflict
+  status = CONFLICT
+  claim -> fail(retryable=True)
+  not dead-lettered
+end note
+note right of DET
+  failed_keys += key ; DLQ (commands)
+  claim -> fail(retryable=False) = FAILED_FINAL
+end note
+note right of NFRViolationError
+  failed_keys += key ; DLQ (commands)
+  claim -> fail(retryable=True)
+end note
+@enduml

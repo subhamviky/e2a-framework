@@ -1,0 +1,15 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Shared infrastructure — who uses what</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.9, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontsize=9];
+  O [label="AI-DLC"]; G [label="G2C"]; P [label="P0"]; A [label="A2C"];
+  llm [label="config['llm_service']\nBaseLLMAgentService", fillcolor="#E6F4F5", color="#0F7C8C"];
+  idem [label="config['idempotency_store']", fillcolor="#E6F4F5", color="#0F7C8C"];
+  art [label="artifact ownership\nartifact_store (one record;\nG2C writes via adapter)", fillcolor="#E6F4F5", color="#0F7C8C"];
+  reg [label="E2A config registry\nresolve_config()", fillcolor="#E6F4F5", color="#0F7C8C"];
+  dl [label="Deadline\n(E2A ⇄ a2c_concurrency\nvia float seconds)", fillcolor="#E6F4F5", color="#0F7C8C"];
+  O -> idem; O -> art; O -> reg; O -> dl;
+  G -> llm; G -> idem; G -> art; G -> dl;
+  P -> llm [style=dashed, label="prompt"]; P -> idem;
+  A -> llm; A -> idem; A -> reg; A -> dl;
+}

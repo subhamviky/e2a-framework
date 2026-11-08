@@ -1,0 +1,33 @@
+@startuml
+!include ../../common/style.puml
+title Scheduled repair — lease-holding sweeper and reconciler
+participant "Scheduler" as SCH
+participant "BaseReconciliationService" as R
+participant "BaseDistributedLock" as L
+participant "BaseIdempotencyStore" as IS
+participant "System of record" as SOR
+SCH -> R : run on cadence
+R -> L : acquire(lease_ttl_seconds)
+alt lease held elsewhere
+  L --> R : None → skip this run
+else acquired
+  L --> R : LeaseHandle(owner_token, fencing_token, expires_at)
+  loop each parked / dead-lettered key
+    R -> L : renew() (interval < lease TTL)
+    alt renew fails
+      R -> R : stop (LEASE_LOST)
+    end
+    R -> IS : claim(key, recover=True)
+    R -> SOR : _confirm_physical_outcome(key)
+    alt COMMITTED
+      R -> IS : complete(key) — never replay
+    else NOT_COMMITTED
+      R -> R : replay once through normal claim
+      R -> IS : complete(key)
+    else UNKNOWN
+      R -> R : leave parked for next run
+    end
+  end
+  R -> L : release(owner_token)
+end
+@enduml

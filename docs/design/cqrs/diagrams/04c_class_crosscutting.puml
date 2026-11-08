@@ -1,0 +1,37 @@
+@startuml
+!include ../../common/style.puml
+title Cross-cutting classes — validation, governance and observability
+abstract class BaseValidationService <<Tier 1 edge>> {
+  +validator_registry : Dict[str, Callable]
+  +validate(agent_name, state, config=None,\n  correlation_id=None, **kw) : ValidationResult
+  #_resolve_validator(agent_name, config, **kw)
+  -__build_result(valid, errors, agent_name, cid)
+}
+class ValidationResult <<dict subclass>> {
+  valid : bool
+  errors : List[str]
+  agent_name : str
+  correlation_id : str
+}
+abstract class BaseGovernanceFramework <<template method>> {
+  +enforce_governance_gate(state, io_config,\n  config=None, **kw) : dict
+  -__enforce_tenant_quota(state, io_config)
+  -__trigger_dehydration(state, config, **kw)
+  ..abstract hooks..
+  #_execute_semantic_firewall(state, config, **kw) : dict
+  #_verify_sandbox_profile(config, **kw)
+  #_circuit_breaker(failures, config, **kw) : bool
+  #_dehydrate_state_to_perimeter(state, cid, tenant_id, config)
+}
+abstract class BaseObservability <<template method>> {
+  +record_telemetry(message_log, correlation_id,\n  config=None, **kw)
+  -__extract_metrics(enriched_logs) : Dict[str, float]
+  ..abstract hooks..
+  #_ship_logs(enriched_logs, config, **kw)
+  #_emit_metrics(metrics, config, **kw)
+  #_export_traces(correlation_id, logs, config, **kw)
+}
+BaseValidationService ..> ValidationResult
+BaseValidationService -[hidden]down- BaseGovernanceFramework
+BaseGovernanceFramework -[hidden]right- BaseObservability
+@enduml

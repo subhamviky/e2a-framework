@@ -1,0 +1,53 @@
+@startuml
+!include ../../common/style.puml
+title Orchestration layer — BaseOrchestrator and the two CQRS services
+abstract class "_PropagationMixin" as PM <<mixin>> {
+  #_resolve_io_config(config, **kw) : dict
+  #_log(message_log, correlation_id, level, event, **fields)
+  #_send_to_dlq(failed_keys, config, **kw)
+  #_commit_gate(key, failed_keys, config, **kw) : bool
+}
+abstract class BaseOrchestrator <<Tier 2 · single entry point>> {
+  +execute(state, config=None, **kw) : dict
+  ..abstract hooks..
+  #_is_read_scenario(state, config) : bool
+  #_get_query_service(resource, config) : BaseQueryService
+  #_get_command_service(action, config) : BaseCommandService
+  #_generate_idempotency_key(state, config, **kw) : str
+  #_handle_error(error, state, config, **kw)
+  ..overridable defaults..
+  #_request_fingerprint(state, config, **kw) : str
+  #_replayable_result(state, config, **kw) : dict
+  ..base-owned (name-mangled)..
+  -__resolve_deadline(config, kwargs) : Deadline?
+  -__resolve_idempotency(state, config, **kw) : str
+  -__short_circuit(state, claim, message_log, cid) : dict
+  -__settle_claim(store, key, tenant, owner, state,\n  failed_keys, released, error, config)
+}
+abstract class BaseCommandService <<write path>> {
+  +input_dto_model : Type[BaseModel]
+  +output_dto_model : Type[BaseModel]
+  +mutate(payload, config=None, **kw) : dict
+  ..abstract hooks..
+  #_execute_business_logic(validated_input, config, **kw) : BaseModel
+  #_execute_outbox_commit(processed_dto, config, **kw)
+  #_synchronize_cache(processed_dto, config, **kw)
+  ..overridable defaults..
+  #_entity_key(processed_dto, **kw) : str | None
+  #_commit_versioned(processed_dto, config, **kw) : CommitResult | None
+}
+abstract class BaseQueryService <<read path>> {
+  +output_dto_model : Type[BaseModel]
+  +fetch(query_params, config=None, **kw) : dict
+  ..abstract hooks..
+  #_generate_cache_key(query_params, tenant_id) : str
+  #_read_from_cache(cache_key, io_config) : dict | None
+  #_execute_db_read(query_params, config, **kw) : dict
+  #_write_to_cache(cache_key, data, io_config)
+}
+PM <|-- BaseOrchestrator
+PM <|-- BaseCommandService
+PM <|-- BaseQueryService
+BaseOrchestrator --> "1" BaseCommandService : routes writes
+BaseOrchestrator --> "1" BaseQueryService : routes reads
+@enduml

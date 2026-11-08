@@ -1,0 +1,30 @@
+@startuml
+!include ../../common/style.puml
+title BaseQueryService.fetch() — cache-aside with per-key single-flight
+participant "Request A\n(leader)" as A
+participant "Request B\n(follower)" as B
+participant "BaseQueryService" as Q
+participant "BaseCacheStore" as CS
+database "Read replica" as RR
+A -> Q : fetch(params, config, deadline)
+Q -> Q : deadline.check(); key = _generate_cache_key(params, tenant_id)
+Q -> CS : get_or_load(key, _load, None, config, deadline)
+CS -> CS : get(key) → miss ; register _Flight (leader)
+B -> Q : fetch(same params)
+Q -> CS : get_or_load(key, ...)
+CS -> CS : get(key) → miss ; flight exists → follower
+CS -> RR : _load() → _execute_db_read(params)
+note right of CS : only ONE database read per key\nper process, however many callers
+RR --> CS : row
+CS -> CS : set(key, row, ttl) ; flight.finish(value)
+CS --> Q : row (A)
+Q --> A : output_dto_model(**row)
+CS --> Q : row (B wakes; waited ≤ min(cache_fill_timeout, deadline))
+Q --> B : output_dto_model(**row)
+alt follower wait times out
+  CS -> CS : cache_fill_on_timeout = load | stale | raise(AdmissionTimeout)
+end
+alt no cache_store bound (fallback)
+  Q -> Q : _read_from_cache() → miss → _execute_db_read()\n→ _write_to_cache()
+end
+@enduml

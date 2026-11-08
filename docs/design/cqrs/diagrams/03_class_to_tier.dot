@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Structural isomorphism — LLD class boundary ⇄ HLD tier</b>>, fontcolor="#1F3864", nodesep=0.22, ranksep=1.1, pad=0.25];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=10.5, margin="0.14,0.05"];
+  edge [color="#8EA9C8", arrowhead=none, penwidth=1.3];
+  subgraph cluster_l { label=<<b>LLD — classes</b>>; color="#2E75B6"; style=rounded; fontcolor="#1F3864";
+    node [fillcolor="#DCE8F5", color="#1F3864", fontcolor="#1F3864"];
+    c1 [label="BaseValidationService"]; c2 [label="BaseOrchestrator"]; c3 [label="BaseCommandService"]; c4 [label="BaseQueryService"];
+    c5 [label="BaseGovernanceFramework"]; c6 [label="BaseObservability"];
+    c7 [label="BaseIdempotencyStore\nBaseTransactionalStore"]; c8 [label="BaseCacheStore"];
+    c9 [label="BaseOutboxSweeper\nBaseReconciliationService"];
+  }
+  subgraph cluster_h { label=<<b>HLD — cloud components</b>>; color="#0F7C8C"; style=rounded; fontcolor="#0F5C66";
+    node [fillcolor="#E6F4F5", color="#0F7C8C", fontcolor="#0F5C66"];
+    h1 [label="T1 Validation function (DMZ)"]; h2 [label="T2 Orchestration compute"];
+    h5 [label="T2 inline governance + edge WAF"]; h6 [label="Telemetry stack (cross-cutting)"];
+    h7 [label="T3 State / Outbox / idempotency table"]; h8 [label="T3 Tenant-isolated Redis"];
+    h9 [label="Scheduled jobs (leased, Private VPC)"];
+  }
+  c1 -> h1; c2 -> h2; c3 -> h2; c4 -> h2; c5 -> h5; c6 -> h6; c7 -> h7; c8 -> h8; c9 -> h9;
+}

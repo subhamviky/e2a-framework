@@ -1,0 +1,40 @@
+@startuml
+!include ../../common/style.puml
+title BaseCommandService.mutate() — write path internals
+participant "BaseOrchestrator" as O
+participant "BaseCommandService" as CMD
+participant "Concrete subclass\nhooks" as H
+participant "BaseTransactionalStore" as TS
+participant "Cache" as CA
+O -> CMD : mutate(payload, config, **common)
+CMD -> CMD : input_dto_model(**payload)
+alt pydantic ValidationError
+  CMD --> O : raise ValueError (deterministic → FAILED_FINAL)
+end
+CMD -> CMD : _commit_gate(key, failed_keys, expected_version)
+alt gate rejects (batch-isolated key or advisory OCC miss)
+  CMD --> O : output_dto_model(status='blocked',\nreason='commit_gate_rejection')
+end
+CMD -> CMD : deadline.check('command execution')
+CMD -> H : _execute_business_logic(validated_input)
+H --> CMD : processed_dto
+CMD -> H : _entity_key(processed_dto)
+alt key is not None and transactional_store bound
+  CMD -> TS : put_if_version(key, dto, expected_version,\nfencing_token)
+  alt COMMITTED
+    TS --> CMD : CommitResult(version)
+  else CONFLICT / FENCED
+    TS --> CMD : CommitResult(current_version)
+    CMD --> O : raise ConcurrencyConflict
+  end
+end
+CMD -> H : _execute_outbox_commit(processed_dto)
+CMD -> H : _synchronize_cache(processed_dto)
+H -> CA : evict / hydrate affected key
+CMD -> CMD : latency vs max_latency (scope CQRS, 1.0 s)
+alt latency > max_latency
+  CMD --> O : raise NFRViolationError
+else within SLO
+  CMD --> O : processed_dto.dict()
+end
+@enduml

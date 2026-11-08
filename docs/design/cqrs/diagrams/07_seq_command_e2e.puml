@@ -1,0 +1,46 @@
+@startuml
+!include ../../common/style.puml
+title Command path end to end (Tier 0 → Tier 5)
+autonumber "<b>0."
+actor Client
+box "Public VPC / DMZ" #F7FAFD
+participant "API GW\n(T0)" as GW
+participant "Validation\n(T1)" as VAL
+end box
+box "Data & Messaging Perimeter (T3)" #EEF7F7
+queue "Intake\ntopic" as IT
+database "State /\nOutbox" as DB
+participant "Cache" as CACHE
+queue "Fan-out /\nTask queue" as FO
+end box
+box "Private VPC (T2, T4, T5)" #F7FAFD
+participant "Orchestrator\n(T2)" as ORC
+participant "Command\nservice (T2)" as CMD
+participant "Consumers\n(T4)" as T4
+participant "Saga\n(T5)" as T5
+end box
+Client -> GW : POST (JWT)
+GW -> GW : verify JWT,\ntenant_id,\nrate limit
+GW -> VAL : validate()
+VAL -> VAL : rules,\ncorrelation_id,\nintent = WRITE
+VAL -> IT : publish
+VAL --> Client : 202 Accepted
+IT -> ORC : push: execute()
+ORC -> DB : claim(key)
+DB --> ORC : CLAIMED
+ORC -> ORC : governance\ngate
+ORC -> CMD : mutate()
+CMD -> CMD : DTO, gate,\ndeadline,\nbusiness logic
+CMD -> DB : put_if_version()
+DB --> CMD : COMMITTED
+CMD -> DB : outbox commit
+CMD -> CACHE : sync cache
+CMD --> ORC : DTO dict
+ORC -> DB : complete(key)
+ORC -> ORC : telemetry
+== asynchronous ==
+DB -> FO : CDC / sweeper\npublishes event
+FO -> T4 : pull by\npartition
+FO -> T5 : batch +\nfailed_keys
+T5 -> T5 : commit /\ncompensate /\nDLQ
+@enduml
