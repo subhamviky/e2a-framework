@@ -19,7 +19,7 @@ This document carries the method-level contract and runnable scaffold for the on
 Every framework this profile composes — G2C's `DeveloperPlatformWorkflow`, P0's `BaseProjectBootstrapper` (invoked inline by G2C, never called separately here), and A2C's `SDLCWorkflow` — is reused unmodified. None of their method contracts are repeated in this document beyond the entry-point table in Section 2; read `G2C_Framework_Reference.md`, `P0_ProjectBootstrap_Framework_Reference.md`, and `A2C_Framework_Reference.md` for those.
 > **A Note on SDLCWorkflow's Signature**
 >
-> `A2C_Framework_Reference.md` describes `SDLCWorkflow` conceptually (Section 3.2 — the five-agent LangGraph StateGraph: RequirementsAgent → CodeGenAgent → IaCAgent → CICDAgent → CodeCriticAgent) but does not publish a formal method-contract table for it the way it does for `SDLCAssistantAgent`. The `execute(dev_request, config) -> DevRequest` signature used throughout this document is inferred from that description and from the calling convention every other E2A/A2C workflow class already follows — it is this profile's expected contract, not a verbatim quote from that document. Flagging this distinction matters: everything else in this Playbook is a direct, checkable consequence of a published contract; this one piece is the single inferred exception.
+> `SDLCWorkflow` is implemented in the a2c-framework repository (`a2c_base.py`) as a `BaseWorkflow` subclass. `execute(dev_request, config) -> DevRequest` is inherited from `BaseWorkflow` and is never overridden (`A2C_Framework_Reference.md`, Section 3.7). The orchestrator calls it unwrapped, after the `dev_request` has passed `DevPlatformValidationService.validate()`, and hands it a deep copy so the build result is not enriched by A2C's output.
 
 This document also corrects one design gap discovered while writing it. The Landing Zone HLD describes Phase C as running "the first 3 of `BasePipeline`'s 7 stages." Read literally, that would mean calling `BasePipeline`'s protected stage hooks (`_run_static_security_scans()`, etc.) directly from outside the class — which breaks the Single Public Entry Point Rule this profile holds every other class to. Section 6 below resolves this the correct way: a concrete `BasePipeline` subclass, `AIDLCStaticPipeline`, whose four unused stages are overridden as intentional no-ops. `BasePipeline.run_pipeline()` itself — its one public method — is still called exactly as written, untouched.
 
@@ -35,22 +35,22 @@ Two further corrections apply versus an earlier framing of this profile: (1) the
 | `AIDLCStaticPipeline`         | `run_pipeline(config, **kwargs) -> dict` (inherited from `BasePipeline`, not overridden)         | New subclass — this document (Section 6)                          |
 | `AIDLCSagaCompensator`        | `compensate(result, config, correlation_id, **kwargs) -> dict`                                   | New — this document (Section 7)                                   |
 | `DeveloperPlatformWorkflow`   | `generate(request, config) -> GeneratorResult`                                                   | Reused unmodified (`G2C_Framework_Reference.md` Sec 10.2)          |
-| `SDLCWorkflow`                | `execute(dev_request, config) -> DevRequest`                                                     | Reused, signature inferred (see callout above)                    |
+| `SDLCWorkflow`                | `execute(dev_request, config) -> DevRequest`                                                     | Reused; implemented in `a2c_base.py`, `execute` inherited from `BaseWorkflow` (see callout above)                    |
 | `BaseValidationService`       | `validate(agent_name, state, config, correlation_id, **kwargs) -> ValidationResult`              | Reused unmodified — Tier 1, ahead of this class entirely           |
 | `BaseProjectBootstrapper`     | `bootstrap(request, config) -> ScaffoldResult`                                                   | Reused unmodified — invoked inline by G2C, never called here       |
 
 ## 3. Cross-Class Propagation Fields
 
-The same six/seven fields from the Agentic and CQRS profiles, unmodified. `generator_key` is this profile's own business idempotency key — not a universal field, the same way `idempotency_key`'s origination point already differs slightly per profile in the companion Playbooks.
+The same six/seven fields from the Agentic and CQRS profiles, unmodified. `build_key` is this profile's own business idempotency key (`generator_key` remains as a deprecated alias for it, and is not G2C's `generator_key`, which is the key of a single generator run) — not a universal field, the same way `idempotency_key`'s origination point already differs slightly per profile in the companion Playbooks.
 
 | Field             | Flow             | Resolved / Minted By                                                                         |
 | ------------------ | ----------------- | ------------------------------------------------------------------------------------------------ |
 | `correlation_id`  | INPUT             | `BaseValidationService.validate()` at Tier 1, ahead of `AIDLCPipelineOrchestrator`               |
 | `tenant_id`       | INPUT             | JWT claim at Tier 0, read from `request['tenant_id']`                                            |
-| `generator_key`   | INPUT (business key) | `AIDLCPipelineOrchestrator.__generate_key()` — `project_name:runtime:build_tool:platform`     |
+| `build_key`       | INPUT (business key) | `AIDLCPipelineOrchestrator.__build_key()` — `project_name:runtime:build_tool:platform`     |
 | `io_config`       | INPUT             | Resolved once from `config['io']` / the `IO_CONFIG` namespace                                    |
 | `message_log`     | OUTPUT            | Empty at request start; every phase appends structured entries via `_log()`                      |
-| `failed_keys`     | OUTPUT            | Empty at request start; populated with `generator_key` on any phase failure                       |
+| `failed_keys`     | OUTPUT            | Empty at request start; populated with `build_key` on any phase failure                       |
 | `trace_context`   | INPUT (additive)  | W3C traceparent if present, else derived from `correlation_id`                                    |
 | `deadline`        | INPUT (additive)  | `request['deadline']` if supplied (a `Deadline`), else derived from `request_deadline_seconds`; absent when neither is set. Checked before each phase |
 
@@ -78,17 +78,23 @@ class AIDLCPipelineRequest(TypedDict, total=False):
     model_id: str
     critic_model_id: str
 
+    deadline: Any             # Deadline or seconds; else request_deadline_seconds
+
     # Written by AIDLCPipelineOrchestrator — do not supply
-    generator_key: str
+    build_key: str
+    generator_key: str        # deprecated alias of build_key (not G2C's generator_key)
     correlation_id: str
 
 
 class AIDLCPipelineResult(TypedDict, total=False):
     success: bool
-    generator_key: str
+    build_key: str            # project_name:runtime:build_tool:platform; claimed as aidlc:<build_key>
+    generator_key: str        # deprecated alias of build_key
     correlation_id: str
     phase_reached: str          # QUEUED | G2C_P0_DONE | A2C_DONE | E2A_VERIFIED
                                  # | FAILED_G2C_P0 | FAILED_A2C | SKIPPED_IDEMPOTENT
+                                 # | SKIPPED_IN_PROGRESS | REJECTED_CONFLICT | REJECTED_INVALID
+                                 # | REJECTED_OVERLOAD | RECOVERY_REQUIRED | FAILED_FINAL
     generator_result: dict      # GeneratorResult from Phase A (G2C)
     dev_request: dict           # DevRequest handed to A2C, if Phase B ran
     sdlc_result: dict           # updated DevRequest returned by Phase B
@@ -108,7 +114,8 @@ class PipelineStateRecord(TypedDict, total=False):
     of at a generic row store."""
     correlation_id: str
     tenant_id: str
-    generator_key: str
+    build_key: str
+    generator_key: str          # deprecated alias of build_key
     phase: str
     artifact_pointers: Dict[str, str]
     created_at: float
@@ -122,7 +129,7 @@ The composing class. Calls `DeveloperPlatformWorkflow.generate()` and `SDLCWorkf
 | Step | Action                              | Condition                                                                             |
 | ---- | ------------------------------------ | ---------------------------------------------------------------------------------------- |
 | 1    | Governance gate                      | Always, if `config['governance_engine']` is set                                       |
-| 2    | Atomic idempotency claim             | Only if `config['idempotency']` = `True` (default) and an `idempotency_store` is bound. One winner per `generator_key`; duplicates get a typed outcome (Section 5.1) |
+| 2    | Atomic idempotency claim             | Only if `config['idempotency']` = `True` (default) and an `idempotency_store` is bound. One winner per `aidlc:<build_key>` (tenant-scoped; the `aidlc:` namespace keeps it apart from `g2c:`, `p0:` and `a2c:` claims). The lease is max(`idempotency_lease_seconds`, remaining deadline + 60 s); duplicates get a typed outcome (Section 5.1) |
 | 2a   | Build admission                      | Always. Bounded per-instance and per-tenant wait; a refusal ends the run as `REJECTED_OVERLOAD` (Section 5.2) |
 | 3    | Phase A — G2C + P0                   | Always, after the deadline check. Aborts the pipeline (no Phase B/C) on failure       |
 | 4    | Phase B — A2C                        | Only if `request['a2c_sdlc']['enabled']` and Phase A produced a `dev_request`          |
@@ -207,14 +214,28 @@ class AIDLCPipelineOrchestrator:
             'correlation_id': correlation_id, 'message_log': message_log,
             'failed_keys': failed_keys, 'success': False, 'phase_reached': 'QUEUED',
         }
-        generator_key = self.__generate_key(request)
-        result['generator_key'] = generator_key
+        build_key = self.__generate_key(request)
+        result['build_key'] = build_key
+        result['generator_key'] = build_key       # deprecated alias
+        claim_key = f'aidlc:{build_key}'          # namespaced: never collides with g2c:/p0:/a2c: keys
+        generator_key = build_key                 # identity used in failed_keys / DLQ
         tenant_id = request.get('tenant_id') or '-'
         secs = float(resolve_config('request_deadline_seconds', config))
         deadline = Deadline.coerce(request.get('deadline')) if request.get('deadline') is not None \
             else (Deadline.after(secs) if secs > 0 else None)
         store = config.get('idempotency_store')
         owned, release_slot = False, None
+
+        # A requested phase that cannot run is a rejected request, not a
+        # build that later reports success without it.
+        problem = self.__request_problem(request)
+        if problem:
+            result['phase_reached'] = 'REJECTED_INVALID'
+            result['errors'] = [problem]
+            self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_invalid', detail=problem)
+            result['latency_ms'] = round((time.time() - start) * 1000, 1)
+            result['trace_id'] = correlation_id
+            return result
 
         try:
             # Step 1 — Governance gate
@@ -227,10 +248,14 @@ class AIDLCPipelineOrchestrator:
             # Step 2 — Atomic idempotency CLAIM (one winner per generator_key;
             # never a check-then-build). Duplicates get a typed outcome.
             if config.get('idempotency', True) and isinstance(store, BaseIdempotencyStore):
+                # The lease must outlive the whole build: at least the request
+                # deadline plus a margin, never less than the configured lease.
+                lease = int(resolve_config('idempotency_lease_seconds', config))
+                if deadline:
+                    lease = max(lease, int(deadline.remaining()) + 60)
                 claim = store.claim(
-                    generator_key, config, tenant_id=tenant_id, owner=correlation_id,
-                    fingerprint=self.__fingerprint(request),
-                    lease_seconds=int(resolve_config('idempotency_lease_seconds', config)))
+                    claim_key, config, tenant_id=tenant_id, owner=correlation_id,
+                    fingerprint=self.__fingerprint(request), lease_seconds=lease)
                 if claim.status == ClaimStatus.REPLAY:
                     self._log(message_log, correlation_id, 'INFO', 'pipeline_skipped_idempotent')
                     result['success'] = True
@@ -257,7 +282,17 @@ class AIDLCPipelineOrchestrator:
             g2c_request = dict(request.get('harness', {}))
             g2c_request['scaffold'] = request.get('context', {})
             g2c_request.update(request.get('prompt', {}))
+            # The build's tenant and remaining deadline reach every Phase A step
+            # (G2C claims, the gateway, P0 and the dev_request it builds).
+            if request.get('tenant_id'):
+                g2c_request.setdefault('tenant_id', request['tenant_id'])
+            if deadline:
+                g2c_request['deadline_ms'] = deadline.to_remaining_ms()
             g2c_config = dict(config)
+            # One artifact-ownership record per shared abstract class: G2C
+            # registers its references in this build's artifact_store.
+            if config.get('artifact_store') is not None:
+                g2c_config['artifact_registry'] = _ArtifactRegistryAdapter(config['artifact_store'], config)
             if request.get('a2c_sdlc', {}).get('enabled'):
                 # Rides through DeveloperPlatformWorkflow -> ... -> P0's
                 # bootstrap() unchanged, exactly as P0's own
@@ -275,7 +310,6 @@ class AIDLCPipelineOrchestrator:
             generator_result = DeveloperPlatformWorkflow(config=g2c_config).generate(
                 g2c_request, g2c_config)
             result['generator_result'] = generator_result
-            self.__register_artifact_ref(result, config)      # shared abstract class: atomic reference
             self.__persist_state(result, 'G2C_P0_ATTEMPTED', config)
             self._log(message_log, correlation_id, 'INFO', 'phase_a_complete',
                        success=generator_result.get('success', False))
@@ -295,9 +329,29 @@ class AIDLCPipelineOrchestrator:
             if deadline:
                 deadline.check('Phase B')
             dev_request = (generator_result.get('scaffold_result') or {}).get('dev_request')
-            if request.get('a2c_sdlc', {}).get('enabled') and dev_request:
+            if request.get('a2c_sdlc', {}).get('enabled'):
+                if not dev_request:
+                    # Requested but impossible: never skip silently.
+                    failed_keys.append(generator_key)
+                    result['phase_reached'] = 'FAILED_A2C'
+                    result.setdefault('errors', []).append(
+                        'a2c_sdlc.enabled but Phase A produced no dev_request '
+                        '(needs an inherited generator with a scaffold)')
+                    return result
+                if request.get('tenant_id'):
+                    dev_request.setdefault('tenant_id', request['tenant_id'])
                 result['dev_request'] = dev_request
-                sdlc_result = SDLCWorkflow(config=config).execute(dev_request, config)
+                # Validation tier before the workflow (BaseValidationService).
+                validator = config.get('a2c_validation_service') or DevPlatformValidationService()
+                verdict = validator.validate('SDLCWorkflow', dev_request, config,
+                                             correlation_id=correlation_id)
+                if not verdict['valid']:
+                    failed_keys.append(generator_key)
+                    result['phase_reached'] = 'FAILED_A2C'
+                    result.setdefault('errors', []).extend(verdict['errors'])
+                    return result
+                # A copy: A2C enriches its state in place.
+                sdlc_result = SDLCWorkflow(config=config).execute(copy.deepcopy(dev_request), config)
                 result['sdlc_result'] = sdlc_result
                 self._log(message_log, correlation_id, 'INFO', 'phase_b_complete',
                            critic_score=(sdlc_result.get('critic_report') or {}).get('score'))
@@ -344,9 +398,9 @@ class AIDLCPipelineOrchestrator:
             if owned:      # settle AFTER compensation, so the key is never claimable mid-cleanup
                 kw = dict(config=config, tenant_id=tenant_id, owner=correlation_id)
                 if result['success']:
-                    store.complete(generator_key, {'phase_reached': result['phase_reached']}, **kw)
+                    store.complete(claim_key, {'phase_reached': result['phase_reached']}, **kw)
                 else:
-                    store.fail(generator_key, retryable=True, **kw)
+                    store.fail(claim_key, retryable=True, **kw)
             obs_engine = config.get('observability_engine')
             if obs_engine:
                 obs_engine.record_telemetry(message_log, correlation_id, config,
@@ -379,7 +433,8 @@ class AIDLCPipelineOrchestrator:
             return
         record: PipelineStateRecord = {
             'correlation_id': result['correlation_id'],
-            'generator_key': result['generator_key'],
+            'build_key': result['build_key'],
+            'generator_key': result['build_key'],
             'phase': phase,
             'updated_at': time.time(),
         }
@@ -389,29 +444,14 @@ class AIDLCPipelineOrchestrator:
         if not res.committed:
             raise ConcurrencyConflict(f"pipeline state for {result['correlation_id']} changed concurrently")
 
-    def __register_artifact_ref(self, result, config):
-        """Record that this generator_key references the shared abstract
-        class. First registrant of a FRESHLY generated artifact becomes its
-        creator. All changes are compare-and-set loops, so concurrent
-        builds and concurrent compensations cannot lose a reference."""
-        store, gr = config.get('artifact_store'), result.get('generator_result') or {}
-        path, me = gr.get('abstract_class_path'), result['generator_key']
-        if not store or not path:
-            return
-        key = f'artifact:{path}'
-        for _ in range(8):
-            cur = store.get_versioned(key, config)
-            if cur is None or cur[0].get('deleted'):
-                rec = {'refs': [me], 'created_by': me if gr.get('abstract_class_generated_fresh') else None, 'deleted': False}
-                res = store.put_if_version(key, rec, cur[1] if cur else None, config)
-            else:
-                rec, ver = cur
-                if me in rec['refs']:
-                    return
-                res = store.put_if_version(key, dict(rec, refs=rec['refs'] + [me]), ver, config)
-            if res.committed:
-                return
-        raise ConcurrencyConflict(f'could not register artifact reference {key!r}')
+    def __request_problem(self, request) -> Optional[str]:
+        """A requested phase that cannot run makes the request invalid."""
+        if request.get('a2c_sdlc', {}).get('enabled'):
+            gtype = request.get('harness', {}).get('generator_type')
+            if gtype not in INHERITED_GENERATOR_TYPES:
+                return (f"a2c_sdlc.enabled needs an inherited generator in the harness "
+                        f"({' or '.join(INHERITED_GENERATOR_TYPES)}), got {gtype!r}")
+        return None
 
     def __trigger_compensation(self, result, config, correlation_id=None):
         compensator = config.get('saga_compensator') or AIDLCSagaCompensator()
@@ -433,18 +473,54 @@ class AIDLCPipelineOrchestrator:
     def _handle_error(self, error, request, result, config=None, **kwargs):
         logging.error(f"[AIDLCPipelineOrchestrator][{kwargs.get('correlation_id')}] {error}")
         result.setdefault('errors', []).append(str(error))
+
+
+# ==================================================
+# AIDLCSagaCompensator — Tier 5 Saga compensation engine
+# ==================================================
+
+class _ArtifactRegistryAdapter:
+    """Presents this build's artifact_store (a BaseTransactionalStore) as
+    the registry G2C's DeveloperPlatformWorkflow expects (get_versioned /
+    compare_and_set). Records stay in the AI-DLC schema
+    artifact:<path> -> {refs, created_by, deleted}, so G2C's registration
+    and this compensator's release work on ONE record with ONE identity
+    (G2C's generator_key)."""
+
+    def __init__(self, store, config=None):
+        self.store, self.config = store, config or {}
+
+    def get_versioned(self, path):
+        cur = self.store.get_versioned(f'artifact:{path}', self.config)
+        if cur is None:
+            return None
+        rec, ver = cur
+        return ({'refs': list(rec.get('refs', [])), 'creator': rec.get('created_by'),
+                 'deleted': bool(rec.get('deleted'))}, ver)
+
+    def get(self, path):
+        cur = self.get_versioned(path)
+        return cur[0] if cur else None
+
+    def compare_and_set(self, path, record, expected_version) -> bool:
+        res = self.store.put_if_version(
+            f'artifact:{path}', {'refs': list(record['refs']), 'created_by': record.get('creator'),
+                                 'deleted': bool(record.get('deleted'))},
+            expected_version, self.config)
+        return bool(res.committed)
 ```
 
 ### 5.1 Atomic Claim and Duplicate-Request Semantics
 
-The previous check-then-build sequence let two identical requests both pass the check and both build. `execute_pipeline()` now calls `store.claim(generator_key, tenant_id=…, owner=correlation_id, fingerprint=…, lease_seconds=idempotency_lease_seconds)`. The key is tenant-scoped, and the fingerprint is a hash of `context` and `a2c_sdlc` — the inputs that determine what is built — so the same `generator_key` with a different request is a conflict, not a replay. Exactly one concurrent caller gets `CLAIMED`; every other caller returns immediately with a typed `phase_reached` and no side effect:
+Before the claim, `__request_problem()` rejects a malformed request (including `a2c_sdlc.enabled` without an inherited generator) as `REJECTED_INVALID` with no side effect. The previous check-then-build sequence let two identical requests both pass the check and both build. `execute_pipeline()` now calls `store.claim("aidlc:" + build_key, tenant_id=…, owner=correlation_id, fingerprint=…, lease_seconds=idempotency_lease_seconds)`. The key is tenant-scoped, and the fingerprint is a hash of `context` and `a2c_sdlc` — the inputs that determine what is built — so the same `build_key` with a different request is a conflict, not a replay. Exactly one concurrent caller gets `CLAIMED`; every other caller returns immediately with a typed `phase_reached` and no side effect:
 
 | Claim result | `phase_reached` | `success` | Meaning for the caller |
 |---|---|---|---|
 | `CLAIMED` | (proceeds) | — | This caller owns the build |
+| (pre-check fails) | `REJECTED_INVALID` | `False` | The request is malformed or asks for A2C without an inherited generator; nothing was claimed or run |
 | `REPLAY` | `SKIPPED_IDEMPOTENT` | `True` | An identical build already completed; nothing is rebuilt |
 | `IN_PROGRESS` | `SKIPPED_IN_PROGRESS` | `False` | Another caller is building it right now; poll or retry later |
-| `CONFLICT` | `REJECTED_CONFLICT` | `False` | Same `generator_key`, different request body — change the key or the request |
+| `CONFLICT` | `REJECTED_CONFLICT` | `False` | Same `build_key`, different request body — change the key or the request |
 | `RECOVERY_REQUIRED` | `RECOVERY_REQUIRED` | `False` | A prior owner's lease expired or its outcome is unknown; the reconciler decides, never a blind rebuild |
 | `FAILED_FINAL` | `FAILED_FINAL` | `False` | A deterministic failure is on record |
 
@@ -521,30 +597,41 @@ class AIDLCStaticPipeline(BasePipeline):
 
 ## 7. AIDLCSagaCompensator — Corrected Scaffold
 
-Implements the Saga Decision Matrix from the Landing Zone HLD's Section 7, with the correction that matters most: it is scoped by `generator_key`, and it never deletes the shared abstract class except when that class was generated fresh for this exact request and no other `generator_key` yet depends on it.
+Implements the Saga Decision Matrix from the Landing Zone HLD's Section 7, with the correction that matters most: it is scoped by the generator's own `generator_key`, and it never deletes outputs vouched for by a settled claim, and it deletes an orphaned shared abstract class only when `config['compensation_delete_orphan_abstract']` is enabled, the caller is the artifact's creator, and the last reference has been released.
 
 ```python
 class AIDLCSagaCompensator:
     """PRIMARY class — compensate() is the single public entry point.
-    Scoped so it only ever reverts artifacts this specific generator_key
-    produced. common/e2a_base.py or common/a2c_base.py is never touched
-    here — that file is reused-by-reference across generator_keys and may
-    already be a dependency of other, unrelated, already-completed builds."""
+    Scoped so it only ever reverts artifacts this specific build produced.
+
+    Rule: compensation never deletes an output whose producing step settled
+    SUCCEEDED (a P0 scaffold that succeeded, a generated abstract class).
+    Those claims would otherwise replay paths that no longer exist. A failed
+    build releases its reference on the shared abstract class instead.
+    Deleting an orphaned abstract class is opt-in
+    (config['compensation_delete_orphan_abstract']) and allowed only to the
+    build that created it fresh, after the last reference is released; G2C
+    and P0 report a replay whose output is missing as recovery_required."""
 
     def compensate(self, result: 'AIDLCPipelineResult', config: Dict[str, Any] = None,
                     correlation_id: str = None, **kwargs) -> Dict[str, Any]:
         config = config or {}
         phase = result.get('phase_reached', 'QUEUED')
+        gr = result.get('generator_result') or {}
         actions: List[str] = []
 
         if phase in ('QUEUED', 'FAILED_G2C_P0'):
-            # Nothing durable was written yet, or only a partial scaffold —
-            # delete the inherited-class file and the P0 scaffold for this
-            # generator_key only. The shared abstract class is untouched
-            # unless it was generated fresh for this request and no other
-            # generator_key references it yet (checked inside the helper).
-            actions.append(self._delete_scaffold(result, config))
+            # Delete only what no settled claim vouches for: a scaffold whose
+            # P0 step did not succeed, and the inherited class of a failed
+            # generation (written only if the failure came after the write).
+            if not (gr.get('scaffold_result') or {}).get('success'):
+                actions.append(self._delete_scaffold(result, config))
             actions.append(self._delete_inherited_class(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
+
+        elif phase == 'G2C_P0_DONE':
+            # Phase C failed with no Phase B: scaffold and classes are valid,
+            # replayable outputs — keep them; release this build's reference.
             actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         elif phase == 'FAILED_A2C':
@@ -553,48 +640,53 @@ class AIDLCSagaCompensator:
             # and the ephemeral Git branch are reverted.
             actions.append(self._delete_a2c_artifacts(result, config))
             actions.append(self._revert_git_branch(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         elif phase == 'A2C_DONE':
             # Phase C (static verification) failed after A2C succeeded —
             # revert only the staged A2C commit; scaffold and classes stand.
             actions.append(self._revert_git_branch(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         self._route_to_dlq(result, config, correlation_id=correlation_id)
         return {'phase_compensated': phase, 'actions': actions}
 
     def _delete_scaffold(self, result, config) -> str:
-        return 'scaffold_deleted'  # object-store delete under generator_key prefix
+        return 'scaffold_deleted'  # object-store delete under the build_key prefix
 
     def _delete_inherited_class(self, result, config) -> str:
         return 'inherited_class_deleted'
 
     def _delete_abstract_class_if_orphaned(self, result, config) -> str:
-        """Deletes the shared abstract class ONLY if it was generated fresh
-        by a build in this system AND the last referencing generator_key is
-        being compensated (a completed build never releases its reference,
-        so an empty reference set means every referencing build failed). The
-        reference check and the decision are ONE compare-and-set on the
-        ownership record, so two concurrent compensations cannot both
-        delete, and a sibling build that registered a reference first
-        always keeps the artifact. Only the CAS winner performs the delete."""
+        """Release this build's reference on the shared abstract class (one
+        compare-and-set on the ownership record). The identity is G2C's
+        generator_key, the one G2C registered. The class is deleted only if
+        deletion is enabled, this build CREATED it fresh, and no other
+        reference remains; the CAS makes that decision exactly once."""
         store, gr = config.get('artifact_store'), result.get('generator_result') or {}
-        path, me = gr.get('abstract_class_path'), result.get('generator_key')
+        path = gr.get('abstract_class_path')
+        me = gr.get('generator_key') or result.get('build_key') or result.get('generator_key')
         if not store or not path:
             return 'abstract_class_untouched'
+        allow_delete = bool(config.get('compensation_delete_orphan_abstract', False))
         key = f'artifact:{path}'
         for _ in range(8):
             cur = store.get_versioned(key, config)
             if cur is None:
                 return 'abstract_class_untouched'
             rec, ver = cur
-            refs = [r for r in rec.get('refs', []) if r != me]
-            orphan = (not refs) and rec.get('created_by') is not None and not rec.get('deleted')
-            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan), ver, config)
+            if me not in rec.get('refs', []):
+                return 'abstract_class_untouched'
+            refs = [r for r in rec['refs'] if r != me]
+            orphan = (allow_delete and not refs and rec.get('created_by') == me
+                      and not rec.get('deleted'))
+            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan),
+                                       ver, config)
             if res.committed:
                 if orphan:
                     self._delete_object(path, config)
                     return 'abstract_class_orphan_deleted'
-                return 'abstract_class_untouched'
+                return 'abstract_reference_released'
         raise ConcurrencyConflict(f'could not release artifact reference {key!r}')
 
     def _delete_object(self, path, config) -> None:
@@ -610,38 +702,40 @@ class AIDLCSagaCompensator:
     def _route_to_dlq(self, result, config, **kwargs) -> None:
         queue_url = resolve_config('dlq_queue_url', config)
         if queue_url:
-            logging.warning(f"DLQ (compensation) -> {queue_url}: {result.get('generator_key')}")
+            logging.warning(f"DLQ (compensation) -> {queue_url}: {result.get('build_key')}")
 ```
 
 ### 7.1 Saga Decision Matrix
 
 | `phase_reached` at Failure         | Compensating Action                                                                                                     | What Is Preserved                                                                          |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `QUEUED` / `FAILED_G2C_P0`          | Delete the P0 scaffold and the inherited-class file for this `generator_key`; delete the shared abstract class only if orphaned by this request | Nothing durable existed yet, or only a partial scaffold — clean abort                          |
+| `QUEUED` / `FAILED_G2C_P0`          | Delete the P0 scaffold only if P0 did not succeed, and delete the inherited-class file for this build; release the abstract-class reference (the class itself is deleted only under the opt-in rule in Section 7.3) | Nothing durable existed yet, or only a partial scaffold — clean abort                          |
 | `FAILED_A2C`                        | Delete the uncommitted A2C-generated files (Terraform, CI/CD YAML, business logic) and the ephemeral Git branch          | The P0 scaffold and the G2C abstract/inherited class — valid on their own                      |
 | `A2C_DONE` (Phase C failed)         | Revert only the staged A2C commit                                                                                        | The P0 scaffold and the G2C classes; the failure is isolated to Phase C's report               |
 
 ### 7.2 Phase-Aware Compensation Under Concurrent Failure
 
-The saga decides by `phase_reached` and acts only on what this `generator_key` produced. When builds run concurrently the question is what happens to completed artifacts, so each outcome is stated explicitly:
+The saga decides by `phase_reached` and acts only on what this build produced. When builds run concurrently the question is what happens to completed artifacts, so each outcome is stated explicitly:
 
 | Artifact | Fate when this build fails | Why |
 |---|---|---|
-| P0 scaffold and inherited class for this `generator_key` (failure in `QUEUED` / `FAILED_G2C_P0`) | **Reversed** — deleted | Partial output of a build that never became valid |
+| Scaffold whose P0 step did not succeed, and the inherited class of a failed generation (failure in `QUEUED` / `FAILED_G2C_P0`) | **Reversed** — deleted | Partial output of a build that never became valid |
+| Scaffold that P0 reported as succeeded | **Retained** | A settled P0 claim would otherwise replay a path that no longer exists |
 | P0 scaffold and G2C classes (failure in `FAILED_A2C` or after `A2C_DONE`) | **Retained** | Valid on their own; the profile's smaller-but-valid deliverable |
 | A2C Terraform, CI/CD and business-logic files (failure in `FAILED_A2C`) | **Reversed** — deleted with the ephemeral branch | Uncommitted output of the failed phase |
 | Staged A2C commit (failure in Phase C) | **Reversed** — reverted | Phase C rejected it; the scaffold stands |
-| Shared abstract class, still referenced by another `generator_key` | **Retained** | A sibling build depends on it |
-| Shared abstract class, no remaining reference, created by a build in this system | **Reversed** — deleted exactly once | Orphaned by the last referrer leaving |
+| Shared abstract class, still referenced by another build | **Retained** | A sibling build depends on it |
+| Shared abstract class, no remaining reference, created by this build, `compensation_delete_orphan_abstract` enabled | **Reversed** — deleted exactly once | Orphaned by the creating build as last referrer |
+| Shared abstract class, no remaining reference, deletion not enabled (default) | **Retained**; reference released | Settled G2C claims point at the file; deleting it would make their replays return a missing path |
 | Shared abstract class that pre-existed (`created_by` is `None`) | **Retained** | Not this system's to delete |
 | Artifacts of a build that **completed** | **Retained**, never touched by a sibling's compensation | A completed build keeps its reference |
 | Anything from a build that was only `REJECTED_OVERLOAD`, `SKIPPED_*` or `REJECTED_CONFLICT` | Nothing to compensate | No side effect occurred |
 
-"Invalidated" artifacts — ones that remain on disk but must not be consumed — arise only when a downstream consumer is told to ignore a failed build's output: the saga routes the failed `generator_key` to the DLQ so the Tier 5 consumer treats the build as failed, and the claim being `FAILED_RETRYABLE` rather than `SUCCEEDED` is what prevents a later duplicate from replaying a result that is not there.
+"Invalidated" artifacts — ones that remain on disk but must not be consumed — arise only when a downstream consumer is told to ignore a failed build's output: the saga routes the failed `build_key` to the DLQ so the Tier 5 consumer treats the build as failed, and the claim being `FAILED_RETRYABLE` rather than `SUCCEEDED` is what prevents a later duplicate from replaying a result that is not there.
 
 ### 7.3 Artifact Ownership and Publication Race
 
-Two concurrent builds in the same repository may both depend on one shared abstract class. Ownership is recorded in `artifact_store` (a `BaseTransactionalStore`) under `artifact:<path>` as `{refs, created_by, deleted}`. `__register_artifact_ref()` adds this `generator_key` to `refs` with a compare-and-set loop (bounded at 8 attempts, then `ConcurrencyConflict`), and the first registrant of a freshly generated artifact becomes `created_by`. `_delete_abstract_class_if_orphaned()` removes this key from `refs` with the same loop and decides *in the same commit* whether the artifact is now orphaned: `refs` empty, `created_by` not `None`, not already deleted. Only the caller whose commit marks it deleted calls `_delete_object()`, so two racing compensations cannot both delete, and a sibling that registered a reference first always keeps the artifact. A completed build never releases its reference, so an empty `refs` means every referencing build failed. A store that does not offer an atomic conditional write cannot provide this guarantee, and in that case the `artifact_store` should not be bound (the saga then leaves the abstract class untouched).
+Two concurrent builds in the same repository may both depend on one shared abstract class. Ownership is recorded in `artifact_store`, presented to G2C through `_ArtifactRegistryAdapter` (the store is a `BaseTransactionalStore`) under `artifact:<path>` as `{refs, created_by, deleted}`. `__register_artifact_ref()` adds G2C's `generator_key` (the identity of the generator run, not the AI-DLC `build_key`) to `refs` with a compare-and-set loop (bounded at 8 attempts, then `ConcurrencyConflict`), and the first registrant of a freshly generated artifact becomes `created_by`. `_delete_abstract_class_if_orphaned()` removes the key from `refs` with the same loop and decides *in the same commit* whether the artifact is now orphaned: `refs` empty, `created_by` not `None`, not already deleted. Only the caller whose commit marks it deleted calls `_delete_object()`, so two racing compensations cannot both delete, and a sibling that registered a reference first always keeps the artifact. A completed build never releases its reference, so an empty `refs` means every referencing build failed. A store that does not offer an atomic conditional write cannot provide this guarantee, and in that case the `artifact_store` should not be bound (the saga then leaves the abstract class untouched). Deletion is opt-in: by default the creator releasing the last reference keeps the file; with `compensation_delete_orphan_abstract` enabled, only the creator, after the last reference is released, may delete it, and a non-creator never does. A `G2C_P0_DONE` failure (Phase C) keeps the outputs and releases the reference. Opt-in deletion has a known consequence: after the base is deleted, a replay of its G2C key returns `recovery_required` rather than a missing path, and a new project of the same tenant gets that result for the base until its claim record is reconciled (the claim store cannot reopen a completed record). Leave the option off unless a reconciler exists.
 
 ## 8. Config / kwargs Reference
 
@@ -655,16 +749,18 @@ Two concurrent builds in the same repository may both depend on one shared abstr
 | `static_pipeline`       | config (object ref)             | `AIDLCStaticPipeline()` default     | `execute_pipeline()` Phase C — override only to substitute a different concrete `BasePipeline` subclass |
 | `saga_compensator`      | config (object ref)             | `AIDLCSagaCompensator()` default    | `__trigger_compensation()`                                                                            |
 | `dlq_queue_url`         | config / env `DLQ_QUEUE_URL` (central `E2A_CONFIG` registry)    | `None`                              | `_send_to_dlq()`, `AIDLCSagaCompensator._route_to_dlq()`                                              |
-| `artifact_store`        | config (object ref)             | `None`                              | `__register_artifact_ref()`, `AIDLCSagaCompensator._delete_abstract_class_if_orphaned()` — a `BaseTransactionalStore` holding `artifact:<path>` ownership records (Section 7.3) |
+| `artifact_store`        | config (object ref)             | `None`                              | `_ArtifactRegistryAdapter` (G2C registry), `AIDLCSagaCompensator._delete_abstract_class_if_orphaned()` — a `BaseTransactionalStore` holding `artifact:<path>` records `{refs, created_by, deleted}` (Section 7.3) |
+| `compensation_delete_orphan_abstract` | config (bool)    | `False`                             | Saga: opt in to deleting an orphaned abstract class (creator only, after the last reference is released) |
+| `a2c_validation_service` | config (object ref)            | `DevPlatformValidationService()`    | Validation tier run on the `dev_request` before `SDLCWorkflow`; a failure ends the build as `FAILED_A2C` |
 | `build_max_inflight`    | config / env `BUILD_MAX_INFLIGHT`                 | `4`    | `_BuildAdmission.acquire()` — concurrent builds per instance |
 | `tenant_build_max_inflight` | config / env `TENANT_BUILD_MAX_INFLIGHT`      | `2`    | `_BuildAdmission.acquire()` — concurrent builds per tenant |
 | `permit_timeout`        | config / env `LLM_PERMIT_TIMEOUT`                  | `5.0`  | `_BuildAdmission.acquire()` — bounded admission wait, capped by the deadline; also the LLM gateway permit wait |
-| `idempotency_lease_seconds` | config / env `IDEMPOTENCY_LEASE_SECONDS`      | `300`  | `claim()` — expiry of an `IN_PROGRESS` build; an expired claim needs reconciliation. Set it longer than the longest expected build |
+| `idempotency_lease_seconds` | config / env `IDEMPOTENCY_LEASE_SECONDS`      | `300`  | `claim()` — floor for the lease of an `IN_PROGRESS` build (the effective lease is max(this, remaining deadline + 60 s)); an expired claim needs reconciliation. Set it longer than the longest expected build |
 | `request_deadline_seconds` | config / env `REQUEST_DEADLINE_SECONDS`        | `0` (none) | `execute_pipeline()` — origin of the deadline checked before each phase |
 
 ## 9. Error Handling & DLQ Semantics
 
-`execute_pipeline()` catches exceptions from either phase uniformly: it appends `generator_key` to `failed_keys` and calls `_handle_error()`, exactly the pattern every other E2A workflow class already follows. No new exception type is introduced — a Phase C failure is raised as a plain `ValueError` carrying the failing stage's report, caught by the same `except Exception` clause as a Phase A or Phase B failure.
+`execute_pipeline()` catches exceptions from either phase uniformly: it appends the `build_key` to `failed_keys` and calls `_handle_error()`, exactly the pattern every other E2A workflow class already follows. No new exception type is introduced — a Phase C failure is raised as a plain `ValueError` carrying the failing stage's report, caught by the same `except Exception` clause as a Phase A or Phase B failure.
 
 Concurrency adds four distinctions. (1) `AdmissionTimeout` is caught first and is **overload, not failure**: `phase_reached = 'REJECTED_OVERLOAD'`, `failed_keys` stays empty, nothing is compensated or dead-lettered, and the claim is released as retryable. (2) A non-`CLAIMED` result (`SKIPPED_IDEMPOTENT`, `SKIPPED_IN_PROGRESS`, `REJECTED_CONFLICT`, `RECOVERY_REQUIRED`, `FAILED_FINAL`) returns before any phase runs and also never reaches the DLQ. (3) An expired deadline is an ordinary failure at the phase it stopped before and compensates that phase. (4) A `ConcurrencyConflict` from the state or artifact store is a failure that is compensated normally; it is never swallowed.
 
@@ -675,7 +771,7 @@ The one branch that is specific to this profile is in the `finally` block: whene
 ### 10.1 Full Pipeline — G2C + P0 + A2C + E2A, All Phases Succeed
 
 1. Tier 1: `BaseValidationService.validate()` mints `correlation_id`, confirms entitlement, publishes to the Intake Topic.
-2. Tier 2: `AIDLCPipelineOrchestrator.execute_pipeline()` resolves `generator_key`, passes the governance gate, wins the atomic idempotency claim for its `generator_key`, and is admitted by `_BuildAdmission`.
+2. Tier 2: `AIDLCPipelineOrchestrator.execute_pipeline()` resolves `build_key`, passes the governance gate, wins the atomic idempotency claim for `aidlc:<build_key>`, and is admitted by `_BuildAdmission`.
 3. Phase A: `DeveloperPlatformWorkflow.generate()` resolves/generates the E2A (and, for `generator_type='a2c_inherited'`, A2C) abstract class, then the inherited class; P0's `bootstrap()` runs inline and — because `config['a2c']['enabled']` was set — Step 16 builds `dev_request` into `ScaffoldResult`. `generator_result['success']` is `True`; `phase_reached` → `G2C_P0_DONE`.
 4. Phase B: `dev_request` is read off `generator_result['scaffold_result']['dev_request']`. `SDLCWorkflow.execute(dev_request, config)` runs RequirementsAgent → CodeGenAgent → IaCAgent → CICDAgent → CodeCriticAgent; CodeCriticAgent's score clears 0.75. `sdlc_result['errors']` is empty; `phase_reached` → `A2C_DONE`.
 5. Phase C: `AIDLCStaticPipeline().run_pipeline()` runs its full seven-stage sequence; the three real stages pass against the generated repository, the four no-op stages return trivially. `pipeline_report['status'] == 'SUCCESS'`; `phase_reached` → `E2A_VERIFIED`, `success` → `True`.
@@ -692,7 +788,7 @@ The one branch that is specific to this profile is in the `finally` block: whene
 
 1. Phase A completes normally; `phase_reached` is `G2C_P0_DONE`, `dev_request` is available.
 2. `SDLCWorkflow.execute(dev_request, config)` returns with `sdlc_result['errors']` populated — CodeCriticAgent's score stayed below 0.75 after two retries.
-3. `execute_pipeline()` appends `generator_key` to `failed_keys` and returns immediately with `phase_reached = 'FAILED_A2C'`; Phase C never runs.
+3. `execute_pipeline()` appends the `build_key` to `failed_keys` and returns immediately with `phase_reached = 'FAILED_A2C'` (also the outcome when `a2c_sdlc.enabled` has no `dev_request`, or the validation tier rejects it); Phase C never runs.
 4. `finally`: `AIDLCSagaCompensator.compensate()` reads `phase_reached == 'FAILED_A2C'`, deletes only the uncommitted A2C-generated files and the ephemeral Git branch, and leaves the P0 scaffold and G2C classes untouched — per the Decision Matrix in Section 7.1.
 5. The result is routed to the DLQ; Tier 5's Saga sees a non-empty `failed_keys` and takes the compensation path, but the repository is left in the smaller, still-valid G2C+P0 state rather than a half-built one.
 
@@ -702,20 +798,20 @@ The one branch that is specific to this profile is in the `finally` block: whene
 
 **Tenant over its build limit.** A tenant already running `tenant_build_max_inflight` builds submits another. The claim succeeds, but `_BuildAdmission.acquire()` times out after `permit_timeout`: `phase_reached = 'REJECTED_OVERLOAD'`, the claim is released as retryable, nothing is compensated. Other tenants are unaffected, and the caller retries once a slot frees.
 
-**Two builds share an abstract class, one fails.** Builds `k1` and `k2` both register a reference on `artifact:<path>`. `k2` fails in `FAILED_G2C_P0`; its compensation removes `k2` from `refs`, finds `k1` still present, and leaves the artifact. If `k1` then fails too, the last referrer's compensation empties `refs` and, because `created_by` is set, the single committing compensation deletes the artifact once.
+**Two builds share an abstract class, one fails.** Two builds register their G2C `generator_key`s on one `artifact:<path>` record. When the first fails in `FAILED_G2C_P0`, its compensation releases its reference and leaves the artifact, because the second is still present. When the last referrer is released, the artifact is kept by default; with `compensation_delete_orphan_abstract` enabled, only the creator's release of the last reference deletes it, once. A non-creator never deletes it, and a Phase C failure (`G2C_P0_DONE`) keeps the outputs and releases the reference.
 
 ## 11. Composition Summary — What This Profile Reuses vs. Adds
 
 | Component                                            | Treatment in This Profile                                                                                                             | Source of Truth                            |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
 | `DeveloperPlatformWorkflow` (G2C)                     | Reused unmodified; called directly, no wrapper                                                                                        | `G2C_Framework_Reference.md` Sec 10.2       |
-| `SDLCWorkflow` (A2C)                                  | Reused, signature inferred (Section 1 callout); called directly, no wrapper, conditional on `a2c_sdlc.enabled`                        | `A2C_Framework_Reference.md` Sec 3.2        |
+| `SDLCWorkflow` (A2C)                                  | Reused; implemented in `a2c_base.py`, `execute` inherited from `BaseWorkflow`; called directly, no wrapper, after validation, conditional on `a2c_sdlc.enabled`                        | `A2C_Framework_Reference.md` Sec 3.2        |
 | `BaseProjectBootstrapper` (P0)                        | Reused unmodified; never called by this profile — only ever invoked inline by G2C's inherited-class generator                          | `P0_ProjectBootstrap_Framework_Reference.md` |
 | `BaseValidationService`                               | Reused unmodified — Tier 1, entirely ahead of this profile's own classes                                                               | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.2         |
 | `BasePipeline`                                        | Reused unmodified — `run_pipeline()` itself is never touched; only its seven protected hooks are overridden, by `AIDLCStaticPipeline`  | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.12        |
 | `BaseObservability` / `BaseGovernanceFramework`       | Reused unmodified, in their Agentic-profile form (this pipeline calls LLMs on every phase)                                            | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.10–2.11   |
 | `BaseLLMAgentService`                                 | Reused unmodified — every phase's model call (G2C generators, A2C agents, `CodeCriticAgent`) is delegated to it via `config['llm_service']`; deployed as the Tier 2b Inference Gateway. `model_id` / `critic_model_id` are per-call arguments, never config mutations | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.18        |
-| `BaseTransactionalStore` / `BaseIdempotencyStore`     | Reused unmodified — bound to the Pipeline State table, the Artifact Object Store, and `generator_key` idempotency respectively         | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.16        |
+| `BaseTransactionalStore` / `BaseIdempotencyStore`     | Reused unmodified — bound to the Pipeline State table, the Artifact Object Store, and `aidlc:<build_key>` idempotency respectively         | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.16        |
 | `BaseWebhookDispatcher`                               | Reused unmodified — Tier 4 completion notifications                                                                                    | `IMPLEMENTATION_PLAYBOOK.md` Sec 2.16        |
 | `AIDLCPipelineOrchestrator`                           | New — this document, Section 5                                                                                                         | —                                               |
 | `AIDLCStaticPipeline`                                 | New — this document, Section 6 (thin `BasePipeline` subclass)                                                                          | —                                               |
@@ -742,17 +838,26 @@ Evidence names are checks in `smoke_test_aidlc_concurrency.py` unless stated. Ro
 
 | ID | Scenario | Expected result | Evidence |
 |---|---|---|---|
-| T-13 | Six concurrent duplicate builds, one `generator_key` | One build; five typed `SKIPPED_IN_PROGRESS` | `T-13 six concurrent duplicates -> one build`; `T-13 losers get typed SKIPPED_IN_PROGRESS`; `T-13 winner verified` |
+| T-13 | Six concurrent duplicate builds, one `build_key` | One build; five typed `SKIPPED_IN_PROGRESS` | `T-13 six concurrent duplicates -> one build`; `T-13 losers get typed SKIPPED_IN_PROGRESS`; `T-13 winner verified` |
 | T-13 | Duplicate after completion | `SKIPPED_IDEMPOTENT`, nothing rebuilt | `T-13 later duplicate replays as SKIPPED_IDEMPOTENT` |
 | — | Retry after a failed build | Claimable again; second attempt succeeds | `failed build -> retry allowed and succeeds` |
-| T-14 | Concurrent builds, same repository, shared artifact | Artifact stays referenced while a sibling needs it | `T-14 sibling build keeps shared artifact referenced`; `T-14 artifact not deleted while referenced` |
-| T-14 | Artifact publication race: two compensations at once | Exactly one deletes, exactly once | `T-14 racing compensations of k1,k2: exactly one deletes, exactly once` |
-| T-14 | One referrer leaves while another remains / last leaves | Not deleted / deleted | `T-14 one referrer leaving while another remains: not deleted`; `T-14 last referrer leaving deletes it` |
+| T-14 | Concurrent builds, same repository, shared artifact | Artifact stays referenced while a sibling needs it | `T-14 one ownership record, G2C identity: failed A released, B registered`; `T-14 artifact not deleted while referenced` |
+| T-14 | Artifact publication race: two compensations at once | At most one delete, never twice | `T-14 racing releases: at most one delete, never twice` |
+| T-14 | Creator releases the last reference | Default keeps the file; opt-in deletes it; a non-creator never deletes | `T-14 default: creator releasing the last reference keeps the file`; `T-14 opt-in: creator leaving last deletes it`; `T-14 opt-in: a non-creator leaving last never deletes` |
 | — | Tenant over build limit | Rejected within the bound; slot reusable; other tenants unaffected | `admission: second build for same tenant rejected within bound`; `admission: slot released and reusable`; `admission: other tenant unaffected` |
 | — | Overload end to end | `REJECTED_OVERLOAD`, no failed keys; claim released, retry succeeds | `overload -> REJECTED_OVERLOAD (no failed_keys)`; `overload releases claim; retry then succeeds` |
 | T-10 | Cancellation / expired deadline | No build started; stops at the next phase boundary | `expired deadline: no build started` |
 | T-04 | Quota saturation at the model gateway | Bounded permit and quota waits, rejection instead of queueing | *gateway*: `T-04 permit wait is bounded: excess rejected early, not queued` |
 | T-10 | Cancelled model call | Permit released, quota refunded | *gateway*: `T-10 cancel mid-call: permit released`; `T-10 cancel mid-call: TPM refunded, cleanup counted` |
+| X-1 | A2C requested with an abstract-only harness | `REJECTED_INVALID`, nothing runs | `X-1 A2C requested with an abstract-only harness -> REJECTED_INVALID, nothing runs` |
+| X-2 | Tenant and deadline propagation | Both reach the G2C request | `X-2 tenant_id and deadline_ms reach the G2C request` |
+| X-3 | Validation before A2C | `dev_request` validated, then A2C runs, carrying the build tenant | `X-3 dev_request validated, then A2C runs`; `X-3 validated dev_request carries the build tenant` |
+| X-4 | Claim namespace | Build claim is `aidlc:<build_key>` | `X-4 build claim is namespaced aidlc:` |
+| X-7 | Lease sizing | Lease outlives the deadline | `X-7 build lease outlives the deadline` |
+| X-8 | Copy semantics | A2C gets a copy; the build result is not enriched | `X-8 A2C gets a copy: the build result is not enriched` |
+| X-11 | Phase C failure after Phase A | Reference released; outputs kept; opt-in deletes an orphaned base once | `X-11 Phase C failure after Phase A releases the reference`; `X-11 sole creator, opt-in: orphaned base deleted once` |
+| — | End to end over the real G2C, P0 and A2C: `E2A_VERIFIED`, P0 inline, A2C artifacts in the P0 workspace, one ownership record written by G2C | `smoke_test_aidlc_integration.py` (a2c-framework, 15 checks) |
+| — | Retry replays outputs that still exist; a new project never replays a deleted shared base (typed `recovery_required`) | `smoke_test_aidlc_integration.py` |
 | — | Build burst across the fleet | Admitted builds ≤ `replicas × build_max_inflight`; no tenant starved | *load* |
 | — | Crash mid-build, then reconciliation | Claim expires to `RECOVERY_REQUIRED`; no blind rebuild | *load* (claim semantics: `expired claim -> RECOVERY_REQUIRED, never blind re-execution`) |
 
@@ -768,13 +873,12 @@ The full, contiguous scaffold file for this profile, mirroring the base Implemen
 # Drop into src/ or framework/. Import and subclass at the request/config
 # level only — never modify this file directly.
 #
-# NOTE ON SDLCWorkflow: A2C_Framework_Reference.md describes SDLCWorkflow
-# conceptually (Sec 3.2, the 5-agent LangGraph StateGraph) but does not
-# publish a formal method-contract table for it the way it does for
-# SDLCAssistantAgent. The execute(dev_request, config) -> DevRequest
-# signature below is inferred from that description and from the calling
-# convention every other E2A/A2C workflow class already uses.
+# NOTE ON SDLCWorkflow: a2c_base.SDLCWorkflow (a2c-framework) is a BaseWorkflow
+# subclass; execute(dev_request, config) -> DevRequest is inherited from
+# BaseWorkflow and never overridden (A2C_Framework_Reference.md, Sec 3.7).
+# The dev_request passes DevPlatformValidationService.validate() first.
 
+import copy
 import os
 import json
 import uuid
@@ -787,7 +891,11 @@ from typing import Any, Dict, List, Optional, TypedDict
 from e2a_base import (BasePipeline, resolve_config, ClaimStatus, BaseIdempotencyStore,
                       BaseTransactionalStore, Deadline, ConcurrencyConflict, AdmissionTimeout)
 from developer_platform_workflow import DeveloperPlatformWorkflow
-from a2c_base import SDLCWorkflow
+from a2c_base import SDLCWorkflow, DevPlatformValidationService
+
+# Harness generator types that run P0 and therefore produce a dev_request;
+# Phase B (A2C) needs one.
+INHERITED_GENERATOR_TYPES = ('e2a_inherited', 'a2c_inherited')
 
 logging.basicConfig(level=logging.INFO)
 
@@ -815,17 +923,23 @@ class AIDLCPipelineRequest(TypedDict, total=False):
     model_id: str
     critic_model_id: str
 
+    deadline: Any             # Deadline or seconds; else request_deadline_seconds
+
     # Written by AIDLCPipelineOrchestrator — do not supply
-    generator_key: str
+    build_key: str
+    generator_key: str        # deprecated alias of build_key (not G2C's generator_key)
     correlation_id: str
 
 
 class AIDLCPipelineResult(TypedDict, total=False):
     success: bool
-    generator_key: str
+    build_key: str            # project_name:runtime:build_tool:platform; claimed as aidlc:<build_key>
+    generator_key: str        # deprecated alias of build_key
     correlation_id: str
     phase_reached: str          # QUEUED | G2C_P0_DONE | A2C_DONE | E2A_VERIFIED
                                  # | FAILED_G2C_P0 | FAILED_A2C | SKIPPED_IDEMPOTENT
+                                 # | SKIPPED_IN_PROGRESS | REJECTED_CONFLICT | REJECTED_INVALID
+                                 # | REJECTED_OVERLOAD | RECOVERY_REQUIRED | FAILED_FINAL
     generator_result: dict      # GeneratorResult from Phase A (G2C)
     dev_request: dict           # DevRequest handed to A2C, if Phase B ran
     sdlc_result: dict           # updated DevRequest returned by Phase B
@@ -845,7 +959,8 @@ class PipelineStateRecord(TypedDict, total=False):
     of at a generic row store."""
     correlation_id: str
     tenant_id: str
-    generator_key: str
+    build_key: str
+    generator_key: str          # deprecated alias of build_key
     phase: str
     artifact_pointers: Dict[str, str]
     created_at: float
@@ -981,14 +1096,28 @@ class AIDLCPipelineOrchestrator:
             'correlation_id': correlation_id, 'message_log': message_log,
             'failed_keys': failed_keys, 'success': False, 'phase_reached': 'QUEUED',
         }
-        generator_key = self.__generate_key(request)
-        result['generator_key'] = generator_key
+        build_key = self.__generate_key(request)
+        result['build_key'] = build_key
+        result['generator_key'] = build_key       # deprecated alias
+        claim_key = f'aidlc:{build_key}'          # namespaced: never collides with g2c:/p0:/a2c: keys
+        generator_key = build_key                 # identity used in failed_keys / DLQ
         tenant_id = request.get('tenant_id') or '-'
         secs = float(resolve_config('request_deadline_seconds', config))
         deadline = Deadline.coerce(request.get('deadline')) if request.get('deadline') is not None \
             else (Deadline.after(secs) if secs > 0 else None)
         store = config.get('idempotency_store')
         owned, release_slot = False, None
+
+        # A requested phase that cannot run is a rejected request, not a
+        # build that later reports success without it.
+        problem = self.__request_problem(request)
+        if problem:
+            result['phase_reached'] = 'REJECTED_INVALID'
+            result['errors'] = [problem]
+            self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_invalid', detail=problem)
+            result['latency_ms'] = round((time.time() - start) * 1000, 1)
+            result['trace_id'] = correlation_id
+            return result
 
         try:
             # Step 1 — Governance gate
@@ -1001,10 +1130,14 @@ class AIDLCPipelineOrchestrator:
             # Step 2 — Atomic idempotency CLAIM (one winner per generator_key;
             # never a check-then-build). Duplicates get a typed outcome.
             if config.get('idempotency', True) and isinstance(store, BaseIdempotencyStore):
+                # The lease must outlive the whole build: at least the request
+                # deadline plus a margin, never less than the configured lease.
+                lease = int(resolve_config('idempotency_lease_seconds', config))
+                if deadline:
+                    lease = max(lease, int(deadline.remaining()) + 60)
                 claim = store.claim(
-                    generator_key, config, tenant_id=tenant_id, owner=correlation_id,
-                    fingerprint=self.__fingerprint(request),
-                    lease_seconds=int(resolve_config('idempotency_lease_seconds', config)))
+                    claim_key, config, tenant_id=tenant_id, owner=correlation_id,
+                    fingerprint=self.__fingerprint(request), lease_seconds=lease)
                 if claim.status == ClaimStatus.REPLAY:
                     self._log(message_log, correlation_id, 'INFO', 'pipeline_skipped_idempotent')
                     result['success'] = True
@@ -1031,7 +1164,17 @@ class AIDLCPipelineOrchestrator:
             g2c_request = dict(request.get('harness', {}))
             g2c_request['scaffold'] = request.get('context', {})
             g2c_request.update(request.get('prompt', {}))
+            # The build's tenant and remaining deadline reach every Phase A step
+            # (G2C claims, the gateway, P0 and the dev_request it builds).
+            if request.get('tenant_id'):
+                g2c_request.setdefault('tenant_id', request['tenant_id'])
+            if deadline:
+                g2c_request['deadline_ms'] = deadline.to_remaining_ms()
             g2c_config = dict(config)
+            # One artifact-ownership record per shared abstract class: G2C
+            # registers its references in this build's artifact_store.
+            if config.get('artifact_store') is not None:
+                g2c_config['artifact_registry'] = _ArtifactRegistryAdapter(config['artifact_store'], config)
             if request.get('a2c_sdlc', {}).get('enabled'):
                 # Rides through DeveloperPlatformWorkflow -> ... -> P0's
                 # bootstrap() unchanged, exactly as P0's own
@@ -1049,7 +1192,6 @@ class AIDLCPipelineOrchestrator:
             generator_result = DeveloperPlatformWorkflow(config=g2c_config).generate(
                 g2c_request, g2c_config)
             result['generator_result'] = generator_result
-            self.__register_artifact_ref(result, config)      # shared abstract class: atomic reference
             self.__persist_state(result, 'G2C_P0_ATTEMPTED', config)
             self._log(message_log, correlation_id, 'INFO', 'phase_a_complete',
                        success=generator_result.get('success', False))
@@ -1069,9 +1211,29 @@ class AIDLCPipelineOrchestrator:
             if deadline:
                 deadline.check('Phase B')
             dev_request = (generator_result.get('scaffold_result') or {}).get('dev_request')
-            if request.get('a2c_sdlc', {}).get('enabled') and dev_request:
+            if request.get('a2c_sdlc', {}).get('enabled'):
+                if not dev_request:
+                    # Requested but impossible: never skip silently.
+                    failed_keys.append(generator_key)
+                    result['phase_reached'] = 'FAILED_A2C'
+                    result.setdefault('errors', []).append(
+                        'a2c_sdlc.enabled but Phase A produced no dev_request '
+                        '(needs an inherited generator with a scaffold)')
+                    return result
+                if request.get('tenant_id'):
+                    dev_request.setdefault('tenant_id', request['tenant_id'])
                 result['dev_request'] = dev_request
-                sdlc_result = SDLCWorkflow(config=config).execute(dev_request, config)
+                # Validation tier before the workflow (BaseValidationService).
+                validator = config.get('a2c_validation_service') or DevPlatformValidationService()
+                verdict = validator.validate('SDLCWorkflow', dev_request, config,
+                                             correlation_id=correlation_id)
+                if not verdict['valid']:
+                    failed_keys.append(generator_key)
+                    result['phase_reached'] = 'FAILED_A2C'
+                    result.setdefault('errors', []).extend(verdict['errors'])
+                    return result
+                # A copy: A2C enriches its state in place.
+                sdlc_result = SDLCWorkflow(config=config).execute(copy.deepcopy(dev_request), config)
                 result['sdlc_result'] = sdlc_result
                 self._log(message_log, correlation_id, 'INFO', 'phase_b_complete',
                            critic_score=(sdlc_result.get('critic_report') or {}).get('score'))
@@ -1118,9 +1280,9 @@ class AIDLCPipelineOrchestrator:
             if owned:      # settle AFTER compensation, so the key is never claimable mid-cleanup
                 kw = dict(config=config, tenant_id=tenant_id, owner=correlation_id)
                 if result['success']:
-                    store.complete(generator_key, {'phase_reached': result['phase_reached']}, **kw)
+                    store.complete(claim_key, {'phase_reached': result['phase_reached']}, **kw)
                 else:
-                    store.fail(generator_key, retryable=True, **kw)
+                    store.fail(claim_key, retryable=True, **kw)
             obs_engine = config.get('observability_engine')
             if obs_engine:
                 obs_engine.record_telemetry(message_log, correlation_id, config,
@@ -1153,7 +1315,8 @@ class AIDLCPipelineOrchestrator:
             return
         record: PipelineStateRecord = {
             'correlation_id': result['correlation_id'],
-            'generator_key': result['generator_key'],
+            'build_key': result['build_key'],
+            'generator_key': result['build_key'],
             'phase': phase,
             'updated_at': time.time(),
         }
@@ -1163,29 +1326,14 @@ class AIDLCPipelineOrchestrator:
         if not res.committed:
             raise ConcurrencyConflict(f"pipeline state for {result['correlation_id']} changed concurrently")
 
-    def __register_artifact_ref(self, result, config):
-        """Record that this generator_key references the shared abstract
-        class. First registrant of a FRESHLY generated artifact becomes its
-        creator. All changes are compare-and-set loops, so concurrent
-        builds and concurrent compensations cannot lose a reference."""
-        store, gr = config.get('artifact_store'), result.get('generator_result') or {}
-        path, me = gr.get('abstract_class_path'), result['generator_key']
-        if not store or not path:
-            return
-        key = f'artifact:{path}'
-        for _ in range(8):
-            cur = store.get_versioned(key, config)
-            if cur is None or cur[0].get('deleted'):
-                rec = {'refs': [me], 'created_by': me if gr.get('abstract_class_generated_fresh') else None, 'deleted': False}
-                res = store.put_if_version(key, rec, cur[1] if cur else None, config)
-            else:
-                rec, ver = cur
-                if me in rec['refs']:
-                    return
-                res = store.put_if_version(key, dict(rec, refs=rec['refs'] + [me]), ver, config)
-            if res.committed:
-                return
-        raise ConcurrencyConflict(f'could not register artifact reference {key!r}')
+    def __request_problem(self, request) -> Optional[str]:
+        """A requested phase that cannot run makes the request invalid."""
+        if request.get('a2c_sdlc', {}).get('enabled'):
+            gtype = request.get('harness', {}).get('generator_type')
+            if gtype not in INHERITED_GENERATOR_TYPES:
+                return (f"a2c_sdlc.enabled needs an inherited generator in the harness "
+                        f"({' or '.join(INHERITED_GENERATOR_TYPES)}), got {gtype!r}")
+        return None
 
     def __trigger_compensation(self, result, config, correlation_id=None):
         compensator = config.get('saga_compensator') or AIDLCSagaCompensator()
@@ -1213,27 +1361,69 @@ class AIDLCPipelineOrchestrator:
 # AIDLCSagaCompensator — Tier 5 Saga compensation engine
 # ==================================================
 
+class _ArtifactRegistryAdapter:
+    """Presents this build's artifact_store (a BaseTransactionalStore) as
+    the registry G2C's DeveloperPlatformWorkflow expects (get_versioned /
+    compare_and_set). Records stay in the AI-DLC schema
+    artifact:<path> -> {refs, created_by, deleted}, so G2C's registration
+    and this compensator's release work on ONE record with ONE identity
+    (G2C's generator_key)."""
+
+    def __init__(self, store, config=None):
+        self.store, self.config = store, config or {}
+
+    def get_versioned(self, path):
+        cur = self.store.get_versioned(f'artifact:{path}', self.config)
+        if cur is None:
+            return None
+        rec, ver = cur
+        return ({'refs': list(rec.get('refs', [])), 'creator': rec.get('created_by'),
+                 'deleted': bool(rec.get('deleted'))}, ver)
+
+    def get(self, path):
+        cur = self.get_versioned(path)
+        return cur[0] if cur else None
+
+    def compare_and_set(self, path, record, expected_version) -> bool:
+        res = self.store.put_if_version(
+            f'artifact:{path}', {'refs': list(record['refs']), 'created_by': record.get('creator'),
+                                 'deleted': bool(record.get('deleted'))},
+            expected_version, self.config)
+        return bool(res.committed)
+
+
 class AIDLCSagaCompensator:
     """PRIMARY class — compensate() is the single public entry point.
-    Scoped so it only ever reverts artifacts this specific generator_key
-    produced. common/e2a_base.py or common/a2c_base.py is never touched
-    here — that file is reused-by-reference across generator_keys and may
-    already be a dependency of other, unrelated, already-completed builds."""
+    Scoped so it only ever reverts artifacts this specific build produced.
+
+    Rule: compensation never deletes an output whose producing step settled
+    SUCCEEDED (a P0 scaffold that succeeded, a generated abstract class).
+    Those claims would otherwise replay paths that no longer exist. A failed
+    build releases its reference on the shared abstract class instead.
+    Deleting an orphaned abstract class is opt-in
+    (config['compensation_delete_orphan_abstract']) and allowed only to the
+    build that created it fresh, after the last reference is released; G2C
+    and P0 report a replay whose output is missing as recovery_required."""
 
     def compensate(self, result: 'AIDLCPipelineResult', config: Dict[str, Any] = None,
                     correlation_id: str = None, **kwargs) -> Dict[str, Any]:
         config = config or {}
         phase = result.get('phase_reached', 'QUEUED')
+        gr = result.get('generator_result') or {}
         actions: List[str] = []
 
         if phase in ('QUEUED', 'FAILED_G2C_P0'):
-            # Nothing durable was written yet, or only a partial scaffold —
-            # delete the inherited-class file and the P0 scaffold for this
-            # generator_key only. The shared abstract class is untouched
-            # unless it was generated fresh for this request and no other
-            # generator_key references it yet (checked inside the helper).
-            actions.append(self._delete_scaffold(result, config))
+            # Delete only what no settled claim vouches for: a scaffold whose
+            # P0 step did not succeed, and the inherited class of a failed
+            # generation (written only if the failure came after the write).
+            if not (gr.get('scaffold_result') or {}).get('success'):
+                actions.append(self._delete_scaffold(result, config))
             actions.append(self._delete_inherited_class(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
+
+        elif phase == 'G2C_P0_DONE':
+            # Phase C failed with no Phase B: scaffold and classes are valid,
+            # replayable outputs — keep them; release this build's reference.
             actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         elif phase == 'FAILED_A2C':
@@ -1242,48 +1432,53 @@ class AIDLCSagaCompensator:
             # and the ephemeral Git branch are reverted.
             actions.append(self._delete_a2c_artifacts(result, config))
             actions.append(self._revert_git_branch(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         elif phase == 'A2C_DONE':
             # Phase C (static verification) failed after A2C succeeded —
             # revert only the staged A2C commit; scaffold and classes stand.
             actions.append(self._revert_git_branch(result, config))
+            actions.append(self._delete_abstract_class_if_orphaned(result, config))
 
         self._route_to_dlq(result, config, correlation_id=correlation_id)
         return {'phase_compensated': phase, 'actions': actions}
 
     def _delete_scaffold(self, result, config) -> str:
-        return 'scaffold_deleted'  # object-store delete under generator_key prefix
+        return 'scaffold_deleted'  # object-store delete under the build_key prefix
 
     def _delete_inherited_class(self, result, config) -> str:
         return 'inherited_class_deleted'
 
     def _delete_abstract_class_if_orphaned(self, result, config) -> str:
-        """Deletes the shared abstract class ONLY if it was generated fresh
-        by a build in this system AND the last referencing generator_key is
-        being compensated (a completed build never releases its reference,
-        so an empty reference set means every referencing build failed). The
-        reference check and the decision are ONE compare-and-set on the
-        ownership record, so two concurrent compensations cannot both
-        delete, and a sibling build that registered a reference first
-        always keeps the artifact. Only the CAS winner performs the delete."""
+        """Release this build's reference on the shared abstract class (one
+        compare-and-set on the ownership record). The identity is G2C's
+        generator_key, the one G2C registered. The class is deleted only if
+        deletion is enabled, this build CREATED it fresh, and no other
+        reference remains; the CAS makes that decision exactly once."""
         store, gr = config.get('artifact_store'), result.get('generator_result') or {}
-        path, me = gr.get('abstract_class_path'), result.get('generator_key')
+        path = gr.get('abstract_class_path')
+        me = gr.get('generator_key') or result.get('build_key') or result.get('generator_key')
         if not store or not path:
             return 'abstract_class_untouched'
+        allow_delete = bool(config.get('compensation_delete_orphan_abstract', False))
         key = f'artifact:{path}'
         for _ in range(8):
             cur = store.get_versioned(key, config)
             if cur is None:
                 return 'abstract_class_untouched'
             rec, ver = cur
-            refs = [r for r in rec.get('refs', []) if r != me]
-            orphan = (not refs) and rec.get('created_by') is not None and not rec.get('deleted')
-            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan), ver, config)
+            if me not in rec.get('refs', []):
+                return 'abstract_class_untouched'
+            refs = [r for r in rec['refs'] if r != me]
+            orphan = (allow_delete and not refs and rec.get('created_by') == me
+                      and not rec.get('deleted'))
+            res = store.put_if_version(key, dict(rec, refs=refs, deleted=bool(rec.get('deleted')) or orphan),
+                                       ver, config)
             if res.committed:
                 if orphan:
                     self._delete_object(path, config)
                     return 'abstract_class_orphan_deleted'
-                return 'abstract_class_untouched'
+                return 'abstract_reference_released'
         raise ConcurrencyConflict(f'could not release artifact reference {key!r}')
 
     def _delete_object(self, path, config) -> None:
@@ -1299,7 +1494,7 @@ class AIDLCSagaCompensator:
     def _route_to_dlq(self, result, config, **kwargs) -> None:
         queue_url = resolve_config('dlq_queue_url', config)
         if queue_url:
-            logging.warning(f"DLQ (compensation) -> {queue_url}: {result.get('generator_key')}")
+            logging.warning(f"DLQ (compensation) -> {queue_url}: {result.get('build_key')}")
 ```
 
 ---
