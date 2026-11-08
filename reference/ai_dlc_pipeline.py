@@ -5,12 +5,10 @@
 # Drop into src/ or framework/. Import and subclass at the request/config
 # level only — never modify this file directly.
 #
-# NOTE ON SDLCWorkflow: A2C_Framework_Reference.md describes SDLCWorkflow
-# conceptually (Sec 3.2, the 5-agent LangGraph StateGraph) but does not
-# publish a formal method-contract table for it the way it does for
-# SDLCAssistantAgent. The execute(dev_request, config) -> DevRequest
-# signature below is inferred from that description and from the calling
-# convention every other E2A/A2C workflow class already uses.
+# NOTE ON SDLCWorkflow: a2c_base.SDLCWorkflow (a2c-framework) is a BaseWorkflow
+# subclass; execute(dev_request, config) -> DevRequest is inherited from
+# BaseWorkflow and never overridden (A2C_Framework_Reference.md, Sec 3.7).
+# The dev_request passes DevPlatformValidationService.validate() first.
 
 import copy
 import os
