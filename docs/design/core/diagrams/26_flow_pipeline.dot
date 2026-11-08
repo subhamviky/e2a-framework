@@ -1,0 +1,10 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>BasePipeline.run_pipeline() — seven gates, cheapest first</b>>, fontcolor="#1F3864", nodesep=0.25, ranksep=0.35, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.12,0.06", width=1.6];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  s1 [label="1 Static security\nSAST + secrets"]; s2 [label="2 Test suite"]; s3 [label="3 Scaffold compliance\nvalidate_capacity()\n+ entry-point rule"];
+  s4 [label="4 RAGAS gate\n≥ faithfulness_threshold"]; s5 [label="5 Artifacts\n5 images"]; s6 [label="6 DAST\nephemeral sandbox"]; s7 [label="7 Rollout\nBLUE_GREEN | CANARY", fillcolor="#E3F1E3", color="#3B7D3B"];
+  f [label="report.status = FAILED\nfailed_keys += correlation_id\n(never raised)", fillcolor="#FBE9E7", color="#C0504D"];
+  s1 -> s2 -> s3 -> s4 -> s5 -> s6 -> s7;
+  {s1 s2 s3 s4 s5 s6} -> f [style=dashed, color="#C0504D"];
+}

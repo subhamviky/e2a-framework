@@ -1,0 +1,51 @@
+@startuml
+!include ../../common/style.puml
+title Data contracts — TypedDicts (total=False)
+class AIDLCPipelineRequest <<TypedDict>> {
+  context : dict   «P0 ScaffoldRequest»
+  harness : dict   «G2C GeneratorRequest»
+  prompt : dict    «free-text fields»
+  a2c_sdlc : dict  «enabled, project_type,\n  mandatory_nfrs, target_cloud»
+  tenant_id : str
+  model_id : str
+  critic_model_id : str
+  build_key : str  «written by orchestrator»
+  generator_key : str  «deprecated alias of build_key»
+  correlation_id : str
+  deadline  «optional: Deadline / seconds»
+}
+class AIDLCPipelineResult <<TypedDict>> {
+  success : bool
+  build_key : str
+  generator_key : str  «deprecated alias»
+  correlation_id : str
+  phase_reached : str
+  generator_result : dict  «G2C GeneratorResult»
+  dev_request : dict
+  sdlc_result : dict  «updated DevRequest»
+  pipeline_report : dict  «BasePipeline report»
+  message_log : List[dict]
+  failed_keys : List[str]
+  trace_id : str
+  latency_ms : float
+  errors : List[str]
+}
+class PipelineStateRecord <<TypedDict>> {
+  correlation_id : str
+  tenant_id : str
+  build_key : str
+  generator_key : str  «deprecated alias»
+  phase : str
+  artifact_pointers : Dict[str, str]
+  created_at : float
+  updated_at : float
+}
+class "artifact:<path> record" as AR <<artifact_store row>> {
+  refs : List[G2C generator_key]
+  created_by : G2C generator_key | None
+  deleted : bool
+}
+AIDLCPipelineRequest ..> AIDLCPipelineResult : execute_pipeline()
+AIDLCPipelineResult ..> PipelineStateRecord : __persist_state()
+AIDLCPipelineResult ..> AR : written by G2C through\n_ArtifactRegistryAdapter;\nreleased by the compensator
+@enduml

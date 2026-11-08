@@ -1,0 +1,24 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>ResiliencePolicy.call() — retry decision for one attempt</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.3, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.16,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  d [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="deadline\nexpired?"];
+  bh [label="acquire bulkhead slot\n(wait ≤ min(bulkhead_acquire_timeout, deadline))"];
+  dep [label="budget.deposit()  (first attempt earns ratio)"];
+  cb [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="breaker\nallow()?"];
+  run [label="await fn()", fillcolor="#DCE8F5"];
+  ok [label="record_success(); return result", fillcolor="#E3F1E3", color="#3B7D3B"];
+  fail [label="record_failure()\n(unless deterministic / structural)"];
+  cr [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="retryable?"];
+  bw [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="budget.withdraw()?"];
+  sl [label="sleep full-jitter backoff\n(abort if ≥ remaining deadline)"];
+  raise [label="raise original error", fillcolor="#FBE9E7", color="#C0504D"];
+  co [label="CircuitOpenError", fillcolor="#FBE9E7", color="#C0504D"];
+  de [label="DeadlineExceeded", fillcolor="#FBE9E7", color="#C0504D"];
+  bf [label="BulkheadFullError", fillcolor="#FBE9E7", color="#C0504D"];
+  d -> de [label=" yes"]; d -> bh [label=" no"]; bh -> bf [label=" timeout"]; bh -> dep; dep -> cb;
+  cb -> co [label=" no"]; cb -> run [label=" yes"]; run -> ok [label=" ok"]; run -> fail [label=" exception"];
+  note [shape=note, fillcolor="#FFF8E1", color="#D4A017", label="retryable when ALL hold:\l• attempt ≤ max_retries\l• not ValueError/TypeError/PermissionError\l• not NFR or structural error\l• a timeout only if idempotent\l• caller predicate allows\l"];
+  cr -> note [style=dotted, arrowhead=none];
+  fail -> cr; cr -> raise [label=" no"]; cr -> bw [label=" yes"]; bw -> raise [label=" no (budget exhausted)"]; bw -> sl [label=" yes"]; sl -> cb [label=" next attempt"];
+}

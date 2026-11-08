@@ -1,0 +1,40 @@
+@startuml
+!include ../../common/style.puml
+title End-to-end build — Tier 0 to Tier 5
+autonumber "<b>0."
+actor Developer as D
+participant "T0/T1\nEdge" as E
+queue "Intake\ntopic" as IT
+participant "T2\nOrchestrator" as O
+participant "G2C + P0\n(Phase A)" as A
+participant "A2C\n(Phase B)" as B
+participant "Static\npipeline (C)" as C
+participant "T2b\ngateway" as L
+database "T3 state /\nartifacts" as S
+participant "T5\nSaga" as T5
+participant "T4\nstatus" as T4
+D -> E : Execute(request)
+E -> E : JWT, tenant,\nvalidate, entitle
+E -> IT : publish
+E --> D : 202 + correlation_id
+D -> T4 : subscribe to\nstatus stream
+IT -> O : push: execute_pipeline()
+O -> O : request check, governance,\nclaim aidlc:<key>, admission
+O -> A : generate(g2c_request)
+A -> L : generator\nLLM calls
+A -> S : register shared-base\nreference (CAS)
+A --> O : GeneratorResult\n(+ dev_request)
+O -> S : state G2C_P0_DONE
+O -> O : validate dev_request
+O -> B : execute(copy of dev_request)
+B -> L : 5 agent calls
+B --> O : sdlc_result
+O -> S : state A2C_DONE
+O -> C : run_pipeline()
+C --> O : report SUCCESS
+O -> S : state E2A_VERIFIED;\ncomplete(claim)
+S -> T5 : batch, failed_keys
+T5 -> T5 : commit: merge, tag
+S -> T4 : completion event
+T4 --> D : live log, done
+@enduml

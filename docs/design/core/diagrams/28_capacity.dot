@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Capacity and backpressure at tier boundaries</b>>, fontcolor="#1F3864", nodesep=0.4, ranksep=0.45, pad=0.25];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  t0 [label="T0 gateway"]; t1 [label="T1 validation"]; it [label="Intake topic", shape=cds, fillcolor="#E6F4F5", color="#0F7C8C"];
+  t2 [label="T2 orchestration", fillcolor="#DCE8F5"]; st [label="T3 state + cache", shape=cylinder, fillcolor="#E6F4F5", color="#0F7C8C"];
+  t2b [label="T2b inference ⚑", fillcolor="#DCE8F5"]; m [label="Model provider ⚑", shape=ellipse, fillcolor="#FFFFFF"];
+  t4 [label="T4 tools / RAG ⚑ (bulkhead each)"]; tq [label="Task queue", shape=cds, fillcolor="#E6F4F5", color="#0F7C8C"]; t5 [label="T5 saga"];
+  t0 -> t1 [label="sync · tenant rate limit → 429"];
+  t1 -> it [label="durable · 202", style=dashed];
+  it -> t2 [label="durable · worker_concurrency ≤ db_pool_size", style=dashed];
+  t2 -> st [label="sync · db_pool_size, deadline"];
+  t2 -> t2b [label="sync · permit_timeout → quota_timeout"];
+  t2b -> m [label="sync · min(llm_max_latency, deadline) · circuit"];
+  t2 -> t4 [label="sync · bulkhead · circuit · retry budget"];
+  st -> tq [style=dashed]; tq -> t5 [label="durable · saga concurrency", style=dashed];
+  legend [shape=note, fillcolor="#FFF8E1", color="#D4A017", label="solid = synchronous bounded wait (typed rejection on timeout)\ldashed = durable backlog (redelivery + DLQ)\l⚑ = saturates independently behind its own bound\l"];
+}

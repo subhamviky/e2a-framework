@@ -1,0 +1,12 @@
+@startuml
+!include ../../common/style.puml
+title CircuitBreaker state machine
+[*] --> closed
+closed --> closed : record_success()\nfailures = 0
+closed --> open : record_failure()\nfailures ≥ circuit_failure_threshold
+open --> open : allow() = False\n(CircuitOpenError, call never attempted)
+open --> half_open : circuit_reset_seconds elapsed
+half_open --> closed : probe succeeds
+half_open --> open : probe fails
+state half_open : allow() = True for exactly one probe
+@enduml

@@ -1,0 +1,57 @@
+@startuml
+!include ../../common/style.puml
+title Foundation and cross-cutting classes
+abstract class BaseGovernanceFramework <<injected: governance_engine>> {
+  +enforce_governance_gate(state, io_config, config, **kw) : dict
+  +redact_response(state, response, config, **kw) : dict
+  -__enforce_token_budget(state, io_config)
+  -__trigger_dehydration(state, config, **kw)
+  #{abstract} _check_execution_capacity(state, io_config, config, **kw) : bool
+  #{abstract} _evaluate_dependency_health(config, **kw) : bool
+  #{abstract} _execute_semantic_firewall(state, config, **kw) : dict
+  #{abstract} _redact_output_fields(state, response, config, **kw) : dict
+  #{abstract} _verify_sandbox_profile(config, **kw)
+  #{abstract} _circuit_breaker(failures, config, **kw) : bool
+  #{abstract} _dehydrate_state_to_perimeter(state, cid, tenant_id, config)
+}
+abstract class BaseObservability <<injected: observability_engine>> {
+  +record_telemetry(message_log, correlation_id, config, **kw)
+  -__extract_metrics(enriched_logs) : dict
+  #{abstract} _ship_logs() / _emit_metrics() / _export_traces()
+  #_emit_counter() / _emit_histogram() / _emit_gauge()
+}
+abstract class BaseValidationService <<Tier 1 edge>> {
+  +validator_registry : Dict[str, Callable]
+  +validate(agent_name, state, config, correlation_id, **kw) : ValidationResult
+  #_resolve_validator(agent_name, config, **kw)
+  #{abstract} _enforce_entitlement_gate(agent_name, state, config, **kw) : ValidationResult
+  -__build_result(...)
+}
+class OrderOpsValidationService <<example>> {
+  #_validate_refund_agent(state, config, **kw)
+  #_validate_order_ops_agent(state, config, **kw)
+}
+class ValidationResult <<dict>>
+interface BasePromptRegistry <<interface>> {
+  +get_prompt(prompt_id, version='latest', tenant_id, config, **kw)
+}
+interface BaseMemoryManager <<interface · agentic only>> {
+  +prune(message_history, max_tokens, config, **kw) : list
+}
+interface BaseSchemaTransformer <<interface>> {
+  +upcast(payload, from_version, to_version, config, **kw) : dict
+}
+abstract class BaseWebhookDispatcher <<outbound>> {
+  +dispatch(webhook_url, payload, config, correlation_id, **kw) : dict
+  #{abstract} _sign_payload(payload, signing_secret, config, **kw) : str
+  #{abstract} _deliver(webhook_url, signed_payload, config, **kw) : bool
+}
+BaseValidationService <|-- OrderOpsValidationService
+BaseValidationService ..> ValidationResult
+BaseGovernanceFramework -[hidden]right- BaseValidationService
+BaseGovernanceFramework -[hidden]down- BaseObservability
+BaseObservability -[hidden]down- BaseWebhookDispatcher
+OrderOpsValidationService -[hidden]down- BasePromptRegistry
+BasePromptRegistry -[hidden]down- BaseMemoryManager
+BaseMemoryManager -[hidden]down- BaseSchemaTransformer
+@enduml

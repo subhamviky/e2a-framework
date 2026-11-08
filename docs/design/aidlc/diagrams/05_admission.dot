@@ -1,0 +1,15 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Build admission, capacity and durable state</b>>, fontcolor="#1F3864", nodesep=0.4, ranksep=0.45, pad=0.25];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  it [label="Intake topic\n(durable build queue)", shape=cds, fillcolor="#E6F4F5", color="#0F7C8C"];
+  cl [label="Atomic claim on aidlc:<build_key>\n(one winner; typed duplicates)", fillcolor="#E6F4F5", color="#0F7C8C"];
+  ad [label="_BuildAdmission\ntenant permit → instance permit\n≤ min(permit_timeout, deadline)", fillcolor="#DCE8F5"];
+  ph [label="Phases A → B → C\n(sequential by data dependency)"];
+  gw [label="T2b gateway: permit, quota,\nmin(llm_max_latency, deadline)"];
+  st [label="Pipeline state (CAS per phase)\nArtifact ownership (CAS refs)", shape=cylinder, fillcolor="#E6F4F5", color="#0F7C8C"];
+  rej [label="REJECTED_OVERLOAD\nretryable · no DLQ · no compensation", fillcolor="#FBE9E7", color="#C0504D"];
+  it -> cl [style=dashed, label="durable"]; cl -> ad [label="CLAIMED"]; ad -> ph [label="admitted"]; ad -> rej [label="timeout"];
+  ph -> gw [label="model calls"]; ph -> st;
+  note [shape=note, fillcolor="#FFF8E1", color="#D4A017", label="fleet builds ≤ replicas × build_max_inflight\lper tenant ≤ tenant_build_max_inflight\lidempotency_lease_seconds > longest build (p95 < 10 min)\lbuild_max_inflight × calls per build vs pod_concurrency\l"];
+}

@@ -1,0 +1,20 @@
+@startuml
+!include ../../common/style.puml
+title Duplicate builds and overload
+participant "Request 1" as R1
+participant "Request 2\n(same key)" as R2
+participant "Request 3\n(tenant at cap)" as R3
+participant "Idempotency store" as IS
+participant "_BuildAdmission" as AD
+R1 -> IS : claim(aidlc:k) → CLAIMED
+R2 -> IS : claim(aidlc:k) → IN_PROGRESS
+R2 -> R2 : SKIPPED_IN_PROGRESS\n(no phase, no DLQ)
+R1 -> AD : acquire → admitted; build runs
+R3 -> IS : claim(aidlc:k3) → CLAIMED
+R3 -> AD : acquire → tenant permit\nwait ≤ permit_timeout → timeout
+R3 -> R3 : REJECTED_OVERLOAD
+R3 -> IS : fail(aidlc:k3, retryable=True)
+R1 -> IS : complete(aidlc:k, {phase_reached})
+R2 -> IS : later: claim(aidlc:k) → REPLAY
+R2 -> R2 : SKIPPED_IDEMPOTENT (success)
+@enduml

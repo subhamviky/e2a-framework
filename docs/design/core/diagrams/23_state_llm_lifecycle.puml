@@ -1,0 +1,12 @@
+@startuml
+!include ../../common/style.puml
+title BaseLLMAgentService instance life cycle (graceful shutdown)
+[*] --> Ready
+Ready : ready = True\naccepts process_inference*
+Ready --> Draining : drain() on SIGTERM
+Draining : ready = False (LB stops routing)\nnew calls → AdmissionTimeout\nin-flight continue
+Draining --> Drained : inflight == 0 within\ndrain_timeout_seconds
+Draining --> Cancelled : bound expired → caller cancels\nremaining tasks (cleanup refunds quota,\nreleases permits)
+Drained --> [*]
+Cancelled --> [*]
+@enduml

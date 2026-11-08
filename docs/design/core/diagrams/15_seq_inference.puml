@@ -1,0 +1,33 @@
+@startuml
+!include ../../common/style.puml
+title BaseLLMAgentService.process_inference() — admission pipeline
+participant "Agent (_infer)" as A
+participant "BaseLLMAgentService" as L
+participant "Semantic\ncache" as SC
+participant "Tenant +\npod permits" as P
+participant "RPM/TPM\nbucket" as Q
+participant "Resilience\nPolicy" as R
+participant "Provider\ntransport" as U
+A -> L : process_inference(\nmessages, tenant_id,\ndeadline, **kw)
+L -> L : tenant_id required;\nreject if draining;\ndeadline.check();\nsanitise prompts
+opt semantic cache enabled, no tools, no bypass
+  L -> SC : _check_semantic_cache()
+  SC --> L : hit → return payload (tokens_used = 0)
+end
+L -> L : context budget;\nKV cache handle;\ntool schemas
+L -> P : tenant, then pod permit\n≤ min(permit_timeout,\ndeadline)
+P --> L : permit | AdmissionTimeout
+L -> Q : admit quota(estimate)\n≤ min(quota_timeout,\ndeadline)
+Q --> L : (rpm, tpm) reserved
+L -> R : call(_upstream, deadline)
+R -> U : _dispatch_upstream_call\n≤ min(llm_max_latency,\ndeadline)
+U --> R : text | tool_calls
+R --> L : raw
+L -> P : release permits (context exit)
+L -> L : format output;\ntrack usage; egress DLP;\nrefund unused quota
+opt cacheable success
+  L -> SC : _store_semantic_cache()
+end
+L --> A : {status: SUCCESS, text,\ntokens_used, physical_success}
+note over L, Q : any Exception → quota refunded,\nkey → failed_keys, _handle_error(),\nreturns {status: FAILED, physical_success: False}.\nCancelledError / DehydrationInterrupt →\nquota refunded, re-raised
+@enduml

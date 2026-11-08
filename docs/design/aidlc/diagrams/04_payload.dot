@@ -1,0 +1,17 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>AIDLCPipelineRequest — UI panels to framework contracts</b>>, fontcolor="#1F3864", nodesep=0.25, ranksep=0.8, pad=0.25];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  subgraph cluster_r { label=<<b>Request (UI)</b>>; style=rounded; color="#2E75B6";
+    ctx [label="context\n(P0 ScaffoldRequest: project_name,\nruntime, build_tool, platform, …)"];
+    har [label="harness\n(G2C GeneratorRequest fields)"];
+    pr [label="prompt\n(user_prompt, domain,\nclass_description, …)"];
+    a2c [label="a2c_sdlc\n{enabled, project_type,\nmandatory_nfrs, target_cloud}"];
+  }
+  g2c [label="g2c_request =\nharness ∪ {scaffold: context} ∪ prompt", fillcolor="#DCE8F5"];
+  cfg [label="g2c_config['a2c'] =\n{enabled, project_type, mandatory_nfrs,\ntarget_cloud, context: user_prompt}", fillcolor="#DCE8F5"];
+  key [label="build_key =\nproject_name:runtime:build_tool:platform\nclaimed as aidlc:<build_key>", fillcolor="#E6F4F5", color="#0F7C8C"];
+  fp [label="fingerprint =\nsha256(context, a2c_sdlc)", fillcolor="#E6F4F5", color="#0F7C8C"];
+  ctx -> g2c; har -> g2c; pr -> g2c; a2c -> cfg; pr -> cfg [style=dashed];
+  ctx -> key; ctx -> fp; a2c -> fp;
+}

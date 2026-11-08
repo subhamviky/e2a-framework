@@ -1,0 +1,27 @@
+@startuml
+!include ../../common/style.puml
+title Shared abstract class — registration by G2C, release by the compensator (CAS)
+participant "Build k1\n(G2C key)" as K1
+participant "Build k2\n(G2C key)" as K2
+database "artifact_store\nartifact:<path>" as AS
+participant "Object store" as OS
+note over K1, K2 : G2C registers through _ArtifactRegistryAdapter —\nthe orchestrator registers nothing itself
+K1 -> AS : get_versioned → None
+K1 -> AS : put_if_version({refs:[k1], created_by:k1}, None)
+AS --> K1 : COMMITTED v1
+K2 -> AS : get_versioned → (refs:[k1], v1)
+K2 -> AS : put_if_version(refs:[k1,k2], v1)
+AS --> K2 : COMMITTED v2
+note over K1, K2 : both builds fail and compensate concurrently
+K1 -> AS : get → (refs:[k1,k2], v2)
+K2 -> AS : get → (refs:[k1,k2], v2)
+K2 -> AS : put_if_version(refs:[k1], v2)
+AS --> K2 : COMMITTED v3 → reference released
+K1 -> AS : put_if_version(refs:[k2], v2)
+AS --> K1 : CONFLICT (store has v3)
+K1 -> AS : retry: get → (refs:[k1], v3)
+K1 -> AS : put_if_version(refs:[], deleted:True, v3)
+AS --> K1 : COMMITTED v4 → orphan: k1 created it, none remain
+K1 -> OS : _delete_object(path) — only if\ncompensation_delete_orphan_abstract
+note right of AS : off by default: the reference is released and the file kept;\nonly the creating build may delete; pre-existing artifact\n(created_by None) is never deleted; ≤ 8 CAS attempts
+@enduml

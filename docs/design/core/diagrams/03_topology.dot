@@ -1,0 +1,32 @@
+digraph G {
+  graph [rankdir=TB, compound=true, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Agentic landing zone — zones, tiers 0–5 and the Tier 2b inference gateway</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.5, pad=0.25, newrank=true];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  internet [label="Clients", shape=ellipse, fillcolor="#FFFFFF"];
+  subgraph cluster_dmz { label=<<b>Public VPC / DMZ</b>>; style="rounded,filled"; fillcolor="#FBF3E6"; color="#D4A017"; fontcolor="#7A5A00";
+    t0 [label="T0 API Gateway + WAF\nJWT · tenant_id · rate limit"];
+    t1 [label="T1 Validation\nBaseValidationService"];
+  }
+  subgraph cluster_app { label=<<b>Private VPC (Application)</b>>; style="rounded,filled"; fillcolor="#EAF2FA"; color="#2E75B6"; fontcolor="#1F3864";
+    t2 [label="T2 Orchestration compute\nBaseWorkflow + agents\nsemantic router · firewall", fillcolor="#DCE8F5"];
+    t2b [label="T2b Inference gateway\nBaseLLMAgentService\npermits · quota · DLP", fillcolor="#DCE8F5"];
+    t4 [label="T4 Workers\nRAG retrieval · tools · MCP\nindexing (CDC)"];
+    t5 [label="T5 Saga edge"];
+    sw [label="Sweeper / reconciler\n(leased jobs)"];
+  }
+  subgraph cluster_data { label=<<b>Data &amp; Messaging Perimeter</b>>; style="rounded,filled"; fillcolor="#E6F4F5"; color="#0F7C8C"; fontcolor="#0F5C66";
+    it [label="Intake topic", shape=cds];
+    st [label="State / outbox\nidempotency", shape=cylinder];
+    rc [label="Cache A/B/C\nsession · semantic · quota", shape=cylinder];
+    vx [label="Vector index\n(tenant namespaces)", shape=cylinder];
+    tq [label="Task queue + DLQ", shape=cds];
+  }
+  model [label="Model provider\n(private endpoint)", shape=ellipse, fillcolor="#FFFFFF"];
+  internet -> t0 -> t1;
+  t1 -> it [label="async"]; t1 -> t2 [label="sync", style=bold];
+  it -> t2 [label="push"];
+  t2 -> t2b [label="gRPC"]; tq -> t2b [label="batch pull", style=dashed];
+  t2b -> model [label="only model egress"];
+  t2 -> st [xlabel="claim · outbox"]; t2 -> rc; t2 -> t4 [label="bounded"];
+  t4 -> vx; st -> tq; tq -> t5; sw -> st [style=dashed];
+}

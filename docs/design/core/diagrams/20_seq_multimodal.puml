@@ -1,0 +1,27 @@
+@startuml
+!include ../../common/style.puml
+title MultiAgentOrchestratorWorkflow — intent routing to four peer agents
+participant "Caller" as C
+participant "MultiAgentOrchestratorWorkflow\n(BaseWorkflow.execute)" as W
+participant "Semantic router" as SR
+participant "Selected agent" as A
+participant "BaseLLMAgentService" as L
+C -> W : execute(state{query, intent?}, config, intent_score)
+W -> W : _build_workflow() → LangGraph StateGraph\n_validate_workflow(): required nodes present
+note right of SR : the router populates intent / intent_score\nwhen the graph runs (classify_intent node);\nexecute() itself routes via _get_agent()
+W -> W : claim only for MCP_TOOL_CALL / API_TOOL_CALL\nwith score ≥ min_confidence
+W -> W : _get_agent(intent, intent_score)
+alt RAG_GROUNDED
+  W -> A : RAGAgent.run(): retrieve → ground → infer\n_evaluate_output = rag_pipeline._evaluate_answer()
+else MCP_TOOL_CALL / API_TOOL_CALL
+  W -> A : MCPToolAgent / APIToolAgent.run():\n_apply_policy runs the tool on the bridge loop;\nconfidence = physical_success
+else LLM_ONLY
+  W -> A : GenericLLMOnlyAgent.run(): detect modality →\ntranscribe / extract / pass image → infer
+else unknown intent or score < min_confidence
+  W -> A : FallbackAgent.run(): confidence 0 → degraded answer
+end
+A -> L : _infer(messages, model_id)
+L --> A : payload
+A --> W : state(response, outcome?)
+W --> C : state
+@enduml

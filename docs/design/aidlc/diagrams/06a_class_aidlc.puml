@@ -1,0 +1,55 @@
+@startuml
+!include ../../common/style.puml
+title ai_dlc_pipeline.py — the classes this profile adds
+class AIDLCPipelineOrchestrator <<Tier 2 · composing orchestrator>> {
+  +config : dict
+  -_admission : _BuildAdmission
+  +execute_pipeline(request, config=None,\n  correlation_id=None, **kw) : AIDLCPipelineResult
+  #_log(message_log, cid, level, event, **fields)
+  #_send_to_dlq(failed_keys, config, **kw)
+  #_handle_error(error, request, result, config, **kw)
+  -__generate_key(request) : str
+  -__fingerprint(request) : str
+  -__persist_state(result, phase, config)
+  -__request_problem(request) : str | None
+  -__trigger_compensation(result, config, correlation_id)
+}
+class _BuildAdmission <<internal>> {
+  -_global : BoundedSemaphore
+  -_tenants : Dict[tenant, [semaphore, active]]
+  +acquire(tenant_id, config, deadline) : release()
+  -_release(entry, tenant_id, got_t, got_g)
+}
+class _ArtifactRegistryAdapter <<internal>> {
+  +get_versioned(path)
+  +get(path)
+  +compare_and_set(path, record, version) : bool
+}
+class AIDLCSagaCompensator <<Tier 5 logic>> {
+  +compensate(result, config, correlation_id, **kw) : dict
+  #_delete_scaffold(result, config) : str
+  #_delete_inherited_class(result, config) : str
+  #_delete_abstract_class_if_orphaned(result, config) : str
+  #_delete_object(path, config)
+  #_delete_a2c_artifacts(result, config) : str
+  #_revert_git_branch(result, config) : str
+  #_route_to_dlq(result, config, **kw)
+}
+class AIDLCStaticPipeline <<Phase C>> {
+  +required_artifact_matrix = []
+  #_run_static_security_scans()  real
+  #_execute_test_suite()  real
+  #_verify_scaffold_contracts()  real
+  #_run_rag_eval() = 1.0  no-op
+  #_compile_artifact() / _run_dynamic_security_checks()  no-op
+  #_execute_deployment_rollout()  no-op
+}
+abstract class BasePipeline <<e2a_base>> {
+  +run_pipeline(config, ...) : dict
+}
+BasePipeline <|-- AIDLCStaticPipeline
+AIDLCPipelineOrchestrator *-- _BuildAdmission
+AIDLCPipelineOrchestrator ..> _ArtifactRegistryAdapter : config['artifact_registry'] for G2C
+AIDLCPipelineOrchestrator ..> AIDLCSagaCompensator : finally, if failed_keys
+AIDLCPipelineOrchestrator ..> AIDLCStaticPipeline : Phase C
+@enduml

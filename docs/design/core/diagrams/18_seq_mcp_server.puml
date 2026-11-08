@@ -1,0 +1,20 @@
+@startuml
+!include ../../common/style.puml
+title BaseMCPServer — wrapping an existing API as an MCP tool
+participant "Platform team" as P
+participant "BaseMCPServer" as S
+participant "Wrapped BaseToolService" as T
+participant "MCP client\n(MCPToolService)" as C
+P -> S : wrap_api_as_tool(handler, tool_name,\ndescription, input_schema)
+S -> S : registered_tools[tool_name] = entry
+C -> S : serve({jsonrpc, id, method: tools/list})
+S --> C : {result: [{name, description, inputSchema}]}
+C -> S : serve({method: tools/call, params: {name, arguments}})
+S -> S : __dispatch_jsonrpc → _call_tool()
+S -> T : handler.execute(arguments, config, tenant_id)
+T --> S : result
+S --> C : {result: {content: [text], isError}}
+C -> S : unknown method
+S --> C : {error: {code: -32601, Method not found}}
+note right of S : see Section 15: in the reference code\n_call_tool() is async but is not awaited\nby the synchronous dispatcher
+@enduml

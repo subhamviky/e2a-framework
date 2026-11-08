@@ -1,0 +1,13 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Phase C — BasePipeline's seven stages in AIDLCStaticPipeline</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.25, pad=0.2];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06", width=4.2];
+  edge [color="#2E4A6B"];
+  s1 [label="1 Static security scans — REAL (SAST + secrets on generated repo)", fillcolor="#DCE8F5", color="#1F3864"];
+  s2 [label="2 Test suite — REAL (generated tests/, ephemeral container)", fillcolor="#DCE8F5", color="#1F3864"];
+  s3 [label="3 Scaffold compliance — REAL (capacity + entry-point rule\n    on the GENERATED classes)", fillcolor="#DCE8F5", color="#1F3864"];
+  s4 [label="4 RAGAS gate — no-op (returns 1.0)", fillcolor="#F2F2F2", color="#9E9E9E"];
+  s5 [label="5 Artifacts — no-op (empty matrix)", fillcolor="#F2F2F2", color="#9E9E9E"];
+  s6 [label="6 DAST — no-op (belongs to generated CI/CD)", fillcolor="#F2F2F2", color="#9E9E9E"];
+  s7 [label="7 Rollout — no-op ({'skipped': ...}); report still says PASSED_<strategy>", fillcolor="#F2F2F2", color="#9E9E9E"];
+  s1 -> s2 -> s3 -> s4 -> s5 -> s6 -> s7;
+}

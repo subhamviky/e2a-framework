@@ -1,0 +1,20 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>The three-layer method contract and its landing-zone counterpart</b>>, fontcolor="#1F3864", nodesep=0.25, ranksep=1.0, pad=0.25];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=11, margin="0.16,0.08", width=3.6];
+  edge [color="#8EA9C8", penwidth=1.4, arrowhead=none];
+  subgraph cluster_c { label=<<b>Class contract</b>>; style=rounded; color="#2E75B6"; fontcolor="#1F3864";
+    node [fillcolor="#DCE8F5", color="#1F3864", fontcolor="#1F3864"];
+    a [label="PUBLIC — one entry point\nexecute() · run() · retrieve() · execute() async\nprocess_inference() · serve() · ingest()\nfixed lifecycle; never overridden"];
+    b [label="PROTECTED — hooks\n_build_messages · _apply_policy · _evaluate_output\n_search_index · _dispatch_upstream_call …\ndomain or vendor variation lives here"];
+    c [label="PRIVATE — base-owned mechanics\n__settle_claim · __admit_quota · __http_post\n__track_usage · __sanitize_prompts\ninvariants; never touched by subclasses"];
+    {rank=same; a; b; c}
+  }
+  subgraph cluster_l { label=<<b>Landing zone</b>>; style=rounded; color="#0F7C8C"; fontcolor="#0F5C66";
+    node [fillcolor="#E6F4F5", color="#0F7C8C", fontcolor="#0F5C66"];
+    x [label="Public ingress\nAPI gateway · WAF · rate limit\none door, governance at the boundary"];
+    y [label="Business-logic compute\ncontainers / functions per domain\nIAM boundary: no raw infrastructure"];
+    z [label="Data and infrastructure tier\nstores · queues · secrets · model endpoint\nno public route; immutable contract"];
+    {rank=same; x; y; z}
+  }
+  a -> x; b -> y; c -> z;
+}

@@ -1,0 +1,25 @@
+@startuml
+!include ../../common/style.puml
+title phase_reached state machine
+[*] --> QUEUED
+state "Not run — no side effect" as NR {
+  state "SKIPPED_IDEMPOTENT (success)\nSKIPPED_IN_PROGRESS\nREJECTED_CONFLICT\nRECOVERY_REQUIRED\nFAILED_FINAL" as DUP
+  state "REJECTED_OVERLOAD" as OV
+  state "REJECTED_INVALID" as INV
+}
+QUEUED --> DUP : claim ≠ CLAIMED
+QUEUED --> INV : requested phase cannot run\n(checked before the claim)
+QUEUED --> OV : admission timeout
+QUEUED --> FAILED_G2C_P0 : Phase A reports failure
+QUEUED --> G2C_P0_DONE : Phase A ok
+G2C_P0_DONE --> FAILED_A2C : no dev_request, invalid\ndev_request, or Phase B errors
+G2C_P0_DONE --> A2C_DONE : Phase B ok
+G2C_P0_DONE --> E2A_VERIFIED : B skipped, C ok
+A2C_DONE --> E2A_VERIFIED : Phase C ok
+state "Exception (incl. Phase C failure,\nexpired deadline, store conflict)" as EX
+EX : phase_reached keeps its last value;\nfailed_keys += key; compensate by phase
+QUEUED -[dashed]-> EX
+G2C_P0_DONE -[dashed]-> EX
+A2C_DONE -[dashed]-> EX
+E2A_VERIFIED --> [*]
+@enduml

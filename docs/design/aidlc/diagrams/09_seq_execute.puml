@@ -1,0 +1,55 @@
+@startuml
+!include ../../common/style.puml
+title AIDLCPipelineOrchestrator.execute_pipeline() — internals
+participant "Caller" as C
+participant "Orchestrator" as O
+participant "Governance" as G
+participant "Idempotency\nstore" as IS
+participant "_BuildAdmission" as AD
+participant "Phases\nA · B · C" as P
+participant "Saga\ncompensator" as SC
+participant "Observability" as OB
+C -> O : execute_pipeline(request, config)
+O -> O : correlation_id; build_key; tenant_id (default '-');\ndeadline; __request_problem()
+alt a requested phase cannot run
+  O --> C : REJECTED_INVALID (no claim, no side effect)
+end
+group try
+  opt governance_engine
+    O -> G : enforce_governance_gate(request, io_config)
+  end
+  opt idempotency (default True) and store bound
+    O -> IS : claim(aidlc:build_key, tenant_id, owner=cid,\nfingerprint, lease = max(configured, deadline + 60 s))
+    alt REPLAY
+      O --> C : success, SKIPPED_IDEMPOTENT
+    else IN_PROGRESS / CONFLICT /\nRECOVERY_REQUIRED / FAILED_FINAL
+      O --> C : typed phase_reached, no side effect
+    end
+  end
+  O -> AD : acquire(tenant_id, config, deadline)
+  O -> P : Phase A (tenant, deadline, artifact_registry passed in)
+  opt a2c_sdlc.enabled
+    O -> O : dev_request required → validate → deep copy
+    O -> P : Phase B
+  end
+  O -> P : Phase C
+  P --> O : phase_reached, success
+end
+alt except AdmissionTimeout
+  O -> O : REJECTED_OVERLOAD (no failed_keys)
+else except Exception
+  O -> O : failed_keys += build_key;\n_handle_error() → errors
+end
+group finally
+  O -> AD : release slot
+  opt failed_keys
+    O -> O : _send_to_dlq()
+    O -> SC : compensate(result)
+  end
+  opt owned claim
+    O -> IS : complete(aidlc:build_key) if success\nelse fail(retryable=True)
+  end
+  O -> OB : record_telemetry(message_log)
+end
+O --> C : AIDLCPipelineResult
+@enduml

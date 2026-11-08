@@ -1,0 +1,22 @@
+digraph G {
+  graph [rankdir=LR, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Structural isomorphism — class boundary ⇄ tier</b>>, fontcolor="#1F3864", nodesep=0.18, ranksep=1.1, pad=0.25];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=10.5, margin="0.14,0.05"];
+  edge [color="#8EA9C8", arrowhead=none, penwidth=1.3];
+  subgraph cluster_l { label=<<b>LLD — classes</b>>; color="#2E75B6"; style=rounded; fontcolor="#1F3864";
+    node [fillcolor="#DCE8F5", color="#1F3864", fontcolor="#1F3864"];
+    c1 [label="BaseValidationService"]; c2 [label="BaseWorkflow"]; c3 [label="BaseAgent · LLMOnlyAgent"]; c4 [label="BaseLLMAgentService"];
+    c5 [label="BaseRAGPipeline · BaseIndexingPipeline"]; c6 [label="BaseToolService · BaseMCPServer"];
+    c7 [label="BaseGovernanceFramework"]; c8 [label="BaseObservability"];
+    c9 [label="Store ports (idempotency,\ntransactional, cache, lock)"]; c10 [label="BaseOutboxSweeper ·\nBaseReconciliationService"];
+    c11 [label="BasePipeline"]; c12 [label="BaseInfraProvisioner"];
+  }
+  subgraph cluster_h { label=<<b>HLD — tiers and components</b>>; color="#0F7C8C"; style=rounded; fontcolor="#0F5C66";
+    node [fillcolor="#E6F4F5", color="#0F7C8C", fontcolor="#0F5C66"];
+    h1 [label="T1 validation function (DMZ)"]; h2 [label="T2 orchestration compute"]; h3 [label="T2b inference gateway"];
+    h4 [label="Knowledge tier / T4 workers"]; h5 [label="Integration tier / T4 workers"];
+    h6 [label="T2 inline + edge WAF + SCP"]; h7 [label="Telemetry stack"];
+    h8 [label="T3 data & messaging perimeter"]; h9 [label="Scheduled jobs (Private VPC)"];
+    h10 [label="CI/CD pipeline"]; h11 [label="IaC — landing zone itself"];
+  }
+  c1 -> h1; c2 -> h2; c3 -> h2; c4 -> h3; c5 -> h4; c6 -> h5; c7 -> h6; c8 -> h7; c9 -> h8; c10 -> h9; c11 -> h10; c12 -> h11;
+}

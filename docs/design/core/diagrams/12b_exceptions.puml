@@ -1,0 +1,40 @@
+@startuml
+!include ../../common/style.puml
+title Exception taxonomy and how the agentic request path treats each type
+left to right direction
+class Exception <<builtin>>
+class DehydrationInterrupt <<signal>>
+class NFRViolationError <<NFR breach>>
+class ConcurrencyConflict <<typed outcome>>
+class AdmissionTimeout
+class DeadlineExceeded
+class CircuitOpenError
+class BulkheadFullError
+class "ValueError / TypeError / PermissionError" as DET <<_DETERMINISTIC_ERRORS>>
+Exception <|-- DehydrationInterrupt
+Exception <|-- NFRViolationError
+Exception <|-- ConcurrencyConflict
+Exception <|-- DET
+NFRViolationError <|-- AdmissionTimeout
+NFRViolationError <|-- DeadlineExceeded
+NFRViolationError <|-- CircuitOpenError
+NFRViolationError <|-- BulkheadFullError
+note right of DehydrationInterrupt
+  re-raised by BaseAgent.run()
+  workflow: status = AWAITING_WEBHOOK
+  claim -> fail(retryable=True); no DLQ
+end note
+note right of NFRViolationError
+  generic failure: failed_keys + DLQ
+  inside BaseLLMAgentService: returned as
+  {'status': 'FAILED'} payload, not raised
+end note
+note right of ConcurrencyConflict
+  raised by store adapters / CQRS
+  commands; never auto-retried
+end note
+note right of DET
+  never retried by ResiliencePolicy;
+  workflow-level -> FAILED_FINAL
+end note
+@enduml

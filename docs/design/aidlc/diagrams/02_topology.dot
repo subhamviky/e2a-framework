@@ -1,0 +1,29 @@
+digraph G {
+  graph [rankdir=TB, compound=true, newrank=true, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>AI-DLC landing zone — zones and tiers</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.5, pad=0.25];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  dev [label="Developer UI", shape=ellipse, fillcolor="#FFFFFF"];
+  subgraph cluster_dmz { label=<<b>Public VPC / DMZ</b>>; style="rounded,filled"; fillcolor="#FBF3E6"; color="#D4A017"; fontcolor="#7A5A00";
+    t0 [label="T0 API Gateway + WAF\nJWT · tenant_id · prompt-injection rules"];
+    t1 [label="T1 Validation\nvalidate('AIDLCPipelineRequest')\n+ entitlement (create-repo rights)"];
+  }
+  subgraph cluster_data { label=<<b>Data &amp; Messaging Perimeter (T3)</b>>; style="rounded,filled"; fillcolor="#E6F4F5"; color="#0F7C8C"; fontcolor="#0F5C66";
+    it [label="Intake topic\n(ordering key tenant_id)", shape=cds];
+    ps [label="Pipeline state /\noutbox", shape=cylinder];
+    as [label="Artifact & context\nobject store", shape=cylinder];
+    ic [label="Idempotency &\nlease store", shape=cylinder];
+    tq [label="Task queue + DLQ", shape=cds];
+  }
+  subgraph cluster_app { label=<<b>Private VPC (Application)</b>>; style="rounded,filled"; fillcolor="#EAF2FA"; color="#2E75B6"; fontcolor="#1F3864";
+    t2 [label="T2 AIDLCPipelineOrchestrator\nPhase A · B · C (one deployable)\n_BuildAdmission", fillcolor="#DCE8F5"];
+    t2b [label="T2b Inference gateway", fillcolor="#DCE8F5"];
+    t4 [label="T4 status fan-out ·\nwebhook dispatch · events"];
+    t5 [label="T5 Saga edge"];
+  }
+  model [label="Model provider", shape=ellipse, fillcolor="#FFFFFF"]; git [label="Git remote", shape=ellipse, fillcolor="#FFFFFF"];
+  dev -> t0 -> t1;
+  {rank=same; it; t2} t1 -> it [label="202 Accepted"]; it -> t2 [label="push"];
+  t2 -> ic [xlabel="claim"]; t2 -> ps [xlabel="put_if_version"]; t2 -> as [label="artifacts · ref CAS"];
+  t2 -> t2b [label="every LLM call"]; t2b -> model;
+  ps -> tq; tq -> t5; t5 -> git; ps -> t4 [style=dashed, label="CDC"];
+}

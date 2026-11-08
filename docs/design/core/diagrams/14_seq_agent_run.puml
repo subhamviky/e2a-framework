@@ -1,0 +1,37 @@
+@startuml
+!include ../../common/style.puml
+title BaseAgent.run() — governance, inference, evaluation, egress redaction
+participant "BaseWorkflow" as W
+participant "BaseAgent\n(subclass hooks)" as A
+participant "BaseGovernanceFramework" as G
+participant "BaseLLMAgentService" as L
+W -> A : run(state, config, ...propagation, deadline)
+A -> A : _build_messages(state)
+alt governance_engine bound
+  A -> G : enforce_governance_gate(state, io_config)
+  G -> G : _check_execution_capacity() else NFRViolationError\ntoken budget; dehydration; sandbox; semantic firewall
+  G --> A : sanitised state
+else no engine
+  A -> A : _apply_policy(state)  (may call a tool)
+end
+A -> L : _infer(messages) → process_inference() on bridge loop
+L --> A : payload {status, text, tokens_used, physical_success}
+A -> A : FAILED payload → RuntimeError (normal except path)
+A -> A : cumulative_tokens_used += tokens
+A -> A : confidence = _evaluate_output(response)
+opt confidence < min_confidence
+  A -> A : response = _fallback(state)
+end
+opt governance_engine bound
+  A -> G : redact_response(state, response)
+  G --> A : masked response
+end
+A -> A : state['response'] = response
+alt DehydrationInterrupt
+  A --> W : re-raise unchanged
+else other Exception
+  A -> A : failed_keys += key ; _handle_error()  (not raised)
+end
+A -> A : latency > max_latency ? → raise NFRViolationError
+A --> W : state
+@enduml

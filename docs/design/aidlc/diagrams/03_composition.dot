@@ -1,0 +1,25 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Framework composition — what each phase calls (no wrapper classes)</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.4, pad=0.25];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=10.5, fontcolor="#1F3864", margin="0.14,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=9.5];
+  o [label="AIDLCPipelineOrchestrator.execute_pipeline()", fillcolor="#DCE8F5"];
+  subgraph cluster_a { label=<<b>Phase A — G2C + P0</b>>; style=rounded; color="#2E75B6"; fontcolor="#1F3864";
+    dpw [label="DeveloperPlatformWorkflow.generate(g2c_request, g2c_config)"];
+    gen [label="G2C generators\n(abstract → inherited class)\nGeneratorCriticAgent ≥ 0.75"];
+    p0 [label="P0 BaseProjectBootstrapper.bootstrap()\ninline, generator phases 7–8\n(never called by the orchestrator)"];
+    dr [label="scaffold_result.dev_request\n(built by P0 Step 16 when config['a2c'].enabled)", shape=note, fillcolor="#FFF8E1", color="#D4A017"];
+    dpw -> gen -> p0 -> dr;
+  }
+  subgraph cluster_b { label=<<b>Phase B — A2C (only if a2c_sdlc.enabled)</b>>; style=rounded; color="#0F7C8C"; fontcolor="#0F5C66";
+    sw [label="SDLCWorkflow.execute(dev_request, config)\n(signature inferred — documented exception)"];
+    ag [label="RequirementsAgent → CodeGenAgent → IaCAgent\n→ CICDAgent → CodeCriticAgent ≥ 0.75"];
+    sw -> ag;
+  }
+  subgraph cluster_c { label=<<b>Phase C — E2A static verification</b>>; style=rounded; color="#8EA9C8"; fontcolor="#1F3864";
+    sp [label="AIDLCStaticPipeline.run_pipeline()\n(BasePipeline entry point, never overridden)"];
+  }
+  llm [label="BaseLLMAgentService (T2b)\nevery model call in A and B", fillcolor="#E6F4F5", color="#0F7C8C"];
+  o -> dpw [label="1"]; dr -> sw [label="2 (read, validated,\npassed as a copy)"]; o -> sw [style=invis]; o -> sp [label="3"];
+  ag -> sp [style=invis];
+  gen -> llm [style=dashed]; ag -> llm [style=dashed];
+}

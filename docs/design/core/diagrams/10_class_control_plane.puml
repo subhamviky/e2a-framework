@@ -1,0 +1,46 @@
+@startuml
+!include ../../common/style.puml
+title Control plane — scheduled repair, CI/CD and landing-zone provisioning
+abstract class BaseOutboxSweeper <<scheduled>> {
+  +lock : BaseDistributedLock
+  +sweep(config, correlation_id, **kw) : dict
+  #{abstract} _fetch_pending_records(config, **kw) : list
+  #{abstract} _publish_pending_record(record, config, **kw) : bool
+}
+abstract class BaseReconciliationService <<scheduled>> {
+  +lock : BaseDistributedLock
+  +idempotency_store : BaseIdempotencyStore
+  +reconcile(config, correlation_id, **kw) : dict
+  #_confirm_physical_outcome(entry, config, **kw) : PhysicalOutcome
+  #{abstract} _fetch_dlq_entries(config, **kw) : list
+  #{abstract} _replay_dlq_entry(entry, config, **kw) : bool
+}
+abstract class BasePipeline <<CI/CD · per commit>> {
+  +required_artifact_matrix : List[str]
+  +run_pipeline(config, correlation_id, message_log, failed_keys, **kw) : dict
+  #_validate_capacity_budget(config, **kw) : List[str]
+  #{abstract} _run_static_security_scans / _execute_test_suite
+  #{abstract} _verify_scaffold_contracts / _run_rag_eval
+  #{abstract} _compile_artifact / _run_dynamic_security_checks
+  #{abstract} _execute_deployment_rollout(strategy, config, **kw)
+}
+abstract class BaseInfraProvisioner <<IaC · per tenant/env>> {
+  +provision_landing_zone(tenant_id, tenancy_model,\n  availability_tier='STANDARD', config, correlation_id, **kw) : dict
+  #{abstract} _define_network_topologies / _define_edge_security
+  #{abstract} _define_data_perimeter_substrate / _define_compute_tiers
+  #{abstract} _define_iam_governance_framework
+  #_generate_saga_orchestrator(compute_ctx, config, **kw) : dict
+  #{abstract} _apply_infrastructure_graph(final_manifest, config, **kw) : bool
+}
+class GCPInfraProvisioner <<reference>>
+class "validate_capacity()" as VC <<function>>
+BaseInfraProvisioner <|-- GCPInfraProvisioner
+BasePipeline ..> VC
+abstract class BaseDistributedLock
+abstract class BaseIdempotencyStore
+BaseOutboxSweeper o-- BaseDistributedLock
+BaseReconciliationService o-- BaseDistributedLock
+BaseReconciliationService o-- BaseIdempotencyStore
+BaseOutboxSweeper -[hidden]down- BasePipeline
+BaseReconciliationService -[hidden]down- BaseInfraProvisioner
+@enduml

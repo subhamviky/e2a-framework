@@ -1,0 +1,20 @@
+@startuml
+!include ../../common/style.puml
+title process_inference_stream() — streaming with hold-back DLP
+participant "Consumer" as C
+participant "BaseLLMAgentService" as L
+participant "Provider stream\n_dispatch_upstream_stream" as U
+C -> L : async for chunk in process_inference_stream(...)
+L -> L : same admission: sanitise, context budget,\npermit (held for the whole stream), quota
+L -> U : open stream
+loop each provider chunk
+  U --> L : chunk
+  L -> L : buf = redact(buf + chunk)\nrelease all but the last dlp_holdback_chars
+  L --> C : safe prefix
+  L -> L : deadline expired? → DeadlineExceeded
+end
+L -> L : redact and flush remaining buffer
+L --> C : tail
+L -> L : finally: settle quota (≈ chars/4 used),\nlog llm_stream_complete, release permit
+note over L : failure → failed_keys + _handle_error, then RE-RAISED\n(no payload exists to carry a FAILED status)
+@enduml

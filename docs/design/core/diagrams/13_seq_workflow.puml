@@ -1,0 +1,41 @@
+@startuml
+!include ../../common/style.puml
+title BaseWorkflow.execute() — origin of propagation, claim, routing, settlement
+participant "Tier 1 / caller" as C
+participant "BaseWorkflow" as W
+participant "BaseIdempotencyStore" as IS
+participant "BaseAgent /\nLLMOnlyAgent" as A
+participant "BaseObservability" as OB
+C -> W : execute(state, config, **kw)
+W -> W : require tenant_id; mint correlation_id,\nio_config, deadline, idempotency_key;\nwrite them back into state
+alt idempotency_store bound AND _requires_idempotency_claim()
+  W -> IS : claim(key, tenant_id, owner=correlation_id,\nfingerprint, lease_seconds, ttl_seconds)
+  alt not CLAIMED
+    IS --> W : REPLAY | IN_PROGRESS | CONFLICT |\nRECOVERY_REQUIRED | FAILED_FINAL
+    W -> W : short-circuit: status, replayed response,\nflush logs locally
+    W --> C : state
+  end
+end
+group try
+  W -> W : workflow = _build_workflow()
+  W -> W : _validate_workflow(workflow) else ValueError
+  W -> W : agent = _get_agent(state['intent'])
+  W -> A : run(state, config, correlation_id, io_config,\nidempotency_key, tenant_id, message_log,\nfailed_keys, deadline, **kw)
+  A --> W : state (+ response, cumulative_tokens_used)
+end
+alt except DehydrationInterrupt
+  W -> W : status = AWAITING_WEBHOOK
+else except Exception
+  W -> W : failed_keys += key ; _handle_error()
+end
+group finally
+  W -> OB : record_telemetry(message_log)  (else _flush_logs)
+  opt claim owned
+    W -> IS : settle: complete(_replayable_result) or\nfail(retryable | outcome=UNKNOWN)
+  end
+  opt failed_keys not empty
+    W -> W : _send_to_dlq(failed_keys)
+  end
+end
+W --> C : state (+ message_log, failed_keys)
+@enduml

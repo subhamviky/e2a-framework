@@ -1,0 +1,49 @@
+@startuml
+!include ../../common/style.puml
+title BaseLLMAgentService — full member view
+abstract class BaseLLMAgentService <<Tier 2b>> {
+  -_config : dict
+  -_pod_semaphore : asyncio.Semaphore
+  -_tenant_permits : Dict[str, _TenantPermit]
+  -_resilience : ResiliencePolicy  (no bulkhead)
+  -_max_rpm / _max_tpm : float  (fleet ÷ replicas)
+  +stats : dict
+  ..public (async)..
+  +process_inference(messages, config, correlation_id, io_config,\n  idempotency_key, tenant_id, message_log, failed_keys, deadline, **kw) : dict
+  +process_inference_stream(... same ...) : AsyncGenerator[str]
+  +drain(timeout=None, config=None) : bool
+  +ready : bool «property»
+  +inflight : int «property»
+  ..protected — implemented, overridable..
+  #_estimate_tokens(message) : int
+  #_manage_context_budget(messages, budget, reasoning_budget, config, **kw) : list
+  #_apply_kv_caching(messages, tenant_id, config, **kw) : str | None
+  #_compile_tool_schemas(tools, config, **kw) : list
+  #_check_semantic_cache(...) «async» / _store_semantic_cache(...) «async»
+  #_acquire_shared_quota(...) «async» / _release_shared_quota(...) «async»
+  #_format_and_validate_output(raw, response_schema, model_id, ...) : dict
+  #_redact_sensitive(text) : (str, int)
+  #_handle_error(error, messages, config, **kw)
+  #_resolve_param(key, config, kwargs)
+  #_emit_metric(kind, name, value, dimensions)
+  ..private — framework-owned..
+  -__sanitize_prompts(messages)
+  -__concurrency_permit(tenant_id, config, kw, deadline) «async ctx»
+  -__admit_quota(tokens, tenant_id, config, kw, deadline) «async»
+  -__settle_quota(quota, dispatched, used)
+  -__stream_with_dlp(raw_stream, holdback, enabled) «async gen»
+  -__track_usage(prepared, raw) : int
+  ..abstract — vendor transport only..
+  #{abstract} _dispatch_upstream_call(messages, model_id, temperature,\n  max_tokens, tools, stop_sequences, cache_handle, config, **kw) «async»
+  #{abstract} _dispatch_upstream_stream(messages, model_id,\n  temperature, max_tokens, config, **kw)
+}
+class _TenantPermit <<internal>> {
+  +sem : asyncio.Semaphore
+  +cap : int
+  +active : int
+  +last_used : float
+}
+class ResiliencePolicy
+BaseLLMAgentService *-- "0..*" _TenantPermit : per tenant\n(idle-evicted)
+BaseLLMAgentService *-- "1" ResiliencePolicy : circuit + retry budget
+@enduml

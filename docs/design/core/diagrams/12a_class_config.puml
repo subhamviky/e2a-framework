@@ -1,0 +1,26 @@
+@startuml
+!include ../../common/style.puml
+title Central configuration registry (E2A_CONFIG)
+class ConfigKey <<frozen dataclass>> {
+  +key : str
+  +env : str | None
+  +default : Any
+  +cast : Callable
+  +group : str
+  +used_by : str
+  +scoped_defaults : dict
+  +secret : bool
+}
+class "E2A_CONFIG" as REG <<Dict[str, ConfigKey] · ~100 keys>>
+class "resolve_config(key, config, kwargs, scope)" as RC <<function>>
+class "register_config_key(spec)" as RK <<function>>
+class "unknown_config_keys(config)" as UK <<function>>
+class "config_reference_markdown()\nenv_example()" as GEN <<function>>
+class "validate_capacity(config, **kw)" as VC <<function>>
+REG o-- "*" ConfigKey
+RC ..> REG : kwargs › config › env › default\n(scope selects a per-class default)
+RK ..> REG : project keys at start-up
+UK ..> REG : typo guard
+GEN ..> REG : docs + .env.example
+VC ..> RC : capacity equations
+@enduml

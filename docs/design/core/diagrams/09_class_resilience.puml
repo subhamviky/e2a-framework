@@ -1,0 +1,37 @@
+@startuml
+!include ../../common/style.puml
+title Resilience primitives — one policy per dependency, owned by the adapter
+class ResiliencePolicy <<composition>> {
+  +name : str
+  +budget : RetryBudget
+  +breaker : CircuitBreaker
+  +bulkhead : Bulkhead | None
+  +stats : dict
+  +call(fn, *, deadline, max_retries=0,\n  idempotent=False, retryable=None) «async»
+  -__attempts(...) «async»
+}
+class RetryBudget {
+  +deposit()
+  +withdraw() : bool
+  +balance : float
+}
+class CircuitBreaker {
+  +state : closed | open | half_open
+  +allow() : bool
+  +record_success()
+  +record_failure()
+}
+class Bulkhead {
+  +name : str
+  +max_concurrent : int
+  +waiting : int
+  +slot(timeout) «async ctx»
+}
+ResiliencePolicy *-- RetryBudget
+ResiliencePolicy *-- CircuitBreaker
+ResiliencePolicy *-- "0..1" Bulkhead
+BaseToolService --> ResiliencePolicy : one per instance
+BaseLLMAgentService --> ResiliencePolicy : upstream (no bulkhead)
+abstract class BaseToolService
+abstract class BaseLLMAgentService
+@enduml

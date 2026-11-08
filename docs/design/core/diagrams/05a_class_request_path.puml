@@ -1,0 +1,52 @@
+@startuml
+!include ../../common/style.puml
+title Request path — workflow, agent archetypes and the inference service
+abstract class "_PropagationMixin" as PM <<mixin>> {
+  #_resolve_io_config() / _log() / _flush_logs()
+  #_send_to_dlq() / _commit_gate()
+  #_resolve_llm_service() / _infer() / _infer_async()
+}
+abstract class BaseWorkflow <<Tier 2 · origin of propagation>> {
+  +execute(state, config=None, **kw) : dict
+  #{abstract} _build_workflow(config, **kw)
+  #{abstract} _validate_workflow(workflow, config, **kw) : bool
+  #{abstract} _get_agent(intent, config, **kw) : BaseAgent
+  #{abstract} _generate_idempotency_key(state, config, **kw) : str
+  #{abstract} _handle_error(error, state, config, **kw)
+  #_requires_idempotency_claim(state, config, **kw) : bool
+  #_request_fingerprint(state, config, **kw) : str
+  #_replayable_result(state, config, **kw) : dict
+  #_physical_outcome(state, config, **kw) : PhysicalOutcome?
+}
+abstract class BaseAgent <<Tier 2 · agent>> {
+  +run(state, config, correlation_id, io_config,\n  idempotency_key, tenant_id, message_log,\n  failed_keys, **kw) : dict
+  #{abstract} _build_messages(state, config, **kw)
+  #{abstract} _apply_policy(state, config, **kw)
+  #{abstract} _evaluate_output(response, state, config, **kw) : float
+  #{abstract} _fallback(state, config, **kw)
+  #{abstract} _handle_error(error, state, config, **kw)
+}
+abstract class LLMOnlyAgent <<Tier 2 · peer of BaseAgent>> {
+  +run(state, config, ...propagation, **kw) : dict
+  #{abstract} _detect_modality(state, config, **kw) : str
+  #{abstract} _handle_text / _handle_audio /\n  _handle_image / _handle_document
+  #_select_model(modality, config, **kw) : str
+  #{abstract} _evaluate_output / _fallback / _handle_error
+}
+abstract class BaseLLMAgentService <<Tier 2b · inference gateway>> {
+  +process_inference(messages, config, ...propagation,\n  deadline, **kw) : dict  «async»
+  +process_inference_stream(...) : AsyncGenerator  «async»
+  +drain(timeout, config) : bool  «async»
+  +ready : bool / +inflight : int
+  #{abstract} _dispatch_upstream_call(...)  «async»
+  #{abstract} _dispatch_upstream_stream(...)
+}
+PM <|-- BaseWorkflow
+PM <|-- BaseAgent
+PM <|-- LLMOnlyAgent
+PM <|-- BaseLLMAgentService
+BaseWorkflow --> BaseAgent : _get_agent() → run()
+BaseWorkflow ..> LLMOnlyAgent : same run() contract\n(duck-typed)
+BaseAgent ..> BaseLLMAgentService : _infer()\nconfig['llm_service']
+LLMOnlyAgent ..> BaseLLMAgentService : _infer()
+@enduml

@@ -1,0 +1,48 @@
+@startuml
+!include ../../common/style.puml
+title multimodal_orchestrator.py — reference orchestrator and peer agents
+abstract class BaseWorkflow
+abstract class BaseAgent
+abstract class LLMOnlyAgent
+abstract class BaseRAGPipeline
+class MultiAgentOrchestratorWorkflow {
+  +semantic_router  (classify_intent → (intent, score))
+  +min_confidence : float = 0.85
+  +agent_registry : Dict[str, agent]
+  +fallback_agent : FallbackAgent
+  #_build_workflow() : CompiledStateGraph
+  #_validate_workflow(workflow) : bool
+  #_get_agent(intent, **kw)
+  #_requires_idempotency_claim(state) : bool
+  #_generate_idempotency_key(state) : str
+  #_classify_intent_node / _route_intent / _agent_node / _fallback_node
+}
+class RAGAgent {
+  +rag_pipeline
+}
+class APIToolAgent
+class MCPToolAgent
+class GenericLLMOnlyAgent {
+  +modality_preprocessor
+}
+class FallbackAgent
+class ModalityPreprocessor {
+  +transcribe(audio_uri, config, **kw) : str
+  +extract(document_uri, config, **kw) : str
+}
+class OrchestratorState <<TypedDict>>
+BaseWorkflow <|-- MultiAgentOrchestratorWorkflow
+BaseAgent <|-- RAGAgent
+BaseAgent <|-- APIToolAgent
+BaseAgent <|-- MCPToolAgent
+BaseAgent <|-- FallbackAgent
+LLMOnlyAgent <|-- GenericLLMOnlyAgent
+MultiAgentOrchestratorWorkflow *-- RAGAgent : RAG_GROUNDED
+MultiAgentOrchestratorWorkflow *-- MCPToolAgent : MCP_TOOL_CALL
+MultiAgentOrchestratorWorkflow *-- APIToolAgent : API_TOOL_CALL
+MultiAgentOrchestratorWorkflow *-- GenericLLMOnlyAgent : LLM_ONLY
+MultiAgentOrchestratorWorkflow *-- FallbackAgent : NONE
+RAGAgent o-- BaseRAGPipeline
+GenericLLMOnlyAgent o-- ModalityPreprocessor
+MultiAgentOrchestratorWorkflow ..> OrchestratorState
+@enduml

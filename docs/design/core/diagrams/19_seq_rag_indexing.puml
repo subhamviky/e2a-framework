@@ -1,0 +1,31 @@
+@startuml
+!include ../../common/style.puml
+title Knowledge tier — CDC-fed indexing (write) and hybrid retrieval (read)
+participant "System of record" as SOR
+participant "CDC /\nevent stream" as CDC
+participant "BaseIndexingPipeline" as IX
+database "Tenant\nindex" as IDX
+participant "RAGAgent" as AG
+participant "BaseRAGPipeline" as RAG
+== write side (asynchronous) ==
+SOR -> CDC : WAL change
+CDC -> IX : ingest(docs,\ntenant_id)
+loop each document (isolated)
+  IX -> IX : _commit_gate(doc_id)
+  alt op == delete
+    IX -> IDX : _delete_from_index(doc_id)
+  else upsert
+    IX -> IX : chunk → embed\n(counts must match)
+    IX -> IDX : _write_index()\nidempotent per chunk
+  end
+  IX -> IX : error → failed_keys\n+= doc_id; continue
+end
+IX --> CDC : {indexed, deleted,\nfailed_keys}
+== read side (request path) ==
+AG -> RAG : retrieve(query, config, tenant_id)
+RAG -> RAG : embed query\n(same model)
+RAG -> IDX : _search_index(text, vector)\nhybrid, {prefix}_{tenant_id}
+IDX --> RAG : results
+RAG -> RAG : _rerank(results)
+RAG --> AG : grounding passages
+@enduml

@@ -1,0 +1,18 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>AIDLCSagaCompensator.compensate() — decision by phase_reached</b>>, fontcolor="#1F3864", nodesep=0.35, ranksep=0.35, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.16,0.07"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  s [label="failed_keys not empty → compensate(result)", fillcolor="#DCE8F5"];
+  d [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="phase_reached"];
+  a [label="QUEUED / FAILED_G2C_P0\n_delete_scaffold() only if P0 did not succeed\n_delete_inherited_class()\n_delete_abstract_class_if_orphaned()"];
+  g [label="G2C_P0_DONE (Phase C failed, no Phase B)\nscaffold + classes kept\n_delete_abstract_class_if_orphaned()"];
+  b [label="FAILED_A2C\n_delete_a2c_artifacts()\n_revert_git_branch()\n_delete_abstract_class_if_orphaned()\n(scaffold + G2C classes kept)"];
+  c [label="A2C_DONE (Phase C failed)\n_revert_git_branch()\n_delete_abstract_class_if_orphaned()\n(scaffold + classes kept)"];
+  r [label="_delete_abstract_class_if_orphaned()\nreleases THIS build's reference (CAS)\ndeletes only if compensation_delete_orphan_abstract\nAND this build created it AND no reference remains", fillcolor="#E6F4F5", color="#0F7C8C"];
+  dlq [label="_route_to_dlq(); return {phase_compensated, actions}", fillcolor="#FBE9E7", color="#C0504D"];
+  s -> d; d -> a; d -> g; d -> b; d -> c;
+  {rank=same; a; g}
+  {rank=same; b; c}
+  a -> r [style=dashed]; g -> r [style=dashed]; b -> r [style=dashed]; c -> r [style=dashed];
+  r -> dlq;
+}

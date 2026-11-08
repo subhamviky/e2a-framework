@@ -1,0 +1,43 @@
+@startuml
+!include ../../common/style.puml
+title Store, lease and value contracts (ports) with in-memory test doubles
+abstract class BaseIdempotencyStore <<port>> {
+  +claim(key, config, **kw) : ClaimResult
+  +complete(key, result, config, **kw) : bool
+  +fail(key, retryable=True, config, **kw) : bool
+  +check_and_set(key, config, **kw) : bool
+}
+abstract class BaseTransactionalStore <<port>> {
+  +get / put / delete
+  +get_versioned(key, config, **kw)
+  +put_if_version(key, value, expected_version, config, **kw) : CommitResult
+}
+abstract class BaseCacheStore <<port>> {
+  +get / set / delete
+  +get_or_load(key, loader, ttl, config, **kw)
+  +aget_or_load(key, loader, ttl, config, **kw) «async»
+  +single_flight_stats : dict
+}
+abstract class BaseDistributedLock <<port>> {
+  +acquire(lock_key, ttl_seconds, config, **kw) : LeaseHandle | None
+  +renew(handle, ttl_seconds, config, **kw) : bool
+  +release(handle, config, **kw)
+}
+class LeaseHandle <<dataclass>> {
+  +key : str
+  +owner_token : str
+  +fencing_token : int
+  +expires_at : float
+}
+class InMemoryIdempotencyStore <<test double>>
+class InMemoryTransactionalStore <<test double>>
+class InMemoryCacheStore <<test double>>
+class InMemoryLease <<test double>>
+BaseIdempotencyStore <|-- InMemoryIdempotencyStore
+BaseTransactionalStore <|-- InMemoryTransactionalStore
+BaseCacheStore <|-- InMemoryCacheStore
+BaseDistributedLock <|-- InMemoryLease
+BaseDistributedLock ..> LeaseHandle
+InMemoryIdempotencyStore -[hidden]down- BaseTransactionalStore
+InMemoryCacheStore -[hidden]down- BaseDistributedLock
+@enduml

@@ -1,0 +1,24 @@
+@startuml
+!include ../../common/style.puml
+title Human-in-the-loop dehydration and resume
+participant "BaseWorkflow" as W
+participant "BaseAgent" as A
+participant "Governance" as G
+database "Perimeter\n(T3)" as P
+participant "Idempotency\nstore" as IS
+participant "Approver" as H
+participant "Webhook / resume" as R
+W -> IS : claim(key) → CLAIMED
+W -> A : run(state)\nrequires_human_approval
+A -> G : enforce_governance_gate()
+G -> P : _dehydrate_state_\nto_perimeter()
+G --> A : raise DehydrationInterrupt
+A --> W : re-raise (not an error)
+W -> W : AWAITING_WEBHOOK\nno DLQ
+W -> IS : fail(retryable=True)
+note over W : compute can scale to zero while waiting
+H -> R : approve
+R -> W : execute(rehydrated,\napproval_granted, same key)
+W -> IS : claim → CLAIMED
+W -> A : run(): gate passes
+@enduml

@@ -1,0 +1,53 @@
+@startuml
+!include ../../common/style.puml
+title Knowledge and integration tiers — RAG, indexing, tools and MCP
+abstract class BaseRAGPipeline <<Knowledge tier · read>> {
+  +retrieve(query, config=None, tenant_id=None, **kw) : List[dict]
+  #{abstract} _search_index(query_text, query_vector,\n  config, tenant_id, **kw)
+  #{abstract} _rerank(results, config, **kw)
+  #{abstract} _evaluate_answer(answer, config, **kw)
+  -__embed(query, config, **kw)
+}
+abstract class BaseIndexingPipeline <<Knowledge tier · write (CDC)>> {
+  +ingest(documents, config, ...propagation, **kw) : dict
+  #{abstract} _chunk_documents(document, config, **kw)
+  #{abstract} _embed_documents(texts, config, **kw)
+  #{abstract} _write_index(chunks, vectors, config, tenant_id, **kw)
+  #{abstract} _delete_from_index(doc_id, config, tenant_id, **kw)
+  #{abstract} _handle_error(error, document, config, **kw)
+}
+abstract class BaseToolService <<Integration tier · client>> {
+  +execute(payload, config, tenant_id, failed_keys, **kw) : dict «async»
+  +{abstract} get_endpoint(config, tenant_id, **kw)
+  #{abstract} _build_payload(payload, config, **kw)
+  #{abstract} _validate_input(payload, config, **kw) : bool
+  #_resilience_policy(config, kwargs) : ResiliencePolicy
+  #_send_request(endpoint, body, token, timeout, config, **kw) «async»
+  -__http_post(endpoint, body, config, **kw) «async»
+}
+class RestToolService <<concrete>>
+class MCPToolService <<concrete · JSON-RPC>>
+abstract class BaseMCPServer <<Integration tier · server>> {
+  +server_name : str
+  +registered_tools : Dict[str, dict]
+  +serve(request, config=None, **kw) : dict
+  +wrap_api_as_tool(handler, tool_name, description,\n  input_schema, config, **kw)
+  #_list_tools(config, **kw) : List[dict]
+  #_call_tool(tool_name, arguments, config, tenant_id, **kw) «async»
+  -__dispatch_jsonrpc(request, config, **kw)
+}
+class ResiliencePolicy
+class "_resolve_tool_call()" as RTC <<function · MCP-first>>
+class "_get_tool_service()" as GTS <<function · cached per (transport, tool)>>
+BaseToolService <|-- RestToolService
+BaseToolService <|-- MCPToolService
+BaseToolService *-- "1" ResiliencePolicy : per dependency
+BaseMCPServer o-- "0..*" BaseToolService : wraps handler.execute()
+RTC ..> MCPToolService : mcp_server_registry hit
+RTC ..> GTS : fallback
+GTS ..> RestToolService
+GTS ..> MCPToolService
+BaseIndexingPipeline ..> BaseRAGPipeline : same embedding_model\nsame tenant namespace
+BaseRAGPipeline -[hidden]down- BaseToolService
+BaseIndexingPipeline -[hidden]down- BaseMCPServer
+@enduml

@@ -1,0 +1,19 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>BaseWorkflow claim settlement (finally block)</b>>, fontcolor="#1F3864", nodesep=0.35, ranksep=0.32, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.18,0.07"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  s [label="owned claim; outcome = _physical_outcome(state)", fillcolor="#DCE8F5"];
+  d1 [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="dehydrated?"];
+  d2 [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="outcome ==\nUNKNOWN?"];
+  d3 [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="failed_keys\nnot empty?"];
+  d4 [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="workflow-level error in\n_DETERMINISTIC_ERRORS?"];
+  a1 [label="fail(retryable=True)\nclaimable on resume"];
+  a2 [label="fail(retryable=False, outcome=UNKNOWN)\nparked for reconciler"];
+  a3 [label="fail(retryable=False) → FAILED_FINAL"];
+  a4 [label="fail(retryable=True) → FAILED_RETRYABLE"];
+  a5 [label="complete(key, _replayable_result)\nresponse · outcome · cumulative_tokens_used", fillcolor="#E3F1E3", color="#3B7D3B"];
+  dlq [label="_send_to_dlq(failed_keys)", fillcolor="#FBE9E7", color="#C0504D"];
+  s -> d1; d1 -> a1 [label=" yes"]; d1 -> d2 [label=" no"]; d2 -> a2 [label=" yes"]; d2 -> d3 [label=" no"];
+  d3 -> a5 [label=" no"]; d3 -> d4 [label=" yes"]; d4 -> a3 [label=" yes"]; d4 -> a4 [label=" no (incl. errors caught\n inside the agent)"];
+  a3 -> dlq; a4 -> dlq; a2 -> dlq [style=dashed, label=" if failed_keys"];
+}

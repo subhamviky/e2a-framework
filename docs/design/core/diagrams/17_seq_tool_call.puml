@@ -1,0 +1,33 @@
+@startuml
+!include ../../common/style.puml
+title Tool call — MCP-first routing, resilience and typed physical outcome
+participant "Agent._apply_policy" as A
+participant "_resolve_tool_call()" as RT
+participant "BaseToolService\n(Rest | MCP)" as T
+participant "ResiliencePolicy" as R
+participant "Downstream" as D
+A -> RT : tool_name, payload
+alt tool in mcp_server_registry
+  RT -> T : MCPToolService()\n.execute(payload, url, tool)
+else
+  RT -> RT : _get_tool_service()\ncached instance
+  RT -> T : execute(payload, config, tenant_id)
+end
+T -> T : _validate_input() else ValueError
+T -> T : _commit_gate(key)\nelse {status: blocked}
+T -> T : get_endpoint();\n_build_payload()
+T -> R : call(attempt, deadline,\nretries if replay-safe)
+R -> R : circuit? bulkhead?
+R -> D : _send_request()
+alt success
+  D --> R : {status, physical_success}
+  R --> T : result
+  T --> A : result + outcome\nCOMMITTED | NOT_COMMITTED
+else timeout (request may have landed)
+  R --> T : timeout
+  T --> A : {status: UNKNOWN,\noutcome: UNKNOWN}
+else open circuit / bulkhead full
+  R --> A : CircuitOpenError |\nBulkheadFullError
+end
+A -> A : state['outcome'] =\nresult.outcome
+@enduml

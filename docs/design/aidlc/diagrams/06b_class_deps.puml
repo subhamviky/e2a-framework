@@ -1,0 +1,33 @@
+@startuml
+!include ../../common/style.puml
+title Dependencies — everything reached through config or direct entry points
+hide members
+left to right direction
+class AIDLCPipelineOrchestrator
+class AIDLCSagaCompensator
+class AIDLCStaticPipeline
+package "G2C / A2C (reused, unmodified)" {
+  class DeveloperPlatformWorkflow <<G2C>>
+  class SDLCWorkflow <<A2C>>
+  class DevPlatformValidationService <<A2C>>
+}
+package "e2a_base.py (reused, unmodified)" {
+  abstract class BaseIdempotencyStore <<port>>
+  abstract class BaseTransactionalStore <<port>>
+  abstract class BaseGovernanceFramework
+  abstract class BaseObservability
+  abstract class BaseLLMAgentService <<T2b>>
+}
+AIDLCPipelineOrchestrator --> DeveloperPlatformWorkflow : Phase A generate()
+AIDLCPipelineOrchestrator --> SDLCWorkflow : Phase B execute()
+AIDLCPipelineOrchestrator --> DevPlatformValidationService : validate(dev_request)
+AIDLCPipelineOrchestrator --> AIDLCStaticPipeline : Phase C run_pipeline()
+AIDLCPipelineOrchestrator --> AIDLCSagaCompensator : compensate()
+AIDLCPipelineOrchestrator ..> BaseIdempotencyStore : idempotency_store
+AIDLCPipelineOrchestrator ..> BaseTransactionalStore : pipeline_state_store,\nartifact_store
+AIDLCPipelineOrchestrator ..> BaseGovernanceFramework : governance_engine
+AIDLCPipelineOrchestrator ..> BaseObservability : observability_engine
+AIDLCSagaCompensator ..> BaseTransactionalStore : artifact_store
+DeveloperPlatformWorkflow ..> BaseLLMAgentService : llm_service
+SDLCWorkflow ..> BaseLLMAgentService : llm_service
+@enduml
