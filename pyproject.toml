@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e2a-framework"
+version = "1.1.0"
+description = "E2A - Enterprise-to-Agentic runtime contracts (reference implementation)"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Subham Gupta" }]
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.7"]
+
+[project.urls]
+Repository = "https://github.com/subhamviky/e2a-framework"
+
+[tool.setuptools]
+# The reference modules stay where they are (reference/) and keep their flat
+# import names (`from e2a_base import BaseAgent`), so A2C, G2C output and
+# existing code keep working unchanged.
+package-dir = { "" = "reference" }
+py-modules = [
+    "e2a_base",
+    "e2a_cqrs_base",
+    "e2a_inmemory_adapters",
+    "e2a_simulated_llm",
+    "ai_dlc_pipeline",
+]

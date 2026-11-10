@@ -2,6 +2,13 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.1.0 — Consumable framework
+
+### Added
+- `pyproject.toml`: E2A installs as the `e2a-framework` package from a git tag; the reference modules keep their flat import names.
+- `reference/e2a_simulated_llm.py`: `SimulatedLLMService`, a deterministic rule-based `BaseLLMAgentService` for offline development, CI and reproducible builds, with token and cost accounting.
+- `reference/smoke_test_simulated_llm.py` (10 checks) and a GitHub Actions workflow running the smoke tests on Python 3.11 and 3.12.
+
 ## Concurrency and idempotency
 
 ### Added
