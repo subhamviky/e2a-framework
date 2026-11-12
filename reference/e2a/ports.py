@@ -297,6 +297,28 @@ class BaseIdempotencyStore(ABC):
         return self.claim(idempotency_key, config, **kwargs).status == ClaimStatus.CLAIMED
 
 
+class BaseCheckpointStore(ABC):
+    """Where a paused workflow waits for a human decision (v1.2, design note 01, E-17).
+    A checkpoint is {'checkpoint_id', 'tenant_id', 'status': 'PENDING', 'step', 'state',
+    'idempotency_key', 'correlation_id', 'requested_by', 'reason', 'created_at'}.
+    BaseWorkflow saves it when a step pauses and resume() decides it exactly once."""
+
+    @abstractmethod
+    def save(self, checkpoint: Dict[str, Any], config: Dict[str, Any] = None, **kwargs) -> None:
+        """Store a new PENDING checkpoint under checkpoint['checkpoint_id']."""
+
+    @abstractmethod
+    def load(self, checkpoint_id: str, config: Dict[str, Any] = None, **kwargs) -> Optional[Dict[str, Any]]:
+        """The checkpoint, or None. kwargs: tenant_id (a checkpoint of another tenant is None)."""
+
+    @abstractmethod
+    def decide(self, checkpoint_id: str, status: str, decided_by: str,
+               config: Dict[str, Any] = None, **kwargs) -> bool:
+        """PENDING -> status ('APPROVED' | 'REJECTED') as ONE atomic conditional write.
+        False when it was no longer PENDING: a second or concurrent decision never
+        resumes the workflow twice."""
+
+
 class BaseDistributedLock(ABC):
     """Temporary EXCLUSIVE OWNERSHIP as a lease: time-bound, renewable,
     owner-checked. Used by scheduled/reconciliation work that needs one

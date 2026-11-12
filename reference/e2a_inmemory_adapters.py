@@ -11,6 +11,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
+from e2a import BaseCheckpointStore
 from e2a_base import (BaseCacheStore, BaseDistributedLock, BaseIdempotencyStore,
                       BaseTransactionalStore, ClaimResult, ClaimStatus, CommitResult,
                       LeaseHandle, PhysicalOutcome)
@@ -176,3 +177,29 @@ class InMemoryLease(BaseDistributedLock):
             cur = self._held.get(handle.key)
             if cur and cur.owner_token == handle.owner_token:
                 del self._held[handle.key]
+
+
+class InMemoryCheckpointStore(BaseCheckpointStore):
+    """Paused workflows waiting for a decision; decide() is an atomic PENDING -> X."""
+
+    def __init__(self):
+        self._lock, self._items = threading.Lock(), {}
+
+    def save(self, checkpoint, config=None, **kw):
+        with self._lock:
+            self._items[checkpoint['checkpoint_id']] = dict(checkpoint)
+
+    def load(self, checkpoint_id, config=None, **kw):
+        with self._lock:
+            cp = self._items.get(checkpoint_id)
+            if cp is None or (kw.get('tenant_id') and cp['tenant_id'] != kw['tenant_id']):
+                return None
+            return dict(cp)
+
+    def decide(self, checkpoint_id, status, decided_by, config=None, **kw) -> bool:
+        with self._lock:
+            cp = self._items.get(checkpoint_id)
+            if cp is None or cp['status'] != 'PENDING':
+                return False
+            cp.update(status=status, decided_by=decided_by, decided_at=time.time())
+            return True

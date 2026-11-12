@@ -10,10 +10,10 @@ from .governance import BaseGovernanceFramework
 from .validation import ValidationResult, BaseValidationService, OrderOpsValidationService
 from .llm import DLP_MARKER, BaseLLMAgentService
 from .agents import BaseAgent, LLMOnlyAgent
-from .workflows import BaseWorkflow
+from .workflows import BaseWorkflow, ResumeRefused, Route, Step, Steps
 from .rag import BaseRAGPipeline, BaseIndexingPipeline, BaseEmbeddingModel, BaseVectorIndex, RAGPipeline
 from .tools import BaseToolService, RestToolService, MCPToolService, BaseMCPServer
-from .ports import BasePromptRegistry, BaseTransactionalStore, BaseCacheStore, BaseIdempotencyStore, BaseDistributedLock, BaseWebhookDispatcher, BaseSchemaTransformer, BaseMemoryManager, BaseOutboxSweeper, BaseReconciliationService
+from .ports import BasePromptRegistry, BaseTransactionalStore, BaseCacheStore, BaseIdempotencyStore, BaseCheckpointStore, BaseDistributedLock, BaseWebhookDispatcher, BaseSchemaTransformer, BaseMemoryManager, BaseOutboxSweeper, BaseReconciliationService
 from .pipeline import BasePipeline
 from .infra import BaseInfraProvisioner, GCPInfraProvisioner
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext, ToolDenied

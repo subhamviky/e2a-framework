@@ -85,7 +85,8 @@ class BaseAgent(ABC, _PropagationMixin):
             allowed = gov_engine.tool_policy[name]          # v1.2: the engine's per-agent tool policy
         io_read = ReadAccess(ctx, config, allowed=allowed, messages=messages)
         io_modify = ModifyAccess(ctx, config, allowed=allowed, messages=messages)
-        v2 = declares_ctx(self._build_messages) or declares_ctx(self._apply_policy)
+        v2 = declares_ctx(self._build_messages) or (
+            type(self)._apply_policy is not BaseAgent._apply_policy and declares_ctx(self._apply_policy))
 
         def hook(name, step, legacy_args, legacy_kwargs, **available):
             fn = getattr(self, name)
@@ -122,6 +123,8 @@ class BaseAgent(ABC, _PropagationMixin):
                     accepted = False
                     response = hook('_fallback', 'fallback', (state, config), dict(common, **kwargs),
                                     state=state, ctx=ctx, messages=messages)
+                if v2:      # a workflow step ends the workflow on a fallback (note 05)
+                    state['evaluation'] = 'ACCEPTED' if accepted else 'FALLBACK'
             if accepted:
                 if ctx.expired():
                     outcomes = []
@@ -189,9 +192,9 @@ class BaseAgent(ABC, _PropagationMixin):
     def _build_messages(self, state, config=None, **kwargs):
         """kwargs: prompt_template, role"""
  
-    @abstractmethod
-    def _apply_policy(self, state, config=None, **kwargs):
-        """kwargs: retry_policy, circuit_breaker_config. Fallback path,
+    def _apply_policy(self, state=None, ctx=None, **kwargs):
+        """Default (v1.2): no agent-specific policy; the governance stages still run.
+        v1.1 kwargs: retry_policy, circuit_breaker_config. Fallback path,
         used only when no governance_engine is configured — the
         preferred, centrally-enforced path is
         BaseGovernanceFramework.enforce_governance_gate(). This is also
@@ -213,17 +216,22 @@ class BaseAgent(ABC, _PropagationMixin):
         char_count = sum(len(str(m)) for m in (messages or []))
         return max(1, char_count // 4)
  
-    @abstractmethod
-    def _evaluate_output(self, response, state, config=None, **kwargs):
-        """Return float [0.0-1.0]. kwargs: min_confidence"""
- 
-    @abstractmethod
-    def _fallback(self, state, config=None, **kwargs):
-        """kwargs: fallback_model, cache_key"""
- 
-    @abstractmethod
-    def _handle_error(self, error, state, config=None, **kwargs):
-        """Appends to failed_keys via kwargs['failed_keys'].append(...)"""
+    def _evaluate_output(self, response=None, state=None, ctx=None, **kwargs):
+        """Return float [0.0-1.0]. kwargs: min_confidence. Required only for an agent
+        with a model step (v1.2: a deterministic agent's _build_messages returns None)."""
+        raise NotImplementedError(f'{type(self).__name__} has a model step: implement _evaluate_output')
+
+    def _fallback(self, state=None, ctx=None, **kwargs):
+        """kwargs: fallback_model, cache_key. Required only for an agent with a model step."""
+        raise NotImplementedError(f'{type(self).__name__} has a model step: implement _fallback')
+
+    def _handle_error(self, error=None, state=None, ctx=None, messages=None, failed_keys=None, **kwargs):
+        """Default (v1.2): record the error in state['errors'] and in messages; the run
+        does not raise. v1.1: appends to failed_keys via kwargs['failed_keys']."""
+        if state is not None:
+            state.setdefault('errors', []).append(str(error))
+        if isinstance(messages, MessageLog):
+            messages.error('agent_error', error=str(error), error_type=type(error).__name__)
  
 # ======================================================================
 # LLMOnlyAgent — abstract peer to BaseAgent, BaseRAGPipeline, and
