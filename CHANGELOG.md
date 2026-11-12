@@ -12,6 +12,15 @@ Design: the v1.2 design notes in the o2c-platform-hub repository (roadmap/design
 - **pytest suite (E-14):** `pytest tests` runs every reference smoke script against the installed package, plus package-layout tests (all v1.1 names importable, one home per public name, every module importable on its own). CI runs it.
 - `smoke_test_llm_service.py`: the "no `os.getenv` outside the registry" check now covers every module of the package.
 
+### Step 3 — Governance as stages (design note 04)
+- **`e2a.stages`:** `IngressStage` / `EgressStage` and the built-in stages `CapacityStage` (with `InflightLimiter` and dependency breakers), `TokenBudgetStage` (reads `ctx.setting('max_token_budget')`), `ApprovalStage` (raises `ApprovalRequired`, a `DehydrationInterrupt`), `SandboxStage`, `FirewallStage` (injection patterns, maximum length, redaction of state fields) and `RedactionStage` (egress); `compile_redactions` / `redact_text` for policy files.
+- **Typed refusals:** `GovernanceRefusal` (`code`, `stage`, `reason`, `retryable`) with `CapacityRefusal`, `TokenBudgetRefusal`, `FirewallRefusal`, `SandboxRefusal`, `ToolRefusal`, each also the exception type v1.1 raised (`NFRViolationError`, `ValueError`, `PermissionError`). A refused v1.2 agent run records `state['refusal']`.
+- **`BaseGovernanceFramework.stages` and `tool_policy`:** a subclass that declares stages runs them in order (ingress at the gate, egress at redaction); `tool_policy` ({agent: [tools]}) limits each agent's `io_read`/`io_modify`. The v1.1 hooks are no longer abstract (safe defaults); a v1.1 subclass runs exactly as before, now with typed refusals.
+- **v1.2 agents run the gate *and* their own `_apply_policy`.**
+
+### Fixed
+- **`BaseAgent.run` with a `governance_engine` failed since v1.1** (`got multiple values for argument 'io_config'`): `io_config` was passed both as the gate's argument and inside the shared keywords. Regression test added.
+
 ### Step 2 — The BOPF-style propagation contract (design note 02) and the act/confirm steps (note 03)
 - **`e2a.context`:** `RequestContext` (frozen: tenant, correlation, idempotency key, deadline, `settings` resolved once for every registry key plus application keys, trace), `MessageLog` and `FailedKeys` (outputs), `ReadAccess` (`io_read`: replay-safe tools, named resources) and `ModifyAccess` (`io_modify`: material tools, always with an idempotency key, typed outcomes; a transport failure is UNKNOWN). Tools declare `material = True`; each accessor refuses the other kind, and an agent's `allowed_tools` limits both.
 - **Declared hook parameters:** a hook that declares `ctx` receives exactly the parameters it declares, from those its step offers; declaring one the step does not offer (for example `io_modify` in `_prepare`) is an error. No `**kwargs`.

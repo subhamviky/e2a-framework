@@ -22,6 +22,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from .core import DehydrationInterrupt, PhysicalOutcome
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext
 from ._contract import call_hook, declares_ctx, warn_legacy
+from .stages import GovernanceRefusal
 from .config import resolve_config
 from ._propagation import _PropagationMixin
 from .governance import BaseGovernanceFramework
@@ -73,12 +74,18 @@ class BaseAgent(ABC, _PropagationMixin):
         io_config = io_config or self._resolve_io_config(config, **kwargs)
         common = dict(correlation_id=ctx.correlation_id, io_config=io_config,
                       tenant_id=ctx.tenant_id, message_log=messages.entries)
+        # io_config travels as the gate's own argument; passing it again inside the
+        # keywords raised "multiple values for argument 'io_config'" (a defect since v1.1)
+        gate_kw = {k: v for k, v in common.items() if k != 'io_config'}
+        gov_engine = config.get('governance_engine')
+        gov_engine = gov_engine if isinstance(gov_engine, BaseGovernanceFramework) else None
         allowed = getattr(self, 'allowed_tools', None)
+        name = getattr(self, 'agent_name', type(self).__name__)
+        if allowed is None and gov_engine is not None and name in (gov_engine.tool_policy or {}):
+            allowed = gov_engine.tool_policy[name]          # v1.2: the engine's per-agent tool policy
         io_read = ReadAccess(ctx, config, allowed=allowed, messages=messages)
         io_modify = ModifyAccess(ctx, config, allowed=allowed, messages=messages)
         v2 = declares_ctx(self._build_messages) or declares_ctx(self._apply_policy)
-        gov_engine = config.get('governance_engine')
-        gov_engine = gov_engine if isinstance(gov_engine, BaseGovernanceFramework) else None
 
         def hook(name, step, legacy_args, legacy_kwargs, **available):
             fn = getattr(self, name)
@@ -92,7 +99,8 @@ class BaseAgent(ABC, _PropagationMixin):
             if v2:
                 call_hook(self._prepare, 'prepare', dict(state=state, ctx=ctx, io_read=io_read, messages=messages))
                 if gov_engine:
-                    state = gov_engine.enforce_governance_gate(state, io_config, config, **common, **kwargs)
+                    state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx,
+                                                               messages=messages, **gate_kw, **kwargs)
                 hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs),
                      state=state, ctx=ctx, io_read=io_read, messages=messages, failed_keys=failed)
                 prompt = hook('_build_messages', 'build_messages', (state, config), dict(common, **kwargs),
@@ -100,7 +108,7 @@ class BaseAgent(ABC, _PropagationMixin):
             else:   # the v1.1 order, unchanged
                 prompt = self._build_messages(state, config, **common, **kwargs)
                 if gov_engine:
-                    state = gov_engine.enforce_governance_gate(state, io_config, config, **common, **kwargs)
+                    state = gov_engine.enforce_governance_gate(state, io_config, config, **gate_kw, **kwargs)
                 else:
                     hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs))
             accepted, response = True, None
@@ -128,11 +136,15 @@ class BaseAgent(ABC, _PropagationMixin):
                 if outcome is not None:
                     state['outcome'] = PhysicalOutcome(outcome).value
             if gov_engine:
-                response = gov_engine.redact_response(state, response, config, **common, **kwargs)
+                extra = dict(ctx=ctx, messages=messages) if v2 else {}
+                response = gov_engine.redact_response(state, response, config, **extra, **common, **kwargs)
             state['response'] = response
         except DehydrationInterrupt:
             raise  # re-raised unchanged; BaseWorkflow.execute() catches it
         except Exception as e:
+            if isinstance(e, GovernanceRefusal):        # v1.2: typed, so callers can tell a refusal from a bug
+                state['refusal'] = {'code': e.code, 'stage': e.stage, 'reason': e.reason, 'retryable': e.retryable}
+                messages.warn('governance_refusal', code=e.code, stage=e.stage)
             failed.add(ctx.idempotency_key or ctx.correlation_id)
             hook('_handle_error', 'handle_error', (e, state, config),
                  dict(correlation_id=ctx.correlation_id, message_log=messages.entries,

@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from .config import E2A_CONFIG, resolve_config
 from .core import Deadline, PhysicalOutcome
 from .resilience import run_sync
+from .stages import ToolRefusal
 
 _UNSET = object()
 
@@ -131,8 +132,9 @@ class FailedKeys:
         return len(self.keys)
 
 
-class ToolDenied(PermissionError):
-    """The calling class is not allowed to use this tool."""
+class ToolDenied(ToolRefusal):
+    """The calling class is not allowed to use this tool (a governance refusal,
+    code TOOL_DENIED; also a PermissionError, as in v1.1)."""
 
 
 class _Access:

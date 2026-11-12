@@ -19,23 +19,42 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
+from typing import Iterable, Mapping, Sequence
+
 from .core import DehydrationInterrupt, NFRViolationError
+from .context import MessageLog, RequestContext
+from .stages import CapacityRefusal, EgressStage, IngressStage, TokenBudgetRefusal
 from .config import resolve_config
  
  
 class BaseGovernanceFramework(ABC):
-    """Template method abstract class for AI Safety, Economics &
-    Lifecycle Governance (Section 2.11). Two public methods:
-    enforce_governance_gate() runs once, pre-execution; redact_response()
-    runs once, after a response exists. Kept separate rather than one
-    method, because a response to redact does not exist at the point
-    enforce_governance_gate() runs."""
- 
-    def enforce_governance_gate(self, state: Dict[str, Any], io_config: Dict[str, Any],
-                                 config: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+    """Template method class for AI Safety, Economics & Lifecycle Governance
+    (Section 2.11). Two public methods: enforce_governance_gate() runs once,
+    pre-execution (ingress); redact_response() runs once, after a response exists
+    (egress).
+
+    v1.2 (design note 04): a subclass declares `stages`, an ordered list of
+    IngressStage / EgressStage objects (e2a.stages), and optionally `tool_policy`
+    ({agent_name: [tool, ...]}), which limits each agent's io_read / io_modify. Every
+    refusal is a typed GovernanceRefusal. A v1.1 subclass that implements the hooks
+    below and declares no stages runs exactly as in v1.1."""
+
+    stages: Sequence[Any] = ()
+    tool_policy: Mapping[str, Iterable[str]] = {}
+
+    def enforce_governance_gate(self, state: Dict[str, Any], io_config: Dict[str, Any] = None,
+                                 config: Dict[str, Any] = None, ctx: Any = None, messages: Any = None,
+                                 **kwargs) -> Dict[str, Any]:
         config = config or {}
+        if self.stages:
+            ctx, messages = self.__ensure_context(state, config, ctx, messages, kwargs)
+            for stage in self.stages:
+                if isinstance(stage, IngressStage):
+                    state = stage.check(state, ctx, messages)
+            return state
+        io_config = io_config or {}
         if not self._check_execution_capacity(state, io_config, config, **kwargs):
-            raise NFRViolationError('Execution capacity exceeded; admission rejected.')
+            raise CapacityRefusal('Execution capacity exceeded; admission rejected.', 'capacity')
         self.__enforce_token_budget(state, io_config, config)
         if state.get('requires_human_approval') and not state.get('approval_granted'):
             self.__trigger_dehydration(state, config, **kwargs)
@@ -50,7 +69,27 @@ class BaseGovernanceFramework(ABC):
         BaseAgent.run(), after _evaluate_output() produces a response —
         never from enforce_governance_gate()."""
         config = config or {}
+        if self.stages:
+            ctx, messages = self.__ensure_context(state, config, kwargs.pop('ctx', None),
+                                                  kwargs.pop('messages', None), kwargs)
+            for stage in self.stages:
+                if isinstance(stage, EgressStage):
+                    response = stage.redact(response, state, ctx, messages)
+            return response
+        kwargs.pop('ctx', None)
+        kwargs.pop('messages', None)
         return self._redact_output_fields(state, response, config, **kwargs)
+
+    def __ensure_context(self, state, config, ctx, messages, kwargs):
+        """Base-owned: callers that predate v1.2 pass no context; build one for the stages."""
+        if ctx is None:
+            ctx = RequestContext.begin(tenant_id=kwargs.get('tenant_id') or state.get('tenant_id'),
+                                       config=config, require_tenant=False,
+                                       correlation_id=kwargs.get('correlation_id') or state.get('correlation_id'),
+                                       overrides=kwargs)
+        if messages is None:
+            messages = MessageLog(kwargs.get('message_log'), ctx.correlation_id, type(self).__name__)
+        return ctx, messages
  
     def __enforce_token_budget(self, state: Dict[str, Any], io_config: Dict[str, Any],
                                config: Dict[str, Any] = None) -> None:
@@ -64,9 +103,9 @@ class BaseGovernanceFramework(ABC):
             max_budget = resolve_config('max_token_budget', config)
         used = state.get('cumulative_tokens_used', 0)
         if used >= max_budget:
-            raise ValueError(
+            raise TokenBudgetRefusal(
                 f'Governance Violation: token budget exhausted. '
-                f'Used {used}, Limit {max_budget}')
+                f'Used {used}, Limit {max_budget}', 'token_budget')
  
     def __trigger_dehydration(self, state: Dict[str, Any], config: Dict[str, Any], **kwargs) -> None:
         correlation_id = kwargs.get('correlation_id', state.get('correlation_id'))
@@ -74,7 +113,6 @@ class BaseGovernanceFramework(ABC):
         self._dehydrate_state_to_perimeter(state, correlation_id, tenant_id, config)
         raise DehydrationInterrupt(f'State {correlation_id} dehydrated. Awaiting webhook.')
  
-    @abstractmethod
     def _check_execution_capacity(self, state: Dict[str, Any], io_config: Dict[str, Any],
                                    config: Dict[str, Any] = None, **kwargs) -> bool:
         """kwargs: max_concurrency, queue_depth_threshold. Consolidated
@@ -82,42 +120,43 @@ class BaseGovernanceFramework(ABC):
         backpressure in one contract, not two. Return False to reject
         admission before any LLM call or downstream dependency is
         touched."""
+        return True
  
-    @abstractmethod
     def _evaluate_dependency_health(self, config: Dict[str, Any] = None, **kwargs) -> bool:
         """kwargs: health_check_targets. Checks downstream dependency
         health (data store, cache, external API). Called by a concrete
         _check_execution_capacity() implementation as one of its inputs —
         a separate hook so health-check behavior and admission-threshold
         behavior can be overridden independently."""
+        return True
  
-    @abstractmethod
     def _execute_semantic_firewall(self, state: Dict[str, Any], config: Dict[str, Any],
                                     **kwargs) -> Dict[str, Any]:
         """kwargs: policy_file, redaction_rules. Run local guard models
         for PII redaction and prompt-injection blocking on the inbound
         payload; returns the (possibly redacted) state. Ingress
         direction — governs what reaches the model."""
+        return state
  
-    @abstractmethod
     def _redact_output_fields(self, state: Dict[str, Any], response: Dict[str, Any],
                                config: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """kwargs: masking_policy_registry. Egress-direction counterpart
         to _execute_semantic_firewall() — field-level masking on the
         response. Called only from redact_response()."""
+        return response
  
-    @abstractmethod
     def _verify_sandbox_profile(self, config: Dict[str, Any], **kwargs) -> None:
         """Assert the current execution context is an isolated microVM
         (gVisor/Firecracker) before a pending MCP tool call proceeds."""
+        return None
  
-    @abstractmethod
     def _circuit_breaker(self, failures: int, config: Dict[str, Any], **kwargs) -> bool:
         """kwargs: fail_max, reset_timeout. Circuit breaker state
         transitions + metric emission."""
+        return False
  
-    @abstractmethod
     def _dehydrate_state_to_perimeter(self, state: Dict[str, Any], correlation_id: str,
                                        tenant_id: str, config: Dict[str, Any]) -> None:
         """Persist state to the Data & Messaging Perimeter ahead of a
         human-in-the-loop pause; called only by __trigger_dehydration()."""
+        raise NotImplementedError('implement _dehydrate_state_to_perimeter, or use ApprovalStage (v1.2)')
