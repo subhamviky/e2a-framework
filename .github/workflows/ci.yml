@@ -20,7 +20,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install the package
-        run: pip install .
+        run: pip install ".[test]"
+      - name: Test suite (pytest runs every smoke script against the installed package)
+        run: python -m pytest -q tests
       - name: Run the smoke tests against the INSTALLED package
         # python -I ignores the checkout folder, so these imports can only
         # succeed if the package was built and installed correctly.

@@ -166,9 +166,15 @@ check('registry: reference table lists every key', all(f'| {k} |' in md for k in
 check('registry: .env.example lists every env var, secrets empty',
       all(f'{c.env}=' in env for c in E2A_CONFIG.values() if c.env)
       and 'TOOL_AUTH_TOKEN=\n' in env and 'WEBHOOK_SIGNING_SECRET=\n' in env)
-src = _inspect.getsource(sys.modules['e2a_base'])
-reg_end = src.index('def unknown_config_keys')
-check('registry: no os.getenv outside the registry', 'os.getenv(' not in src[reg_end:].replace('os.getenv() or hardcodes', ''))
+# v1.2: the framework is the e2a package; only e2a.config (up to the registry helpers) may read the environment
+import e2a as _e2a, pkgutil as _pkgutil, importlib as _importlib
+outside = []
+for _m in _pkgutil.iter_modules(_e2a.__path__):
+    _src = _inspect.getsource(_importlib.import_module(f'e2a.{_m.name}'))
+    if _m.name == 'config':
+        _src = _src[_src.index('def unknown_config_keys'):]
+    outside.append(_src.replace('os.getenv() or hardcodes', ''))
+check('registry: no os.getenv outside the registry', all('os.getenv(' not in _x for _x in outside))
 os.environ['LLM_MAX_RPM'] = '1200'
 check('LLM service resolves through the registry', FakeLLM(text='x')._max_rpm == 1200.0 / max(1, int(resolve_config('llm_replica_count'))))
 os.environ.pop('LLM_MAX_RPM')

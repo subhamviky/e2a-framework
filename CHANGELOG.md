@@ -2,6 +2,16 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.2.0 — in progress (release branch `release/v1.2.0`)
+
+Design: the v1.2 design notes in the o2c-platform-hub repository (roadmap/design/).
+
+### Step 1 — Package structure and test suite (no behaviour change)
+- **`e2a` package (E-12):** the framework is split from the 3,300-line `e2a_base.py` into one module per contract area: `e2a.core`, `config`, `resilience`, `observability`, `governance`, `validation`, `llm`, `agents`, `workflows`, `rag`, `tools`, `ports`, `pipeline`, `infra`. The code moved without changes; imports between modules are explicit.
+- **`e2a_base` is a compatibility module:** it re-exports every name it defined in v1.1.x (the same objects), and the standard-library names that `from e2a_base import *` used to provide.
+- **pytest suite (E-14):** `pytest tests` runs every reference smoke script against the installed package, plus package-layout tests (all v1.1 names importable, one home per public name, every module importable on its own). CI runs it.
+- `smoke_test_llm_service.py`: the "no `os.getenv` outside the registry" check now covers every module of the package.
+
 ## v1.1.2 — Fixes from the Order-to-Cash projects
 
 ### Fixed
