@@ -51,9 +51,10 @@ class BaseAgent(ABC, _PropagationMixin):
           _act(state, ctx, io_modify, messages, failed_keys)        material effects -> outcomes
           _confirm(state, ctx, io_read, outcomes, messages)         physical truth -> outcome
           _handle_error(error, state, ctx, messages, failed_keys)
-        Order for a v1.2 agent: prepare -> governance gate -> _apply_policy (both) ->
-        build -> infer -> evaluate/fallback -> act (only after an accepted evaluation, and
-        not after the deadline) -> confirm -> redaction. A v1.1 agent (hooks without
+        Order for a v1.2 agent: screening stages (capacity, budget, sandbox, firewall) ->
+        prepare -> deciding stages (approval) -> _apply_policy (all of them, never either/or)
+        -> build -> infer -> evaluate/fallback -> act (only after an accepted evaluation,
+        and not after the deadline) -> confirm -> redaction. A v1.1 agent (hooks without
         `ctx`) runs exactly as in v1.1."""
         config = config or {}
         given = {'tenant_id': tenant_id, 'correlation_id': correlation_id, 'idempotency_key': idempotency_key}
