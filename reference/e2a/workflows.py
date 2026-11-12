@@ -22,6 +22,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from .core import ClaimStatus, Deadline, DehydrationInterrupt, PhysicalOutcome, _DETERMINISTIC_ERRORS
 from .config import resolve_config
 from ._propagation import _PropagationMixin
+from .context import RequestContext
 from .observability import BaseObservability
 from .agents import BaseAgent
 from .ports import BaseIdempotencyStore
@@ -38,9 +39,16 @@ class BaseWorkflow(ABC, _PropagationMixin):
         only place correlation_id, io_config, and idempotency_key are
         generated from scratch."""
         config = config or {}
-        tenant_id = state.get('tenant_id')
+        given_ctx = kwargs.pop('ctx', None)       # v1.2: a caller may pass the request context
+        tenant_id = given_ctx.tenant_id if given_ctx else state.get('tenant_id')
         if not tenant_id:
             raise ValueError('state["tenant_id"] is required')
+        if given_ctx:
+            kwargs.setdefault('correlation_id', given_ctx.correlation_id)
+            if given_ctx.idempotency_key:
+                kwargs.setdefault('idempotency_key', given_ctx.idempotency_key)
+            if given_ctx.deadline is not None:
+                kwargs.setdefault('deadline', given_ctx.deadline)
         correlation_id = kwargs.get(
             'correlation_id', state.get('correlation_id', str(uuid.uuid4())))
         io_config = self._resolve_io_config(config, **kwargs)
@@ -54,6 +62,10 @@ class BaseWorkflow(ABC, _PropagationMixin):
             kwargs.pop(field, None)
         message_log: List[dict] = []
         failed_keys: List[str] = []
+        # v1.2: the request context, created once here and handed to the agent as one object
+        ctx = RequestContext.begin(tenant_id=tenant_id, config=config, correlation_id=correlation_id,
+                                   idempotency_key=idempotency_key, deadline=deadline, overrides=kwargs,
+                                   trace=given_ctx.trace if given_ctx else None)
         state['tenant_id'] = tenant_id
         state['correlation_id'] = correlation_id
         state['idempotency_key'] = idempotency_key
@@ -84,11 +96,15 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 state.get('intent'), config, correlation_id=correlation_id,
                 io_config=io_config, tenant_id=tenant_id,
                 message_log=message_log, **kwargs)
-            state = agent.run(
-                state, config, correlation_id=correlation_id,
-                io_config=io_config, idempotency_key=idempotency_key,
-                tenant_id=tenant_id, message_log=message_log,
-                failed_keys=failed_keys, deadline=deadline, **kwargs)
+            if isinstance(agent, BaseAgent):    # v1.2: one context object
+                state = agent.run(state, config, ctx=ctx, io_config=io_config,
+                                  message_log=message_log, failed_keys=failed_keys, **kwargs)
+            else:                               # an agent-like object (e.g. A2C's agent chain): v1.1 keywords
+                state = agent.run(
+                    state, config, correlation_id=correlation_id,
+                    io_config=io_config, idempotency_key=idempotency_key,
+                    tenant_id=tenant_id, message_log=message_log,
+                    failed_keys=failed_keys, deadline=deadline, **kwargs)
         except DehydrationInterrupt as d:
             self._log(message_log, correlation_id, 'INFO', 'workflow_dehydrated', reason=str(d))
             state['status'] = 'AWAITING_WEBHOOK'

@@ -16,5 +16,6 @@ from .tools import BaseToolService, RestToolService, MCPToolService, BaseMCPServ
 from .ports import BasePromptRegistry, BaseTransactionalStore, BaseCacheStore, BaseIdempotencyStore, BaseDistributedLock, BaseWebhookDispatcher, BaseSchemaTransformer, BaseMemoryManager, BaseOutboxSweeper, BaseReconciliationService
 from .pipeline import BasePipeline
 from .infra import BaseInfraProvisioner, GCPInfraProvisioner
+from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext, ToolDenied
 
 __version__ = "1.2.0"

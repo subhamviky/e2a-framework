@@ -29,6 +29,9 @@ from ._propagation import _PropagationMixin
 # ==================================================
  
 class BaseToolService(ABC, _PropagationMixin):
+    # v1.2: True for a tool with a material effect (reachable only through io_modify,
+    # always with an idempotency key); False for a read (io_read, retried freely).
+    material: bool = False
  
     async def execute(self, payload: Dict[str, Any],
                        config: Dict[str, Any] = None, tenant_id: str = None,
@@ -40,6 +43,13 @@ class BaseToolService(ABC, _PropagationMixin):
         _resolve_tool_call()) check physical_success before proceeding,
         regardless of what the agent's response text claims."""
         config = config or {}
+        ctx = kwargs.get('ctx')                   # v1.2: the request context, when called through io_read/io_modify
+        if ctx is not None:
+            if tenant_id and tenant_id != ctx.tenant_id:
+                raise ValueError('execute(): tenant_id differs from ctx.tenant_id')
+            tenant_id = ctx.tenant_id
+            if ctx.deadline is not None:
+                kwargs.setdefault('deadline', ctx.deadline)
         if not self._validate_input(payload, config, **kwargs):
             raise ValueError('Invalid input')
         key = kwargs.get('idempotency_key', payload.get('idempotency_key'))

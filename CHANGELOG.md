@@ -12,6 +12,14 @@ Design: the v1.2 design notes in the o2c-platform-hub repository (roadmap/design
 - **pytest suite (E-14):** `pytest tests` runs every reference smoke script against the installed package, plus package-layout tests (all v1.1 names importable, one home per public name, every module importable on its own). CI runs it.
 - `smoke_test_llm_service.py`: the "no `os.getenv` outside the registry" check now covers every module of the package.
 
+### Step 2 — The BOPF-style propagation contract (design note 02) and the act/confirm steps (note 03)
+- **`e2a.context`:** `RequestContext` (frozen: tenant, correlation, idempotency key, deadline, `settings` resolved once for every registry key plus application keys, trace), `MessageLog` and `FailedKeys` (outputs), `ReadAccess` (`io_read`: replay-safe tools, named resources) and `ModifyAccess` (`io_modify`: material tools, always with an idempotency key, typed outcomes; a transport failure is UNKNOWN). Tools declare `material = True`; each accessor refuses the other kind, and an agent's `allowed_tools` limits both.
+- **Declared hook parameters:** a hook that declares `ctx` receives exactly the parameters it declares, from those its step offers; declaring one the step does not offer (for example `io_modify` in `_prepare`) is an error. No `**kwargs`.
+- **`BaseAgent.run(…, ctx=…)`** for v1.2 agents: `_prepare` → governance gate **and** `_apply_policy` → `_build_messages` (`None` = no model step) → infer → evaluate/fallback → `_act` (only after an accepted evaluation, never after the deadline) → `_confirm` (sets `state['outcome']`; default: UNKNOWN > NOT_COMMITTED > COMMITTED) → redaction. A v1.1 agent runs exactly as before, with one `DeprecationWarning` per class.
+- **`BaseWorkflow.execute`** creates the context once (or takes `ctx=`) and hands it to a `BaseAgent` as one object; agent-like objects without the v1.2 signature (A2C's agent chain) still receive the v1.1 keywords.
+- **`BaseToolService.execute(…, ctx=…)`:** the tenant and the deadline come from the context.
+- `tests/test_contract.py`: 14 tests.
+
 ## v1.1.2 — Fixes from the Order-to-Cash projects
 
 ### Fixed

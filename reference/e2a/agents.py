@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
-from .core import DehydrationInterrupt
+from .core import DehydrationInterrupt, PhysicalOutcome
+from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext
+from ._contract import call_hook, declares_ctx, warn_legacy
 from .config import resolve_config
 from ._propagation import _PropagationMixin
 from .governance import BaseGovernanceFramework
@@ -33,63 +35,144 @@ class BaseAgent(ABC, _PropagationMixin):
             correlation_id: str = None, io_config: Dict[str, Any] = None,
             idempotency_key: str = None, tenant_id: str = None,
             message_log: List[dict] = None, failed_keys: List[str] = None,
-            **kwargs) -> Dict[str, Any]:
-        """Public entry point. Receives propagation fields from
-        BaseWorkflow; self-originates them only if run() is invoked
-        standalone (e.g. in a unit test), so the class remains usable
-        outside the full chain. Assumes `state` already passed
-        BaseValidationService.validate() — run() does not validate
-        its own input; there is no _validate_state hook here."""
+            ctx: 'RequestContext' = None, **kwargs) -> Dict[str, Any]:
+        """Public entry point. Receives the request context from BaseWorkflow, or
+        creates it when run() is called on its own (e.g. in a unit test). Assumes `state`
+        already passed BaseValidationService.validate().
+
+        v1.2 (BOPF-style contract): a hook that declares `ctx` receives exactly the
+        parameters it declares, from those its step offers:
+          _prepare(state, ctx, io_read, messages)                  read facts; no side effects
+          _apply_policy(state, ctx, io_read, messages, failed_keys) the agent's own authorization
+          _build_messages(state, ctx)                               None = no model step
+          _evaluate_output(response, state, ctx, messages)          confidence
+          _fallback(state, ctx, messages)                           response below min_confidence
+          _act(state, ctx, io_modify, messages, failed_keys)        material effects -> outcomes
+          _confirm(state, ctx, io_read, outcomes, messages)         physical truth -> outcome
+          _handle_error(error, state, ctx, messages, failed_keys)
+        Order for a v1.2 agent: prepare -> governance gate -> _apply_policy (both) ->
+        build -> infer -> evaluate/fallback -> act (only after an accepted evaluation, and
+        not after the deadline) -> confirm -> redaction. A v1.1 agent (hooks without
+        `ctx`) runs exactly as in v1.1."""
         config = config or {}
-        correlation_id = correlation_id or state.get(
-            'correlation_id', str(uuid.uuid4()))
+        given = {'tenant_id': tenant_id, 'correlation_id': correlation_id, 'idempotency_key': idempotency_key}
+        if ctx is None:
+            ctx = RequestContext.begin(
+                tenant_id=tenant_id or state.get('tenant_id'), config=config, require_tenant=False,
+                correlation_id=correlation_id or state.get('correlation_id'),
+                idempotency_key=idempotency_key or state.get('idempotency_key'),
+                deadline=kwargs.get('deadline'), overrides=kwargs)
+        else:
+            clash = [k for k, v in given.items() if v is not None and v != getattr(ctx, k)]
+            if clash:
+                raise ValueError(f'run(): {", ".join(clash)} given both in ctx and as a keyword, with different values')
+        if ctx.deadline is not None:
+            kwargs.setdefault('deadline', ctx.deadline)
+        messages = MessageLog(message_log, ctx.correlation_id, type(self).__name__)
+        failed = FailedKeys(failed_keys)
         io_config = io_config or self._resolve_io_config(config, **kwargs)
-        message_log = message_log if message_log is not None else []
-        failed_keys = failed_keys if failed_keys is not None else []
-        tenant_id = tenant_id or state.get('tenant_id')
-        common = dict(correlation_id=correlation_id, io_config=io_config,
-                      tenant_id=tenant_id, message_log=message_log)
+        common = dict(correlation_id=ctx.correlation_id, io_config=io_config,
+                      tenant_id=ctx.tenant_id, message_log=messages.entries)
+        allowed = getattr(self, 'allowed_tools', None)
+        io_read = ReadAccess(ctx, config, allowed=allowed, messages=messages)
+        io_modify = ModifyAccess(ctx, config, allowed=allowed, messages=messages)
+        v2 = declares_ctx(self._build_messages) or declares_ctx(self._apply_policy)
         gov_engine = config.get('governance_engine')
+        gov_engine = gov_engine if isinstance(gov_engine, BaseGovernanceFramework) else None
+
+        def hook(name, step, legacy_args, legacy_kwargs, **available):
+            fn = getattr(self, name)
+            if declares_ctx(fn):
+                return call_hook(fn, step, available)
+            warn_legacy(type(self), name)
+            return fn(*legacy_args, **legacy_kwargs)
+
         start = time.time()
         try:
-            messages = self._build_messages(state, config, **common, **kwargs)
-            if gov_engine and isinstance(gov_engine, BaseGovernanceFramework):
-                state = gov_engine.enforce_governance_gate(state, io_config, config, **common, **kwargs)
-            else:
-                self._apply_policy(state, config, **common, **kwargs)
-            response = self._infer(messages, config, **common, **kwargs)
-            tokens_used = self.__track_usage(messages, response, config, **kwargs)
-            state['cumulative_tokens_used'] = state.get('cumulative_tokens_used', 0) + tokens_used
-            confidence = self._evaluate_output(
-                response, state, config, **common, **kwargs)
-            min_conf = resolve_config('min_confidence', config, kwargs)
-            if confidence < min_conf:
-                response = self._fallback(state, config, **common, **kwargs)
-            if gov_engine and isinstance(gov_engine, BaseGovernanceFramework):
+            if v2:
+                call_hook(self._prepare, 'prepare', dict(state=state, ctx=ctx, io_read=io_read, messages=messages))
+                if gov_engine:
+                    state = gov_engine.enforce_governance_gate(state, io_config, config, **common, **kwargs)
+                hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs),
+                     state=state, ctx=ctx, io_read=io_read, messages=messages, failed_keys=failed)
+                prompt = hook('_build_messages', 'build_messages', (state, config), dict(common, **kwargs),
+                              state=state, ctx=ctx)
+            else:   # the v1.1 order, unchanged
+                prompt = self._build_messages(state, config, **common, **kwargs)
+                if gov_engine:
+                    state = gov_engine.enforce_governance_gate(state, io_config, config, **common, **kwargs)
+                else:
+                    hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs))
+            accepted, response = True, None
+            if prompt is not None or not v2:
+                response = self._infer(prompt, config, **common, **kwargs)
+                tokens_used = self.__track_usage(prompt, response, config, **kwargs)
+                state['cumulative_tokens_used'] = state.get('cumulative_tokens_used', 0) + tokens_used
+                confidence = hook('_evaluate_output', 'evaluate_output', (response, state, config),
+                                  dict(common, **kwargs), response=response, state=state, ctx=ctx, messages=messages)
+                if confidence < resolve_config('min_confidence', config, kwargs):
+                    accepted = False
+                    response = hook('_fallback', 'fallback', (state, config), dict(common, **kwargs),
+                                    state=state, ctx=ctx, messages=messages)
+            if accepted:
+                if ctx.expired():
+                    outcomes = []
+                    messages.warn('act_skipped_deadline')
+                    if declares_ctx(self._act) and type(self)._act is not BaseAgent._act:
+                        state['outcome'] = PhysicalOutcome.NOT_COMMITTED.value
+                else:
+                    outcomes = call_hook(self._act, 'act', dict(state=state, ctx=ctx, io_modify=io_modify,
+                                                                messages=messages, failed_keys=failed)) or []
+                outcome = call_hook(self._confirm, 'confirm', dict(state=state, ctx=ctx, io_read=io_read,
+                                                                   outcomes=list(outcomes), messages=messages))
+                if outcome is not None:
+                    state['outcome'] = PhysicalOutcome(outcome).value
+            if gov_engine:
                 response = gov_engine.redact_response(state, response, config, **common, **kwargs)
             state['response'] = response
         except DehydrationInterrupt:
             raise  # re-raised unchanged; BaseWorkflow.execute() catches it
         except Exception as e:
-            failed_keys.append(idempotency_key or correlation_id)
-            self._handle_error(e, state, config, correlation_id=correlation_id,
-                                message_log=message_log,
-                                failed_keys=failed_keys, **kwargs)
+            failed.add(ctx.idempotency_key or ctx.correlation_id)
+            hook('_handle_error', 'handle_error', (e, state, config),
+                 dict(correlation_id=ctx.correlation_id, message_log=messages.entries,
+                      failed_keys=failed.keys, **kwargs),
+                 error=e, state=state, ctx=ctx, messages=messages, failed_keys=failed)
         latency = time.time() - start
         max_latency = resolve_config('max_latency', config, kwargs)
-        self._log(message_log, correlation_id, 'INFO', 'agent_run_complete',
+        self._log(messages.entries, ctx.correlation_id, 'INFO', 'agent_run_complete',
                    latency=round(latency, 3), tokens_used=state.get('cumulative_tokens_used', 0))
-        state['tenant_id'] = tenant_id
-        state['correlation_id'] = correlation_id
+        state['tenant_id'] = ctx.tenant_id            # mirrored for v1.1 code; removed in v1.3
+        state['correlation_id'] = ctx.correlation_id
         if latency > max_latency:
             # v1.1.2: recorded, not raised. The run has finished and may have committed
             # a material effect; raising now would report a committed outcome as a
             # failure. Enforcement before effects is the job of the request deadline.
             state['slo_breached'] = {'latency': round(latency, 3), 'max_latency': max_latency}
-            self._log(message_log, correlation_id, 'WARN', 'agent_latency_slo_breached',
+            self._log(messages.entries, ctx.correlation_id, 'WARN', 'agent_latency_slo_breached',
                       latency=round(latency, 3), max_latency=max_latency)
         return state
- 
+
+    # ---- v1.2 steps with defaults (a v1.1 agent never notices them)
+    def _prepare(self, state, ctx, io_read, messages):
+        """Read facts or retrieve before the prompt is built. No side effects."""
+        return None
+
+    def _act(self, state, ctx, io_modify, messages, failed_keys):
+        """Execute material effects through io_modify; return the tools' typed results."""
+        return []
+
+    def _confirm(self, state, ctx, io_read, outcomes, messages):
+        """Confirm physical truth. Default: the tools' typed outcomes decide; UNKNOWN wins
+        over NOT_COMMITTED, which wins over COMMITTED; no outcomes, no verdict."""
+        if not outcomes:
+            return None
+        kinds = {PhysicalOutcome(o.get('outcome') if isinstance(o, dict) else o) for o in outcomes}
+        for kind in (PhysicalOutcome.UNKNOWN, PhysicalOutcome.NOT_COMMITTED):
+            if kind in kinds:
+                return kind
+        return PhysicalOutcome.COMMITTED
+
     @abstractmethod
     def _build_messages(self, state, config=None, **kwargs):
         """kwargs: prompt_template, role"""
