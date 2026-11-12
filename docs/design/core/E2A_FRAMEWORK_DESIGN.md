@@ -161,7 +161,7 @@ E2A addresses these structurally rather than by guidance:
 
 ### 4.1 Principles
 
-1. **Single public entry point per class** — `execute`, `run`, `retrieve`, `ingest`, `serve`, `process_inference` (plus its streaming sibling), `record_telemetry`, `enforce_governance_gate` (plus `redact_response`), `validate`, `sweep`, `reconcile`, `run_pipeline`, `provision_landing_zone`, `dispatch`.
+1. **Governed entry points** (v1.2; was "single public entry point per class"): a public method per genuine capability, checked by `e2a.conformance` (R1–R3); v1.2 adds `BaseWorkflow.resume`, `BaseMCPServer.serve_async` and `BaseRAGPipeline.evaluate_answer`. The entry points: `execute`, `run`, `retrieve`, `ingest`, `serve`, `process_inference` (plus its streaming sibling), `record_telemetry`, `enforce_governance_gate` (plus `redact_response`), `validate`, `sweep`, `reconcile`, `run_pipeline`, `provision_landing_zone`, `dispatch`.
 2. **Three-layer method contract** — public (fixed lifecycle), protected (domain / vendor hooks), private (name-mangled base-owned invariants).
 3. **Propagate, never store** — request-scoped data are arguments, so one instance safely serves concurrent requests.
 4. **Errors become data at class boundaries** — public methods catch failures, append to `failed_keys` and call `_handle_error()`; only `DehydrationInterrupt` (and, by design, the latency SLO in `BaseAgent.run()`) crosses upward.

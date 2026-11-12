@@ -158,7 +158,7 @@ The CQRS profile therefore keeps everything that is profile-independent and repl
 
 ### 4.1 Principles
 
-1. **Single public entry point per class.** Each class exposes exactly one public method — `execute`, `mutate`, `fetch`, `validate`, `enforce_governance_gate`, `record_telemetry`. Everything else is a protected hook or a name-mangled base-owned step.
+1. **Governed entry points** (E2A v1.2; was "single public entry point per class"). Each CQRS class has exactly one capability and so one public method — `execute`, `mutate`, `fetch`, `validate`, `enforce_governance_gate`, `record_telemetry`. Everything else is a protected hook or a name-mangled base-owned step.
 2. **Template method, not framework magic.** Base classes own the control flow; subclasses fill well-named hooks. A missing hook fails at instantiation, never silently in production.
 3. **Propagate, never store.** Request-scoped fields travel as arguments; none is held on `self`, so one instance is safe to share across concurrent requests.
 4. **Concurrency is owned by invariant.** Each shared-resource risk is assigned to exactly one class, contract or config key. There is no global concurrency manager.

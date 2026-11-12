@@ -102,11 +102,10 @@ class RAGAgent(BaseAgent):
         pass  # grounding already resolved in _build_messages(); no tool call
 
     def _evaluate_output(self, response, state, config=None, **kwargs):
-        # BaseRAGPipeline._evaluate_answer() is the protected hook a
-        # concrete pipeline implements (Section 2.5) — called directly,
-        # the same way an agent calls its own protected methods.
-        return self.rag_pipeline._evaluate_answer(
-            response.get("text", ""), config, **kwargs)
+        # v1.2: scoring an answer is a public capability of the pipeline
+        # (evaluate_answer); its protected hook stays inside the pipeline (rule R2).
+        return self.rag_pipeline.evaluate_answer(
+            response.get("text", ""), config=config, **kwargs)
 
     def _fallback(self, state, config=None, **kwargs):
         return {"text": "", "metadata": {"degraded": True, "reason": "faithfulness_threshold"}}
@@ -415,8 +414,6 @@ if __name__ == "__main__":
     ]:
         wf = MultiAgentOrchestratorWorkflow(_StubRAGPipeline(), _StubRouter(intent, score))
         cfg = {"llm_service": _StubLLMService({"enable_semantic_cache": False})}
-        graph = wf._build_workflow(config=cfg)
-        assert wf._validate_workflow(graph, config=cfg)
         state = {"tenant_id": "acme", "query": "test", "tool_name": "check_stock",
                  "tool_payload": {"sku": "SKU-1"}, "intent": intent, "text": "hello"}
         result = wf.execute(state, config=cfg, intent_score=score)

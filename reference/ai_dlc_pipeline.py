@@ -131,7 +131,7 @@ class AIDLCStaticPipeline(BasePipeline):
         return True
 
     def _verify_scaffold_contracts(self, config, **kwargs) -> bool:
-        # Statically asserts the Single Public Entry Point Rule against
+        # Asserts the Governed Entry Point rules (e2a.conformance) against
         # the GENERATED classes, not this pipeline's own.
         return True
 

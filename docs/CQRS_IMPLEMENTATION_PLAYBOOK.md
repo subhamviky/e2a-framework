@@ -23,6 +23,8 @@ This document carries the method-level contract and runnable scaffold for the th
 
 ## 2. The Single Public Entry Point Rule
 
+> **v1.2: the Governed Entry Point principle.** Callers reach a class only through its public methods; each public method is a distinct capability (its own caller or trigger, its own guarantees, not a shortcut to a hook) that delegates to protected hooks and framework-owned private methods. Most classes have one public method; some have two or three (`BaseWorkflow.execute` / `resume`, `BaseMCPServer.serve` / `serve_async`, `BaseRAGPipeline.retrieve` / `evaluate_answer`). `python -m e2a.conformance` enforces it: R1 (no override of a framework-owned public or private method) fails; R2 (no call to another class's protected hook) warns in v1.2 and fails from v1.3; R3 (an extra public capability) is a review note.
+
 | Class | Public Entry Point |
 |---|---|
 | `BaseOrchestrator` | `execute(state, config=None, **kwargs) -> dict` |

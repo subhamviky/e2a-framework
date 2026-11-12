@@ -23,6 +23,9 @@ jobs:
         run: pip install ".[test]"
       - name: Test suite (pytest runs every smoke script against the installed package)
         run: python -m pytest -q tests
+      - name: Governed Entry Point rules over the framework and reference code (smoke tests poke internals on purpose)
+        shell: bash
+        run: python -m e2a.conformance --strict --quiet reference/e2a $(ls reference/*.py | grep -v "smoke_test\|e2a_base.py")
       - name: Run the smoke tests against the INSTALLED package
         # python -I ignores the checkout folder, so these imports can only
         # succeed if the package was built and installed correctly.

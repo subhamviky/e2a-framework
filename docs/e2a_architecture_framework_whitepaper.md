@@ -60,6 +60,9 @@ By aligning object-oriented access boundaries directly with infrastructure secur
 * **Private Helper Invariants (`private ownershipGuard.claim()`):** Corresponds to the **Data and Infrastructure Core**. These methods manage non-negotiable operational standards—such as audit logging, ownership control, and tracing—safely encapsulated from external tampering.
 
 ### 1.2 The Single Public Entry Point Rule
+
+> **v1.2: the Governed Entry Point principle.** Callers reach a class only through its public methods; each public method is a distinct capability (its own caller or trigger, its own guarantees, not a shortcut to a hook) that delegates to protected hooks and framework-owned private methods. Most classes have one public method; some have two or three (`BaseWorkflow.execute` / `resume`, `BaseMCPServer.serve` / `serve_async`, `BaseRAGPipeline.retrieve` / `evaluate_answer`). `python -m e2a.conformance` enforces it: R1 (no override of a framework-owned public or private method) fails; R2 (no call to another class's protected hook) warns in v1.2 and fails from v1.3; R3 (an extra public capability) is a review note.
+
 To promote consistent observability and clear system behavior, each service profile in E2A exposes exactly **one public orchestrator method**:
 * `BaseValidationService.validate()`
 * `BasePipeline.runPipeline()` (marked `final`)

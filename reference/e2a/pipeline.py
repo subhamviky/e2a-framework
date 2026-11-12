@@ -72,7 +72,8 @@ class BasePipeline(ABC, _PropagationMixin):
             if capacity:
                 raise ValueError('Capacity budget violated: ' + '; '.join(capacity))
             if not self._verify_scaffold_contracts(config, **kwargs):
-                raise ValueError('Scaffold verification failed: Single Public Entry Point Rule violated.')
+                raise ValueError('Scaffold verification failed: Governed Entry Point rules violated '
+                                 '(see e2a.conformance).')
             report['stages']['scaffold_compliance'] = 'PASSED'
             self._log(message_log, correlation_id, 'INFO', 'scaffold_compliance_passed')
  
@@ -126,11 +127,22 @@ class BasePipeline(ABC, _PropagationMixin):
     def _execute_test_suite(self, config, **kwargs) -> bool:
         """Run tests/ — unit + integration against the scaffold contracts."""
  
-    @abstractmethod
+    conformance_paths = ('src',)        # v1.2: what the default scaffold check reads
+
     def _verify_scaffold_contracts(self, config, **kwargs) -> bool:
-        """Statically assert the Single Public Entry Point Rule: exactly
-        one public method per core class, no framework-owned private
-        method (__http_post, __admit_quota, etc.) overridden downstream."""
+        """Statically assert the Governed Entry Point rules (e2a.conformance) over
+        `conformance_paths`: R1 (a framework-owned public or private method
+        overridden) fails; R2 (a protected hook called from outside its class) and D1
+        (a deprecated public hook) fail only with conformance_strict=True (the v1.3
+        default); R3 (an extra public capability) is reported, never fails. Findings
+        are kept in self.conformance_findings. v1.1 asserted "exactly one public
+        method per class"; v1.2 allows a public method per real capability."""
+        from pathlib import Path
+        from .conformance import check_paths, failed
+        paths = [p for p in self.conformance_paths if Path(p).exists()]
+        self.conformance_findings = check_paths(paths)
+        strict = bool(kwargs.get('conformance_strict', (config or {}).get('conformance_strict', False)))
+        return not failed(self.conformance_findings, strict=strict)
  
     @abstractmethod
     def _run_rag_eval(self, config, **kwargs) -> float:
