@@ -70,12 +70,17 @@ Enterprise Engineering Experience
         /             \
        v               v
 Deterministic CQRS    AI-DLC
+        \             /
+         v           v
+   Completed projects: the spikes rebuilt
+   by consuming the framework family
 ```
 
-The spikes therefore have two roles in the history of the work:
+The spikes therefore have three roles in the history of the work:
 
 - **Discovery spikes** helped reveal and challenge the structural continuity that led to E2A.
 - **Reference runtimes** exercise and refine formal framework patterns after those patterns are defined.
+- **Completed projects** close the loop: each spike was rebuilt on the released frameworks (scaffolded by the AI-DLC pipeline, domain code on the E2A contracts) and the three now run together as one Order-to-Cash landscape. Each project keeps its spike on the branch `spike/v1-original`, so the path from spike to framework to project stays visible (Section 17).
 
 This repository uses careful evidence language throughout. Architectural feasibility, reference-runtime validation, and actual production evidence are not treated as interchangeable.
 
@@ -549,18 +554,23 @@ Agent implementations that depend exclusively on supported E2A contracts can rem
 
 ---
 
-## 17. Architectural Spikes & Reference Runtimes
+## 17. From Architectural Spikes to Completed Projects
 
-The project history includes discovery-oriented architectural spikes as well as later/evolved reference runtimes that exercise formalized framework patterns.
+Each project started as a discovery spike and was later rebuilt by consuming the framework family. `main` is the completed project; the branch `spike/v1-original` (tag `spike-v1`) preserves the spike that informed the frameworks.
 
-| Project | Stack | Patterns explored |
+| Project | The spike explored (`spike/v1-original`) | The completed project (`main`) |
 |---|---|---|
-| [Financial Settlement Platform](https://github.com/subhamviky/financial-settlement-platform) | Java / Spring Boot / Kafka / Redis / PostgreSQL | Saga, idempotency, financial-integrity, distributed messaging |
-| [Order-to-Cash Agentic AI](https://github.com/subhamviky/order-to-cash-agentic-ai) | Python / LangGraph / Bedrock / OpenSearch / Terraform | Multi-agent orchestration, RAG, policy controls, NFR-first delivery |
-| [Payment Reconciliation Engine](https://github.com/subhamviky/aws-reconciliation-engine) | Python / FastAPI / Lambda / SQS / DynamoDB / Bedrock | Serverless idempotency, asynchronous processing, DLQ, agent routing |
-| [Capability-Oriented DSA](https://github.com/subhamviky/capability-oriented-dsa) | Python (no runtime dependencies) | Single governed entry point, declared operations, ordered configuration, request-scoped identifiers at small scale; replay protection for sequential retries only |
+| [Financial Settlement Platform](https://github.com/subhamviky/financial-settlement-platform) | Saga, idempotency, double entry and messaging across three Java services (Spring Boot, Kafka, Redis, PostgreSQL) | One Java 21 service on the **Deterministic CQRS profile** (ledger, saga with compensation, transactional outbox, versioned event contract, ledger adjustments) and a Python **E2A agent** that audits outcomes with policy retrieval · Azure Terraform |
+| [Payment Reconciliation Engine](https://github.com/subhamviky/aws-reconciliation-engine) | Serverless idempotency, asynchronous processing and DLQ on AWS, with agent routing planned | Matching on governed **DSA** operations, one DynamoDB transaction per match, an **E2A agent** that proposes and rules that decide, write-offs posted to the settlement ledger · AWS Terraform applied to a moto server in CI |
+| [Order-to-Cash Agentic AI](https://github.com/subhamviky/order-to-cash-agentic-ai) | A multi-agent design (LangGraph, Bedrock, OpenSearch) with policy-as-code | Five **E2A agents** in one `BaseWorkflow`, governed tools with typed outcomes against the two other projects, hybrid RAG, MCP, human approval, an **AI-DLC release gate** · GCP Terraform · the `landscape-demo` that runs all three together |
 
-> **Evidence discipline:** These projects are architecture R&D and reference implementations. They demonstrate architectural feasibility and implementation patterns; they should not be described as production validation unless a specific repository provides explicit evidence of that status.
+All three were scaffolded by the AI-DLC pipeline (P0 + G2C + A2C) from one request file per service; the untouched scaffolds are kept on their `aidlc/*` branches.
+
+| Library | Stack | Patterns |
+|---|---|---|
+| [Capability-Oriented DSA](https://github.com/subhamviky/capability-oriented-dsa) | Python (no runtime dependencies) | Single governed entry point, declared operations, ordered configuration, request-scoped identifiers at small scale; replay protection for sequential retries only. Used by the reconciliation engine (matching) and the O2C assistant (re-ranking). |
+
+> **Evidence discipline:** These projects are architecture R&D and reference implementations. Their CI verifies tests, contracts, Terraform plans (and, for the reconciliation engine, an apply against a local AWS emulator) and a cross-project demo; they use a simulated model and are not deployed. They demonstrate architectural feasibility and implementation patterns; they should not be described as production validation unless a specific repository provides explicit evidence of that status.
 
 ---
 
@@ -574,6 +584,7 @@ Repository documentation uses the following vocabulary deliberately:
 | **Implemented capability** | Present in concrete code |
 | **Architectural spike** | Experiment used to discover or challenge a hypothesis |
 | **Reference runtime** | Implementation used to exercise formal framework patterns |
+| **Completed project** | A spike rebuilt by consuming the released frameworks, verified in CI |
 | **Recommended production pattern** | Guidance requiring contextual validation |
 | **Directional design** | Extension or hypothesis under architectural exploration |
 
