@@ -72,8 +72,9 @@ class BasePipeline(ABC, _PropagationMixin):
             if capacity:
                 raise ValueError('Capacity budget violated: ' + '; '.join(capacity))
             if not self._verify_scaffold_contracts(config, **kwargs):
-                raise ValueError('Scaffold verification failed: Governed Entry Point rules violated '
-                                 '(see e2a.conformance).')
+                # the v1.1 text is kept: release gates and tests match on it
+                raise ValueError('Scaffold verification failed: Single Public Entry Point Rule violated '
+                                 '(v1.2: the Governed Entry Point rules, see e2a.conformance).')
             report['stages']['scaffold_compliance'] = 'PASSED'
             self._log(message_log, correlation_id, 'INFO', 'scaffold_compliance_passed')
  
