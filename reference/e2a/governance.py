@@ -44,13 +44,18 @@ class BaseGovernanceFramework(ABC):
 
     def enforce_governance_gate(self, state: Dict[str, Any], io_config: Dict[str, Any] = None,
                                  config: Dict[str, Any] = None, ctx: Any = None, messages: Any = None,
-                                 **kwargs) -> Dict[str, Any]:
+                                 phase: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Run the ingress stages in order. phase='screen' or 'decide' runs only the
+        stages of that phase (BaseAgent runs 'screen' before _prepare and 'decide'
+        after it); no phase runs them all."""
         config = config or {}
         if self.stages:
             ctx, messages = self.__ensure_context(state, config, ctx, messages, kwargs)
             for stage in self.stages:
-                if isinstance(stage, IngressStage):
+                if isinstance(stage, IngressStage) and phase in (None, getattr(stage, 'phase', 'screen')):
                     state = stage.check(state, ctx, messages)
+            return state
+        if phase == 'screen':           # a v1.1 engine has one gate: it runs at 'decide'
             return state
         io_config = io_config or {}
         if not self._check_execution_capacity(state, io_config, config, **kwargs):

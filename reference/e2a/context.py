@@ -29,7 +29,7 @@ from .stages import ToolRefusal
 _UNSET = object()
 
 # Keys that are object references or per-call values, not settings.
-_NOT_SETTINGS = {'llm_service', 'governance_engine', 'observability_engine', 'idempotency_store',
+_NOT_SETTINGS = {'llm_service', 'governance_engine', 'observability_engine', 'idempotency_store', 'checkpoint_store',
                  'tools', 'resources'}
 
 

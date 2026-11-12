@@ -12,6 +12,14 @@ Design: the v1.2 design notes in the o2c-platform-hub repository (roadmap/design
 - **pytest suite (E-14):** `pytest tests` runs every reference smoke script against the installed package, plus package-layout tests (all v1.1 names importable, one home per public name, every module importable on its own). CI runs it.
 - `smoke_test_llm_service.py`: the "no `os.getenv` outside the registry" check now covers every module of the package.
 
+### Step 7 — Proof: O2C migrated (findings fixed in the framework)
+Migrating the O2C assistant (branch `feature/e2a-v1.2` of order-to-cash-agentic-ai) found four gaps, fixed here:
+- **Screening before reading.** A v1.2 agent ran `_prepare` (reads, retrieval) before the firewall, so an unscreened request (PII, an injection) could reach a retriever. Ingress stages now have a `phase`: `'screen'` stages (capacity, token budget, sandbox, firewall, custom ones by default) run **before** `_prepare`; `'decide'` stages (`ApprovalStage`) run after it, because they need the facts it read. `enforce_governance_gate(…, phase=…)`; no phase runs all, as before.
+- **The checkpoint holds the state at the pause** (after the step's `_prepare`), so the approver sees what the decision is about (the priced order); the step runs again from its start on resume.
+- **A deterministic agent's response** is what its steps put in `state['response']` (it was always `None` without a model step, so a replay returned no result).
+- **Conformance:** framework data attributes a subclass sets (`stages`, `tool_policy`, …) are no R3 finding; `checkpoint_store` is not a setting of the request context.
+Result: O2C's 39 tests and the three-service landscape demo pass on the migrated code; the unmigrated v1.1.2 O2C code also passes its 39 tests on v1.2.
+
 ### Step 6 — Conformance kit (design note 05 §3; rules from note 01)
 - **`e2a.conformance`** checks the Governed Entry Point principle (a public method per genuine capability, delegating to protected hooks and framework-owned private methods): **R1** a framework-owned public or private method overridden (error); **R2** a protected hook called from outside its class (warning; an error with `--strict`, the v1.3 default); **D1** a deprecated public hook overridden (`get_endpoint`); **R3** an extra public method, a review note. The rule sets are read from the e2a classes, and subclasses are followed across files. `python -m e2a.conformance src/ [--strict] [--quiet]` exits 1 on an error; CI runs it strictly over the framework and reference code.
 - **`AgentContract`** pytest kit: run() never raises on a hook error; a model step below `min_confidence` falls back and commits nothing; nothing material after the deadline; the request tenant reaches the result.

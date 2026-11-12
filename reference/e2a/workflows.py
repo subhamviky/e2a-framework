@@ -423,15 +423,17 @@ class BaseWorkflow(ABC, _PropagationMixin):
                     records.append({'step': step.name, 'status': 'SKIPPED'})
                     continue
                 agent = step.agent_for(state)
-                before, started = _snapshot(state), time.time()
+                started = time.time()
                 state.pop('evaluation', None)
                 try:
                     state = self.__run_agent(agent, state, config, run['ctx'], io_config,
                                              message_log, failed_keys, kwargs)
                 except DehydrationInterrupt as d:
-                    before.setdefault('steps', []).append({'step': step.name, 'status': 'PAUSED'})
+                    # the checkpoint holds the state at the pause: after the step's _prepare
+                    # (reads only), so the approver sees the facts the decision is about; on
+                    # resume the step runs again from its start
                     records.append({'step': step.name, 'agent': type(agent).__name__, 'status': 'PAUSED'})
-                    self.__checkpoint(before, state, run['ctx'], step.name, d, config, run['fingerprint'])
+                    self.__checkpoint(_snapshot(state), state, run['ctx'], step.name, d, config, run['fingerprint'])
                     raise
                 status = ('REFUSED' if state.get('refusal') else
                           'FALLBACK' if state.get('evaluation') == 'FALLBACK' else 'DONE')

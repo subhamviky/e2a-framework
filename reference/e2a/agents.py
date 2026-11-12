@@ -98,10 +98,15 @@ class BaseAgent(ABC, _PropagationMixin):
         start = time.time()
         try:
             if v2:
+                # screening stages (capacity, budget, sandbox, firewall) before anything reads the
+                # request; deciding stages (approval) after _prepare has read the facts they need
+                if gov_engine:
+                    state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx, messages=messages,
+                                                               phase='screen', **gate_kw, **kwargs)
                 call_hook(self._prepare, 'prepare', dict(state=state, ctx=ctx, io_read=io_read, messages=messages))
                 if gov_engine:
-                    state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx,
-                                                               messages=messages, **gate_kw, **kwargs)
+                    state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx, messages=messages,
+                                                               phase='decide', **gate_kw, **kwargs)
                 hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs),
                      state=state, ctx=ctx, io_read=io_read, messages=messages, failed_keys=failed)
                 prompt = hook('_build_messages', 'build_messages', (state, config), dict(common, **kwargs),
@@ -138,6 +143,8 @@ class BaseAgent(ABC, _PropagationMixin):
                                                                    outcomes=list(outcomes), messages=messages))
                 if outcome is not None:
                     state['outcome'] = PhysicalOutcome(outcome).value
+            if v2 and prompt is None:   # a deterministic agent: its steps may set state['response']
+                response = state.get('response')
             if gov_engine:
                 extra = dict(ctx=ctx, messages=messages) if v2 else {}
                 response = gov_engine.redact_response(state, response, config, **extra, **common, **kwargs)

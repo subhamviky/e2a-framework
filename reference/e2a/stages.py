@@ -59,8 +59,13 @@ class ApprovalRequired(DehydrationInterrupt):
 
 
 class IngressStage(ABC):
-    """Screens the state before the model or any tool sees it."""
+    """Screens the state before the model or any tool sees it.
+
+    phase: 'screen' stages run before the agent's _prepare (nothing, not even a read
+    or a retrieval, sees an unscreened request); 'decide' stages run after _prepare,
+    because they need the facts it read (ApprovalStage needs the amount)."""
     name = 'ingress'
+    phase = 'screen'
 
     @abstractmethod
     def check(self, state: Dict[str, Any], ctx, messages) -> Dict[str, Any]:
@@ -132,6 +137,7 @@ class ApprovalStage(IngressStage):
     that carries state['approval_granted'] passes. The workflow stores the checkpoint
     and continues it with resume()."""
     name = 'approval'
+    phase = 'decide'
 
     def __init__(self, required: Optional[Callable[[Dict[str, Any], Any], bool]] = None,
                  reason: str = 'human approval required') -> None:

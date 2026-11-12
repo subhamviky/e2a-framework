@@ -52,6 +52,7 @@ class _FrameworkClass:
     abstract_public: frozenset
     private: frozenset        # '__name' methods
     hooks: frozenset          # '_name' methods
+    attributes: frozenset     # public data attributes (stages, tool_policy, ...): set by subclasses
 
 
 def _framework_classes() -> Dict[str, _FrameworkClass]:
@@ -61,13 +62,15 @@ def _framework_classes() -> Dict[str, _FrameworkClass]:
         cls = getattr(e2a, name)
         if not inspect.isclass(cls) or not cls.__module__.startswith('e2a.'):
             continue
-        owned, abstract, private, hooks = set(), set(), set(), set()
+        owned, abstract, private, hooks, attributes = set(), set(), set(), set(), set()
         for klass in cls.__mro__:
             if not klass.__module__.startswith('e2a.'):
                 continue
             prefix = f'_{klass.__name__}__'
             for attr, value in vars(klass).items():
                 if not callable(value) and not isinstance(value, (staticmethod, classmethod, property)):
+                    if not attr.startswith('_'):
+                        attributes.add(attr)
                     continue
                 if attr.startswith(prefix):
                     private.add('__' + attr[len(prefix):])
@@ -80,7 +83,7 @@ def _framework_classes() -> Dict[str, _FrameworkClass]:
                 else:
                     owned.add(attr)
         found[name] = _FrameworkClass(frozenset(owned - abstract), frozenset(abstract),
-                                      frozenset(private), frozenset(hooks))
+                                      frozenset(private), frozenset(hooks), frozenset(attributes))
     return found
 
 
@@ -147,7 +150,8 @@ def check_sources(sources: Dict[str, str]) -> List[Finding]:
             if not roots:
                 continue
             owned = frozenset().union(*(framework[r].owned for r in roots))
-            known = owned | frozenset().union(*(framework[r].abstract_public | framework[r].hooks for r in roots))
+            known = owned | frozenset().union(*(framework[r].abstract_public | framework[r].hooks |
+                                                framework[r].attributes for r in roots))
             private = frozenset().union(*(framework[r].private for r in roots))
             for item in node.body:
                 if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
