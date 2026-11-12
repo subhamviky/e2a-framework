@@ -2,6 +2,21 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.1.1 — Propagation fixes
+
+### Fixed
+- `BaseWorkflow.execute()`: propagation fields passed as keywords (`idempotency_key`, `correlation_id`, `io_config`, `tenant_id`, `message_log`, `failed_keys`) are resolved once and no longer forwarded a second time to `agent.run()` and the hooks. In v1.1.0 a client `idempotency_key=` or `correlation_id=` keyword raised `TypeError: got multiple values for keyword argument`.
+- `BaseToolService.execute()`: `tenant_id` now reaches `_build_payload()` and `_send_request()` (it already reached `get_endpoint()`), so a transport can scope the call to the tenant.
+
+### Added
+- `reference/smoke_test_propagation.py` (7 checks), run by CI on Python 3.11 and 3.12.
+
+### Changed
+- CI uses `actions/checkout@v6` and `actions/setup-python@v6` (Node 24).
+
+### Compatibility
+- No public signature changes. Code that worked around v1.1.0 (client key in `state['idempotency_key']`, tenant in the tool payload) keeps working unchanged.
+
 ## v1.1.0 — Consumable framework
 
 ### Added

@@ -15,8 +15,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install the package
@@ -27,7 +27,7 @@ jobs:
         shell: bash
         working-directory: reference
         run: |
-          for t in smoke_test_llm_service smoke_test_concurrency smoke_test_cqrs_concurrency smoke_test_simulated_llm; do
+          for t in smoke_test_llm_service smoke_test_concurrency smoke_test_cqrs_concurrency smoke_test_simulated_llm smoke_test_propagation; do
             echo "== $t"
             python -I "$t.py" | tail -1
           done

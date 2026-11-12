@@ -12,9 +12,9 @@ It focuses on the boundary where probabilistic reasoning meets deterministic ent
 
 ## Install
 
-    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.1.0"
+    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.1.1"
 
-Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.1.0" }`.
+Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.1.1" }`.
 The modules keep their names: `from e2a_base import BaseAgent`, `from e2a_simulated_llm import SimulatedLLMService`.
 
 ## 1. Origin — From Architectural Spikes to E2A

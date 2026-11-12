@@ -1844,6 +1844,12 @@ class BaseWorkflow(ABC, _PropagationMixin):
         io_config = self._resolve_io_config(config, **kwargs)
         deadline = self.__resolve_deadline(config, kwargs)
         idempotency_key = self.__resolve_idempotency(state, config, **kwargs)
+        # The propagation fields are resolved above and passed on explicitly below;
+        # removing them from kwargs keeps a caller-supplied value from reaching a hook
+        # twice ("got multiple values for keyword argument").
+        for field in ('correlation_id', 'idempotency_key', 'io_config', 'tenant_id',
+                      'message_log', 'failed_keys'):
+            kwargs.pop(field, None)
         message_log: List[dict] = []
         failed_keys: List[str] = []
         state['tenant_id'] = tenant_id
@@ -2130,8 +2136,9 @@ class BaseToolService(ABC, _PropagationMixin):
         if key and not self._commit_gate(key, failed_keys, config, **kwargs):
             return {'status': 'blocked', 'reason': 'commit_gate'}
         endpoint = self.get_endpoint(config, tenant_id=tenant_id, **kwargs)
-        body = self._build_payload(payload, config, **kwargs)
-        return await self.__http_post(endpoint, body, config, **kwargs)
+        # tenant_id reaches every hook, so a transport can scope the call (v1.1.1)
+        body = self._build_payload(payload, config, tenant_id=tenant_id, **kwargs)
+        return await self.__http_post(endpoint, body, config, tenant_id=tenant_id, **kwargs)
  
     @abstractmethod
     def get_endpoint(self, config=None, tenant_id=None, **kwargs):
