@@ -17,6 +17,14 @@ It focuses on the boundary where probabilistic reasoning meets deterministic ent
 Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.1.2" }`.
 The modules keep their names: `from e2a_base import BaseAgent`, `from e2a_simulated_llm import SimulatedLLMService`.
 
+### Compatibility
+
+| e2a-framework | a2c-framework | capability-oriented-dsa |
+|---|---|---|
+| `v1.1.2` | `v1.1.2` | `v0.2.x` |
+| `v1.1.1` | `v1.1.1` | `v0.2.0` |
+| `v1.1.0` | `v1.1.0` | `v0.2.0` |
+
 ## 1. Origin — From Architectural Spikes to E2A
 
 E2A did not start as a top-down attempt to invent an Agentic AI framework.
