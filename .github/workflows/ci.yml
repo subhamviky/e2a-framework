@@ -27,7 +27,7 @@ jobs:
         shell: bash
         working-directory: reference
         run: |
-          for t in smoke_test_llm_service smoke_test_concurrency smoke_test_cqrs_concurrency smoke_test_simulated_llm smoke_test_propagation; do
+          for t in smoke_test_llm_service smoke_test_concurrency smoke_test_cqrs_concurrency smoke_test_simulated_llm smoke_test_propagation smoke_test_v112; do
             echo "== $t"
             python -I "$t.py" | tail -1
           done

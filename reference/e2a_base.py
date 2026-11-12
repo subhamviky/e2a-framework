@@ -9,6 +9,7 @@ import json
 import uuid
 import time
 import asyncio
+import inspect
 import hashlib
 import logging
 import threading
@@ -46,6 +47,13 @@ class NFRViolationError(Exception):
 
 _BRIDGE = {'loop': None}
 _BRIDGE_LOCK = threading.Lock()
+
+
+def run_sync(coro, timeout: Optional[float] = None):
+    """Public bridge (v1.1.2): run a coroutine, for example a tool's execute(), from
+    synchronous code such as an agent hook, on the shared background loop that the
+    framework's semaphores and resilience policies are bound to."""
+    return _run_on_bridge_loop(coro, timeout=timeout)
 
 
 def _run_on_bridge_loop(coro, timeout: Optional[float] = None):
@@ -917,7 +925,7 @@ class BaseGovernanceFramework(ABC):
         config = config or {}
         if not self._check_execution_capacity(state, io_config, config, **kwargs):
             raise NFRViolationError('Execution capacity exceeded; admission rejected.')
-        self.__enforce_token_budget(state, io_config)
+        self.__enforce_token_budget(state, io_config, config)
         if state.get('requires_human_approval') and not state.get('approval_granted'):
             self.__trigger_dehydration(state, config, **kwargs)
         if state.get('pending_mcp_tool_execution'):
@@ -933,10 +941,16 @@ class BaseGovernanceFramework(ABC):
         config = config or {}
         return self._redact_output_fields(state, response, config, **kwargs)
  
-    def __enforce_token_budget(self, state: Dict[str, Any], io_config: Dict[str, Any]) -> None:
+    def __enforce_token_budget(self, state: Dict[str, Any], io_config: Dict[str, Any],
+                               config: Dict[str, Any] = None) -> None:
         # Base-owned. Stops the request before another LLM call is made,
-        # not after.
-        max_budget = resolve_config('max_token_budget', io_config)
+        # not after. v1.1.2: io_config only carries io_-prefixed keys, so the
+        # budget is resolved from io_config (max_token_budget or
+        # io_max_token_budget), then from config, then the registry default.
+        io_config = io_config or {}
+        max_budget = io_config.get('max_token_budget', io_config.get('io_max_token_budget'))
+        if max_budget is None:
+            max_budget = resolve_config('max_token_budget', config)
         used = state.get('cumulative_tokens_used', 0)
         if used >= max_budget:
             raise ValueError(
@@ -1047,6 +1061,12 @@ class BaseValidationService(ABC, _PropagationMixin):
         entitlement_policy_registry. Runs only after schema validation
         already succeeded."""
  
+    def _result(self, valid, errors, agent_name, correlation_id, **extra) -> 'ValidationResult':
+        """Protected (v1.1.2): lets a subclass, typically _enforce_entitlement_gate(),
+        build a result in the framework's shape, with extra fields such as forbidden=True."""
+        return ValidationResult(valid=valid, errors=errors, agent_name=agent_name,
+                                correlation_id=correlation_id, **extra)
+
     def __build_result(self, valid, errors, agent_name, correlation_id) -> 'ValidationResult':
         """PRIVATE, framework-owned. Never overridden."""
         return ValidationResult(valid=valid, errors=errors,
@@ -1781,7 +1801,12 @@ class BaseAgent(ABC, _PropagationMixin):
         state['tenant_id'] = tenant_id
         state['correlation_id'] = correlation_id
         if latency > max_latency:
-            raise NFRViolationError(f'Agent run latency SLO breached: {latency:.2f}s > {max_latency}s')
+            # v1.1.2: recorded, not raised. The run has finished and may have committed
+            # a material effect; raising now would report a committed outcome as a
+            # failure. Enforcement before effects is the job of the request deadline.
+            state['slo_breached'] = {'latency': round(latency, 3), 'max_latency': max_latency}
+            self._log(message_log, correlation_id, 'WARN', 'agent_latency_slo_breached',
+                      latency=round(latency, 3), max_latency=max_latency)
         return state
  
     @abstractmethod
@@ -2014,7 +2039,7 @@ class BaseRAGPipeline(ABC, _PropagationMixin):
     def retrieve(self, query: str, config: Dict[str, Any] = None,
                  tenant_id: str = None, **kwargs) -> List[dict]:
         config = config or {}
-        vector = self.__embed(query, config, **kwargs)
+        vector = self._embed_query(query, config, **kwargs)
         # hybrid: the index gets BOTH the raw text (keyword/BM25 leg)
         # and the vector (semantic leg) and fuses them itself.
         results = self._search_index(query_text=query, query_vector=vector,
@@ -2035,7 +2060,9 @@ class BaseRAGPipeline(ABC, _PropagationMixin):
     def _evaluate_answer(self, answer, config=None, **kwargs):
         """kwargs: groundedness_threshold"""
  
-    def __embed(self, query, config=None, **kwargs):
+    def _embed_query(self, query, config=None, **kwargs):
+        """Protected hook (v1.1.2): embed the query with the same model the indexing
+        pipeline used for the documents. The default is the provider placeholder."""
         model = resolve_config('embedding_model', config, kwargs)
         return [0.0]  # provider call
  
@@ -2253,7 +2280,13 @@ class BaseMCPServer(ABC, _PropagationMixin):
               config: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """Public entry point. Single JSON-RPC dispatch surface for the
         server, mirroring run()/execute()/retrieve()."""
-        return self.__dispatch_jsonrpc(request, config, **kwargs)
+        response = self.__dispatch_jsonrpc(request, config, **kwargs)
+        # v1.1.2: tools/call delegates to an async handler; complete it here so the
+        # caller always receives a finished JSON-RPC result, never a coroutine.
+        if inspect.isawaitable(response.get('result')):
+            response['result'] = run_sync(response['result'],
+                                          timeout=float(resolve_config('timeout', config, kwargs)) * 4)
+        return response
  
     def wrap_api_as_tool(self, handler, tool_name: str, description: str,
                           input_schema: dict, config: Dict[str, Any] = None,
