@@ -12,6 +12,14 @@ Design: the v1.2 design notes in the o2c-platform-hub repository (roadmap/design
 - **pytest suite (E-14):** `pytest tests` runs every reference smoke script against the installed package, plus package-layout tests (all v1.1 names importable, one home per public name, every module importable on its own). CI runs it.
 - `smoke_test_llm_service.py`: the "no `os.getenv` outside the registry" check now covers every module of the package.
 
+### Step 4 — Entry points (design note 01, principle E-15: one governed pathway, several public capabilities where they are real)
+- **RAG ports:** `BaseEmbeddingModel` (`model_id`, `embed_documents`, `embed_query`) and `BaseVectorIndex` (`upsert`, `delete`, `search`). With `embedding_model` / `vector_index` set, `BaseRAGPipeline` and `BaseIndexingPipeline` have working defaults for `_embed_query`, `_search_index`, `_embed_documents`, `_write_index` and `_delete_from_index` (namespace `f'{namespace_prefix}_{tenant}'`); those hooks are no longer abstract.
+- **`BaseRAGPipeline.evaluate_answer(answer, retrieved)`:** public, delegates to `_evaluate_answer`; agents and release gates no longer call the protected hook.
+- **`RAGPipeline` façade:** `ingest` / `retrieve` / `evaluate_answer` over the two pipelines, which stay separate classes; a different embedding model on either side is refused at construction.
+- **`retrieve(…, ctx=…)` and `ingest(…, ctx=…)`:** the tenant (and correlation) come from the request context; a different `tenant_id` keyword is refused.
+- **`BaseMCPServer.serve_async`:** the same JSON-RPC surface for async hosts; awaits the tool on the running loop.
+- **`BaseToolService._get_endpoint`:** the endpoint is a protected hook; `get_endpoint` stays as a deprecated alias. A v1.1 subclass that overrides `get_endpoint` keeps precedence (also over `RestToolService`'s own `_get_endpoint`), with one `DeprecationWarning`.
+
 ### Step 3 — Governance as stages (design note 04)
 - **`e2a.stages`:** `IngressStage` / `EgressStage` and the built-in stages `CapacityStage` (with `InflightLimiter` and dependency breakers), `TokenBudgetStage` (reads `ctx.setting('max_token_budget')`), `ApprovalStage` (raises `ApprovalRequired`, a `DehydrationInterrupt`), `SandboxStage`, `FirewallStage` (injection patterns, maximum length, redaction of state fields) and `RedactionStage` (egress); `compile_redactions` / `redact_text` for policy files.
 - **Typed refusals:** `GovernanceRefusal` (`code`, `stage`, `reason`, `retryable`) with `CapacityRefusal`, `TokenBudgetRefusal`, `FirewallRefusal`, `SandboxRefusal`, `ToolRefusal`, each also the exception type v1.1 raised (`NFRViolationError`, `ValueError`, `PermissionError`). A refused v1.2 agent run records `state['refusal']`.

@@ -11,7 +11,7 @@ from .validation import ValidationResult, BaseValidationService, OrderOpsValidat
 from .llm import DLP_MARKER, BaseLLMAgentService
 from .agents import BaseAgent, LLMOnlyAgent
 from .workflows import BaseWorkflow
-from .rag import BaseRAGPipeline, BaseIndexingPipeline
+from .rag import BaseRAGPipeline, BaseIndexingPipeline, BaseEmbeddingModel, BaseVectorIndex, RAGPipeline
 from .tools import BaseToolService, RestToolService, MCPToolService, BaseMCPServer
 from .ports import BasePromptRegistry, BaseTransactionalStore, BaseCacheStore, BaseIdempotencyStore, BaseDistributedLock, BaseWebhookDispatcher, BaseSchemaTransformer, BaseMemoryManager, BaseOutboxSweeper, BaseReconciliationService
 from .pipeline import BasePipeline

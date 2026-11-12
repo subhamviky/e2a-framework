@@ -23,6 +23,7 @@ from .core import Deadline, PhysicalOutcome
 from .config import resolve_config
 from .resilience import ResiliencePolicy, run_sync
 from ._propagation import _PropagationMixin
+from ._contract import warn_legacy
  
 # ==================================================
 # BaseToolService  (client — REST or MCP transport)
@@ -55,23 +56,35 @@ class BaseToolService(ABC, _PropagationMixin):
         key = kwargs.get('idempotency_key', payload.get('idempotency_key'))
         if key and not self._commit_gate(key, failed_keys, config, **kwargs):
             return {'status': 'blocked', 'reason': 'commit_gate'}
-        endpoint = self.get_endpoint(config, tenant_id=tenant_id, **kwargs)
+        if type(self).get_endpoint is not BaseToolService.get_endpoint:
+            # a v1.1 subclass overrides the public get_endpoint(): it wins over any
+            # _get_endpoint() inherited from RestToolService/MCPToolService (until v1.3)
+            warn_legacy(type(self), 'get_endpoint')
+            endpoint = self.get_endpoint(config, tenant_id=tenant_id, **kwargs)
+        else:
+            endpoint = self._get_endpoint(config, tenant_id=tenant_id, **kwargs)
         # tenant_id reaches every hook, so a transport can scope the call (v1.1.1)
         body = self._build_payload(payload, config, tenant_id=tenant_id, **kwargs)
         return await self.__http_post(endpoint, body, config, tenant_id=tenant_id, **kwargs)
  
-    @abstractmethod
+    def _get_endpoint(self, config=None, tenant_id=None, **kwargs):
+        """Protected hook (v1.2, E-19): where to send the call. kwargs: base_url,
+        service_name, tenant_routing_map. A v1.1 subclass that overrides the public
+        get_endpoint() keeps working until v1.3 (execute() calls that override)."""
+        raise NotImplementedError('implement _get_endpoint()')
+
     def get_endpoint(self, config=None, tenant_id=None, **kwargs):
-        """kwargs: base_url, service_name, tenant_routing_map"""
- 
+        """Deprecated public alias of _get_endpoint() (removed in v1.3)."""
+        return self._get_endpoint(config, tenant_id=tenant_id, **kwargs)
+
     @abstractmethod
     def _build_payload(self, payload, config=None, **kwargs):
         """kwargs: schema, enrichments"""
- 
+
     @abstractmethod
     def _validate_input(self, payload, config=None, **kwargs):
         """kwargs: schema, required_fields"""
- 
+
     # PRIVATE — framework owns HTTP mechanics, resilience and outcome typing
     def _resilience_policy(self, config=None, kwargs=None) -> 'ResiliencePolicy':
         """One ResiliencePolicy (retry budget, circuit, bulkhead) per tool
@@ -120,7 +133,7 @@ class BaseToolService(ABC, _PropagationMixin):
 class RestToolService(BaseToolService):
     """Classic REST/HTTP tool."""
  
-    def get_endpoint(self, config=None, tenant_id=None, **kwargs):
+    def _get_endpoint(self, config=None, tenant_id=None, **kwargs):
         config = config or {}
         routing = resolve_config('tenant_routing_map', config, kwargs)
         if tenant_id and tenant_id in routing:
@@ -141,7 +154,7 @@ class MCPToolService(BaseToolService):
     Points at either an external MCP server or one hosted locally via
     a BaseMCPServer instance."""
  
-    def get_endpoint(self, config=None, tenant_id=None, **kwargs):
+    def _get_endpoint(self, config=None, tenant_id=None, **kwargs):
         config = config or {}
         return resolve_config('mcp_server_url', config, kwargs)
  
@@ -181,6 +194,15 @@ class BaseMCPServer(ABC, _PropagationMixin):
                                           timeout=float(resolve_config('timeout', config, kwargs)) * 4)
         return response
  
+    async def serve_async(self, request: Dict[str, Any], config: Dict[str, Any] = None,
+                          **kwargs) -> Dict[str, Any]:
+        """Public (v1.2): the same JSON-RPC surface for async hosts (ASGI). Awaits the
+        tool call on the caller's loop instead of blocking it."""
+        response = self.__dispatch_jsonrpc(request, config, **kwargs)
+        if inspect.isawaitable(response.get('result')):
+            response['result'] = await response['result']
+        return response
+
     def wrap_api_as_tool(self, handler, tool_name: str, description: str,
                           input_schema: dict, config: Dict[str, Any] = None,
                           **kwargs) -> None:
