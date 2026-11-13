@@ -118,6 +118,7 @@ def test_retrieve_and_ingest_take_the_tenant_from_the_context():
         pipeline.retrieve("payment", tenant_id="other", ctx=ctx)
 
 
+@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_pipeline_without_ports_still_needs_its_own_hooks():
     class Old(BaseRAGPipeline):
         def _rerank(self, results, config=None, **kw): return results
@@ -170,6 +171,7 @@ def test_the_endpoint_is_a_protected_hook_and_the_public_name_is_an_alias():
     assert MCPToolService()._get_endpoint({"mcp_server_url": "http://mcp"}) == "http://mcp"
 
 
+@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_get_endpoint_override_still_works_and_is_told_once_to_migrate():
     class Legacy(RestToolService):                 # as O2C's HttpJsonTool: inherits a _get_endpoint
         def _build_payload(self, payload, config=None, **kw): return payload

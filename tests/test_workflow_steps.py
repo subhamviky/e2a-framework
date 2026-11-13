@@ -180,6 +180,7 @@ def test_the_decision_hooks_can_be_specialised():
     assert ok["outcome"] == "COMMITTED"
 
 
+@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_workflow_that_pauses_can_be_resumed_too():
     payer = Payer()
 

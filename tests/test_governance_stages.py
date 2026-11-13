@@ -20,7 +20,7 @@ class Engine(BaseGovernanceFramework):
 
 
 class Lookup(BaseToolService):
-    def get_endpoint(self, config=None, tenant_id=None, **kw): return "local://lookup"
+    def _get_endpoint(self, config=None, tenant_id=None, **kw): return "local://lookup"
     def _build_payload(self, payload, config=None, **kw): return payload
     def _validate_input(self, payload, config=None, **kw): return True
     async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **kw):
@@ -114,6 +114,7 @@ def test_the_engine_tool_policy_limits_what_an_agent_can_reach():
     assert state["refusal"]["code"] == "TOOL_DENIED"
 
 
+@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_engine_without_stages_runs_as_before_with_typed_refusals():
     class Old(BaseGovernanceFramework):
         def _check_execution_capacity(self, state, io_config, config=None, **kw): return False
@@ -124,6 +125,7 @@ def test_a_v1_1_engine_without_stages_runs_as_before_with_typed_refusals():
     assert Old().redact_response({}, {"text": "x"}, {}) == {"text": "x"}
 
 
+@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_agent_with_a_governance_engine_runs():
     """Regression: since v1.1, BaseAgent.run passed io_config twice to the gate, so any agent
     configured with a governance_engine failed with 'multiple values for argument io_config'."""

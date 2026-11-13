@@ -5,7 +5,7 @@
     <parent>
         <groupId>com.subhamviky.e2a</groupId>
         <artifactId>e2a-java</artifactId>
-        <version>1.2.2</version>
+        <version>1.2.3</version>
     </parent>
     <artifactId>e2a-cqrs</artifactId>
     <name>e2a-cqrs</name>

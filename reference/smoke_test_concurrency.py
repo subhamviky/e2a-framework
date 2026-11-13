@@ -66,11 +66,10 @@ check('reconciler takes over with recover=True; stale owner cannot complete',
 # ---- workflow integration: claim -> run -> complete / replay / UNKNOWN ----
 class Ag(BaseAgent):
     runs = 0
-    def _build_messages(self, state, config=None, **k): return list(M)
-    def _apply_policy(self, state, config=None, **k): pass
-    def _evaluate_output(self, r, state, config=None, **k): return 0.99
-    def _fallback(self, state, config=None, **k): return {'text': 'fb'}
-    def _handle_error(self, e, state, config=None, **k): state['err'] = str(e)
+    def _build_messages(self, state, ctx): return list(M)          # E2A v1.2 hooks (V13-01)
+    def _evaluate_output(self, response, state, ctx): return 0.99
+    def _fallback(self, state, ctx): return {'text': 'fb'}
+    def _handle_error(self, error, state, ctx): state['err'] = str(error)
     def run(self, state, config=None, **k):
         Ag.runs += 1
         if state.get('unknown'): state['outcome'] = 'UNKNOWN'
@@ -234,7 +233,7 @@ check('T-11 drain: in-flight finishes, new work rejected, readiness flips',
 # ---- T-06 retry storm bounded by the budget; circuit opens ----
 class Tool(BaseToolService):
     sent = 0
-    def get_endpoint(self, config=None, tenant_id=None, **k): return 'http://x'
+    def _get_endpoint(self, config=None, tenant_id=None, **k): return 'http://x'
     def _build_payload(self, payload, config=None, **k): return payload
     def _validate_input(self, payload, config=None, **k): return True
     async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **k):

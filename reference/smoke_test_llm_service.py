@@ -101,12 +101,11 @@ check('bypass_cache goes upstream', s.calls == 1)
 s = FakeLLM(); run(s.process_inference(M, tenant_id='t1', tools=[{'name': 'f', 'input_schema': {'type': 'object'}}]))
 check('tool schema compiled', s.last['tools'][0]['parameters'] == {'type': 'object'})
 # 16 BaseAgent integration via sync bridge
-class A(BaseAgent):
-    def _build_messages(self, state, config=None, **k): return list(M)
-    def _apply_policy(self, state, config=None, **k): pass
-    def _evaluate_output(self, r, state, config=None, **k): return 0.99
-    def _fallback(self, state, config=None, **k): return {'text': 'fb'}
-    def _handle_error(self, e, state, config=None, **k): state['err'] = str(e)
+class A(BaseAgent):                                                  # E2A v1.2 hooks (V13-01)
+    def _build_messages(self, state, ctx): return list(M)
+    def _evaluate_output(self, response, state, ctx): return 0.99
+    def _fallback(self, state, ctx): return {'text': 'fb'}
+    def _handle_error(self, error, state, ctx): state['err'] = str(error)
 svc = FakeLLM(text='hello')
 st = A().run({'tenant_id': 't1'}, {'llm_service': svc, 'max_latency': 5.0})
 check('BaseAgent.run delegates to service', st['response']['text'] == 'hello' and st['cumulative_tokens_used'] == 10)

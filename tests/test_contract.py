@@ -17,7 +17,7 @@ class Tool(BaseToolService):
     def __init__(self, material=False, fail=False):
         self.material, self.fail, self.calls = material, fail, []
 
-    def get_endpoint(self, config=None, tenant_id=None, **kw):
+    def _get_endpoint(self, config=None, tenant_id=None, **kw):
         return "local://tool"
 
     def _build_payload(self, payload, config=None, **kw):
@@ -205,6 +205,7 @@ def test_outputs_are_explicit():
     assert state["outcome"] == "COMMITTED"
 
 
+@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_agent_still_runs_and_is_told_once_to_migrate():
     class Old(BaseAgent):
         def _build_messages(self, state, config=None, **kw): return [{"role": "user", "content": "x"}]

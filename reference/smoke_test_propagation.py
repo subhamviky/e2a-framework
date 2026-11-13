@@ -23,20 +23,20 @@ def check(name, cond):
     print('PASS', name)
 
 
-class EchoAgent(BaseAgent):
-    def _build_messages(self, state, config=None, **kw):
+class EchoAgent(BaseAgent):            # E2A v1.2 hooks (V13-01): the propagated fields arrive in ctx
+    def _build_messages(self, state, ctx):
         return [{'role': 'user', 'content': 'hi'}]
 
-    def _apply_policy(self, state, config=None, **kw):
-        state['seen_key'] = state.get('idempotency_key')
+    def _apply_policy(self, state, ctx):
+        state['seen_key'] = ctx.idempotency_key
 
-    def _evaluate_output(self, response, state, config=None, **kw):
+    def _evaluate_output(self, response, state, ctx):
         return 1.0
 
-    def _fallback(self, state, config=None, **kw):
+    def _fallback(self, state, ctx):
         return {'text': ''}
 
-    def _handle_error(self, error, state, config=None, **kw):
+    def _handle_error(self, error, state, ctx):
         state.setdefault('errors', []).append(repr(error))
 
 
@@ -69,7 +69,7 @@ check('the same key again is a replay', again.get('status') == 'REPLAYED')
 
 
 class TenantTool(BaseToolService):
-    def get_endpoint(self, config=None, tenant_id=None, **kw):
+    def _get_endpoint(self, config=None, tenant_id=None, **kw):
         return f'local://{tenant_id}'
 
     def _build_payload(self, payload, config=None, **kw):
@@ -83,7 +83,7 @@ class TenantTool(BaseToolService):
 
 
 result = asyncio.run(TenantTool().execute({'x': 1}, {}, tenant_id='t9'))
-check('get_endpoint receives tenant_id', result['endpoint'] == 'local://t9')
+check('_get_endpoint receives tenant_id', result['endpoint'] == 'local://t9')
 check('_build_payload receives tenant_id', result['body']['built_for'] == 't9')
 check('_send_request receives tenant_id', result['sent_for'] == 't9')
 print(f'\n{ok} checks passed')

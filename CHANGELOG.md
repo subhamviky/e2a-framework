@@ -2,6 +2,24 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.2.3 — Preparing for v1.3 (design note V13-01)
+
+Nothing is removed and no contract changed; this release makes E2A's own code ready for v1.3.
+
+### Changed
+- **The reference orchestrator** (`multimodal_orchestrator.py`) uses the v1.2 hooks:
+  - `RAGAgent` retrieves in `_prepare` and scores with the pipeline's public `evaluate_answer`;
+  - `APIToolAgent` and `MCPToolAgent` are deterministic agents whose tool call is the material `_act`, with the typed result deciding `state['outcome']`;
+  - `FallbackAgent` is on the v1.2 hooks.
+  - Its workflow keeps the v1.1 workflow form (a graph and `_get_agent`), which v1.2 never deprecated.
+- **The reference smoke scripts:** their test agents and tools use the v1.2 hooks and `_get_endpoint`. The propagation script now checks that the propagated fields arrive in `ctx`.
+- **e2a-java:** version `1.2.3`, unchanged.
+
+### Added
+- **A guard** in `tests/conftest.py`: a test that uses the v1.1 adapters fails, unless it is marked `@pytest.mark.v11_adapters`. The six tests marked this way exercise the adapters on purpose and become the tests that v1.3 refuses them.
+- **`tests/test_smoke_scripts.py`:** runs the scripts with warnings shown and fails on any v1.1 adapter use.
+- **Result:** 79 tests pass.
+
 ## v1.2.2 — A release gate every project can reuse, and e2a-java
 
 ### Added — `e2a.release` (design note C-04, D-1)

@@ -48,7 +48,7 @@ check('E-1 a request within the budget passes', True)
 
 # ---------------------------------------------------------------- E-2
 class EchoTool(BaseToolService):
-    def get_endpoint(self, config=None, tenant_id=None, **kw): return 'local://echo'
+    def _get_endpoint(self, config=None, tenant_id=None, **kw): return 'local://echo'
     def _build_payload(self, payload, config=None, **kw): return payload
     def _validate_input(self, payload, config=None, **kw): return True
     async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **kw):
@@ -70,13 +70,14 @@ check('E-2 the tool really ran', "'echo': 7" in answer['result']['content'][0]['
 # ---------------------------------------------------------------- E-3
 class SlowAgent(BaseAgent):
     effects = 0
-    def _build_messages(self, state, config=None, **kw): return [{'role': 'user', 'content': 'x'}]
-    def _apply_policy(self, state, config=None, **kw):
+    def _build_messages(self, state, ctx): return [{'role': 'user', 'content': 'x'}]   # E2A v1.2 hooks (V13-01)
+    def _act(self, state, ctx):
         time.sleep(0.05)
         SlowAgent.effects += 1                     # a material effect that has committed
-    def _evaluate_output(self, response, state, config=None, **kw): return 1.0
-    def _fallback(self, state, config=None, **kw): return {'text': ''}
-    def _handle_error(self, error, state, config=None, **kw): state['error'] = repr(error)
+        return []
+    def _evaluate_output(self, response, state, ctx): return 1.0
+    def _fallback(self, state, ctx): return {'text': ''}
+    def _handle_error(self, error, state, ctx): state['error'] = repr(error)
 
 
 cfg = {'llm_service': SimulatedLLMService().add_rule('any', always(), 'ok'), 'max_latency': 0.01}

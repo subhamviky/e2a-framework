@@ -86,90 +86,76 @@ class ModalityPreprocessor:
 # of left to config['mcp_server_registry'] auto-detection.
 # ======================================================================
 class RAGAgent(BaseAgent):
+    """E2A v1.2 hooks: retrieval in _prepare (after the screening stages), grounding in the
+    prompt, the pipeline's public evaluate_answer() as the evaluation."""
     agent_name = "RAGAgent"
 
     def __init__(self, rag_pipeline: BaseRAGPipeline):
         self.rag_pipeline = rag_pipeline  # composed in, not inherited —
         # same pattern as prompt_registry in Section 4.7
 
-    def _build_messages(self, state, config=None, tenant_id=None, **kwargs):
-        results = self.rag_pipeline.retrieve(
-            state["query"], config, tenant_id=tenant_id, **kwargs)
-        grounding = "\n".join(r.get("text", "") for r in results)
-        return [{"role": "user", "content": f"{grounding}\n\n{state['query']}"}]
+    def _prepare(self, state, ctx):
+        results = self.rag_pipeline.retrieve(state["query"], dict(ctx.settings), ctx=ctx)
+        state["grounding"] = "\n".join(r.get("text", "") for r in results)
 
-    def _apply_policy(self, state, config=None, **kwargs):
-        pass  # grounding already resolved in _build_messages(); no tool call
+    def _build_messages(self, state, ctx):
+        return [{"role": "user", "content": f"{state.get('grounding', '')}\n\n{state['query']}"}]
 
-    def _evaluate_output(self, response, state, config=None, **kwargs):
+    def _evaluate_output(self, response, state, ctx):
         # v1.2: scoring an answer is a public capability of the pipeline
         # (evaluate_answer); its protected hook stays inside the pipeline (rule R2).
-        return self.rag_pipeline.evaluate_answer(
-            response.get("text", ""), config=config, **kwargs)
+        return self.rag_pipeline.evaluate_answer(response.get("text", ""), config=dict(ctx.settings))
 
-    def _fallback(self, state, config=None, **kwargs):
+    def _fallback(self, state, ctx):
         return {"text": "", "metadata": {"degraded": True, "reason": "faithfulness_threshold"}}
 
-    def _handle_error(self, error, state, config=None, **kwargs):
-        kwargs["failed_keys"].append(state.get("correlation_id"))
+    def _handle_error(self, error, state, ctx, failed_keys):
+        failed_keys.add(state.get("correlation_id") or ctx.correlation_id)
 
 
-class APIToolAgent(BaseAgent):
+class _ToolAgent(BaseAgent):
+    """A deterministic agent (no model step): the tool call is the agent's material act
+    (_act, only after the screening and decision stages and before the deadline), and its
+    typed result decides the outcome (Logical-vs-Physical rule, Section 2.6)."""
+    transport = "http"
+
+    def _build_messages(self, state, ctx):
+        return None
+
+    def _call(self, service, state, ctx, config):
+        return service.execute(state.get("tool_payload", {}), config, ctx=ctx)
+
+    def _act(self, state, ctx):
+        # _get_tool_service() is the same registry-resolution function _resolve_tool_call()
+        # calls internally (Section 2.8), with the transport pinned, so the long-lived
+        # instance per dependency (and its circuit and retry budget) is reused.
+        config = dict(ctx.settings)
+        service = _get_tool_service(state["tool_name"], config, transport=self.transport)
+        result = _run_tool(self._call(service, state, ctx, config), config, {"deadline": ctx.deadline})
+        state["tool_result"] = result
+        state["response"] = ({"text": "", "tool_result": result} if result.get("physical_success") else
+                             {"text": "", "metadata": {"degraded": True, "reason": f"{self.transport}_tool_call_failed"}})
+        return [result]               # typed: COMMITTED / NOT_COMMITTED / UNKNOWN -> state['outcome']
+
+    def _handle_error(self, error, state, ctx, failed_keys):
+        failed_keys.add(state.get("correlation_id") or ctx.correlation_id)
+
+
+class APIToolAgent(_ToolAgent):
     agent_name = "APIToolAgent"
-
-    def _build_messages(self, state, config=None, **kwargs):
-        return [{"role": "user", "content": state["query"]}]
-
-    def _apply_policy(self, state, config=None, tenant_id=None, **kwargs):
-        # _get_tool_service() is the same registry-resolution function
-        # _resolve_tool_call() calls internally (Section 2.8) — called
-        # directly here, with transport pinned to 'http', to skip the
-        # mcp_server_registry auto-detection _resolve_tool_call() does
-        # and force REST regardless of what's registered for this tool.
-        service = _get_tool_service(state["tool_name"], config, transport="http")
-        state["tool_result"] = _run_tool(service.execute(
-            state.get("tool_payload", {}), config, tenant_id=tenant_id, **kwargs), config, kwargs)
-        state["outcome"] = state["tool_result"].get("outcome")  # typed: COMMITTED / NOT_COMMITTED / UNKNOWN
-
-    def _evaluate_output(self, response, state, config=None, **kwargs):
-        # Logical-vs-Physical rule (Section 2.6): only physical_success
-        # is ground truth, never the LLM response text.
-        return 1.0 if state.get("tool_result", {}).get("physical_success") else 0.0
-
-    def _fallback(self, state, config=None, **kwargs):
-        return {"text": "", "metadata": {"degraded": True, "reason": "api_tool_call_failed"}}
-
-    def _handle_error(self, error, state, config=None, **kwargs):
-        kwargs["failed_keys"].append(state.get("correlation_id"))
+    transport = "http"
 
 
-class MCPToolAgent(BaseAgent):
+class MCPToolAgent(_ToolAgent):
     agent_name = "MCPToolAgent"
+    transport = "mcp"
 
-    def _build_messages(self, state, config=None, **kwargs):
-        return [{"role": "user", "content": state["query"]}]
-
-    def _apply_policy(self, state, config=None, tenant_id=None, **kwargs):
-        # Same _get_tool_service() call as APIToolAgent, transport
-        # pinned to 'mcp' instead of 'http'. mcp_server_url/mcp_tool_name
-        # follow the same kwargs MCPToolService.get_endpoint() and
-        # ._build_payload() already read (Section 3, MCPToolService).
-        service = _get_tool_service(state["tool_name"], config, transport="mcp")
-        state["tool_result"] = _run_tool(service.execute(
-            state.get("tool_payload", {}), config, tenant_id=tenant_id,
-            mcp_server_url=state.get("mcp_server_url"),
-            mcp_tool_name=state.get("mcp_tool_name", state.get("tool_name")),
-            **kwargs), config, kwargs)
-        state["outcome"] = state["tool_result"].get("outcome")
-
-    def _evaluate_output(self, response, state, config=None, **kwargs):
-        return 1.0 if state.get("tool_result", {}).get("physical_success") else 0.0
-
-    def _fallback(self, state, config=None, **kwargs):
-        return {"text": "", "metadata": {"degraded": True, "reason": "mcp_tool_call_failed"}}
-
-    def _handle_error(self, error, state, config=None, **kwargs):
-        kwargs["failed_keys"].append(state.get("correlation_id"))
+    def _call(self, service, state, ctx, config):
+        # mcp_server_url / mcp_tool_name follow the same kwargs MCPToolService._get_endpoint()
+        # and _build_payload() read (Section 3, MCPToolService).
+        return service.execute(state.get("tool_payload", {}), config, ctx=ctx,
+                               mcp_server_url=state.get("mcp_server_url"),
+                               mcp_tool_name=state.get("mcp_tool_name", state.get("tool_name")))
 
 
 class GenericLLMOnlyAgent(LLMOnlyAgent):
@@ -231,8 +217,6 @@ class GenericLLMOnlyAgent(LLMOnlyAgent):
 
 
 class FallbackAgent(BaseAgent):
-
-
     """Returned by _get_agent() when the semantic router matches no
     registered intent, or scores confidence below min_confidence.
     _evaluate_output() always returns 0.0, so BaseAgent.run()'s own
@@ -241,20 +225,17 @@ class FallbackAgent(BaseAgent):
 
     agent_name = "FallbackAgent"
 
-    def _build_messages(self, state, config=None, **kwargs):
+    def _build_messages(self, state, ctx):
         return [{"role": "user", "content": state.get("query", "")}]
 
-    def _apply_policy(self, state, config=None, **kwargs):
-        pass
-
-    def _evaluate_output(self, response, state, config=None, **kwargs):
+    def _evaluate_output(self, response, state, ctx):
         return 0.0  # forces _fallback() unconditionally
 
-    def _fallback(self, state, config=None, **kwargs):
+    def _fallback(self, state, ctx):
         return {"text": "", "metadata": {"degraded": True, "reason": "no_intent_match"}}
 
-    def _handle_error(self, error, state, config=None, **kwargs):
-        kwargs["failed_keys"].append(state.get("correlation_id"))
+    def _handle_error(self, error, state, ctx, failed_keys):
+        failed_keys.add(state.get("correlation_id") or ctx.correlation_id)
 
 
 # ======================================================================
