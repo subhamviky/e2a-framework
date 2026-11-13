@@ -36,3 +36,15 @@ jobs:
             echo "== $t"
             python -I "$t.py" | tail -1
           done
+  java:
+    # e2a-java (design note D-01): the Java runtime, built and tested with E2A's tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Build and test e2a-core, e2a-cqrs, e2a-spring-jpa, e2a-test
+        run: mvn -B -f java/pom.xml verify
