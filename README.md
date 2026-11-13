@@ -12,15 +12,16 @@ It focuses on the boundary where probabilistic reasoning meets deterministic ent
 
 ## Install
 
-    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.4.0"
+    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.5.0"
 
-Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.4.0" }`.
+Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.5.0" }`.
 The framework is the `e2a` package (`from e2a import BaseAgent, BaseWorkflow, Steps, Step`); the release
 gate is `from e2a.release import ProjectReleaseGate`; the `e2a_base` module re-exports the same names. Since v1.3 hooks use the v1.2 signature (`state, ctx, …`).
 
-**Production adapters (e2a-adapters, since v1.4.0):** DynamoDB implementations of the idempotency,
-transactional, lease and checkpoint ports in [`adapters/`](adapters/README.md), a separate distribution
-at this tag (`pip install "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.4.0#subdirectory=adapters"`).
+**Production adapters (e2a-adapters, since v1.4.0):** DynamoDB (v1.4.0), Firestore and Cosmos DB (v1.5.0)
+implementations of the idempotency, transactional, lease and checkpoint ports in [`adapters/`](adapters/README.md),
+a separate distribution at this tag (`pip install "e2a-adapters[aws,gcp,azure] @ git+https://github.com/subhamviky/e2a-framework.git@v1.5.0#subdirectory=adapters"`;
+pick the extras you need).
 Every adapter passes the port contract kit, `e2a.port_contract`.
 
 **Java (e2a-java, since v1.2.2):** the same contracts for Java 21 in [`java/`](java/README.md) —
@@ -31,6 +32,7 @@ registry: a service's CI builds it from the tag (`mvn -f java/pom.xml install -D
 
 | e2a-framework | a2c-framework | capability-oriented-dsa |
 |---|---|---|
+| `v1.5.0` (e2a-adapters `1.5.0`: Firestore and Cosmos DB; e2a-java `1.5.0`) | `v1.3.0` (runs on `v1.5.0` unchanged) | `v0.2.x`, `v0.3.x` |
 | `v1.4.0` (port contract kit; e2a-adapters `1.4.0` with DynamoDB; e2a-java `1.4.0`) | `v1.3.0` (it pins E2A `v1.3.0` and runs on `v1.4.0` unchanged) | `v0.2.x`, `v0.3.x` |
 | `v1.3.0` (v1.1 agent hooks and `get_endpoint` removed; e2a-java `1.3.0`) | `v1.3.0` | `v0.2.x`, `v0.3.x` |
 | `v1.2.3` (v1.3 preparation; e2a-java `1.2.3`) | `v1.2.2` | `v0.2.x`, `v0.3.x` |

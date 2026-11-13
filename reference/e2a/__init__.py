@@ -22,4 +22,4 @@ from .stages import (ApprovalRequired, ApprovalStage, CapacityRefusal, CapacityS
                      RedactionStage, SandboxRefusal, SandboxStage, TokenBudgetRefusal, TokenBudgetStage,
                      ToolRefusal, compile_redactions, redact_text)
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"

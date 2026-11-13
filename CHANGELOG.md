@@ -2,6 +2,32 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.5.0 — Firestore and Cosmos DB adapters (design note D-03)
+
+Additive: nothing changes for code on v1.4.0.
+
+### Added
+- **`e2a_adapters.cas`:** the four ports written once, over any document store that can create-if-absent and replace-if-unchanged.
+  - `CasIdempotencyStore`, `CasTransactionalStore`, `CasLease` and `CasCheckpointStore`, over a small `CasBackend`.
+  - After a lost race the port reads again and re-decides; it never overwrites.
+  - `InMemoryCasBackend` proves the engine on the port contract kit without any database.
+- **`e2a_adapters.gcp`** (`e2a-adapters[gcp]`): Firestore.
+  - `create()`, and `update()` with a `last_update_time` precondition.
+  - ABORTED (lock contention) counts as a lost race: nothing was written.
+  - The `ttl` timestamp field is for a TTL policy.
+- **`e2a_adapters.azure`** (`e2a-adapters[azure]`): Cosmos DB, NoSQL API.
+  - `create_item()`, and `replace_item()` with the ETag and `IfNotModified`.
+  - The item id is the partition key; escaped ids keep the original key in `e2a_key`.
+  - The `ttl` field is in seconds.
+- **Tests:** every backend passes the whole contract kit, races included, on its emulator:
+  - Firestore emulator and Cosmos DB emulator (vNext);
+  - DynamoDB Local for DynamoDB;
+  - the CAS engine in memory.
+- **CI:** the adapters job starts the three emulators and installs every extra; a skipped backend is listed (`-rs`).
+
+### Changed
+- e2a-java follows the version: `1.5.0` (no code change).
+
 ## v1.4.0 — Production adapters, AWS first (design note D-02)
 
 Additive: nothing changes for code on v1.3.0.
