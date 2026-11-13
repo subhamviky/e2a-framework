@@ -2,6 +2,32 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.4.0 — Production adapters, AWS first (design note D-02)
+
+Additive: nothing changes for code on v1.3.0.
+
+### Added
+- **`e2a.port_contract`, the port contract kit.** One behavioural suite per foundation port, for any adapter whatever its backend:
+  - `check_idempotency_store`: 24 scenarios (claim, replay, fingerprint conflict, retryable and final failure, lease expiry and recovery, stale owner, UNKNOWN outcome, explicit expiry, a concurrent race);
+  - `check_transactional_store`: 13 (create-if-absent, compare-and-set, conflict with the current version, fencing, put, delete, exact round-trip, a race);
+  - `check_lease`: 11 (exclusive, owner-checked renew and release, expiry, strictly increasing fencing tokens, a race);
+  - `check_checkpoint_store`: 8 (save and load, tenant isolation, decide exactly once, a race).
+
+  Each takes a factory `make(clock)` and a `FakeClock`, and fails naming the scenario. The in-memory reference adapters pass all of them (`tests/test_port_contract.py`).
+- **`e2a-adapters` 1.4.0** in [`adapters/`](adapters/README.md), a separate distribution so boto3 stays out of the core package:
+  - `e2a_adapters.aws`: `DynamoDBIdempotencyStore`, `DynamoDBTransactionalStore`, `DynamoDBLease`, `DynamoDBCheckpointStore`;
+  - one condition expression per state change; only `ConditionalCheckFailedException` counts as a lost race, and every other error is raised;
+  - they share the application's table under `E2A#…` partitions (one per key);
+  - wall-clock leases with an injectable clock; the `ttl` attribute for garbage collection only;
+  - values stored as JSON, refused over 350 KB;
+  - the lease keeps its fencing counter across release, so tokens never go back.
+
+  Tested on moto: the four contract suites, plus the table layout, a non-condition error and the size limit.
+- **CI:** an `adapters` job installs the core and the adapters and runs their tests and strict conformance.
+
+### Changed
+- e2a-java follows the version: `1.4.0` (no code change).
+
 ## v1.3.0 — The v1.1 agent hooks and get_endpoint are removed
 
 Announced in v1.2.0 and prepared in v1.2.3 (design note V13-01): every codebase in the family already runs without them.
