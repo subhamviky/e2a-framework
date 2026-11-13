@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e2a-adapters"
+version = "1.4.0"
+description = "Production adapters for the E2A foundation ports (DynamoDB first)"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Subham Gupta" }]
+requires-python = ">=3.11"
+# The E2A version this release is tested against. Install e2a-framework from its git tag first
+# (as every project already does); this requirement is then satisfied without an index lookup.
+dependencies = ["e2a-framework>=1.4,<2"]
+
+[project.optional-dependencies]
+aws = ["boto3>=1.34"]
+test = ["pytest>=8.2", "moto[dynamodb]>=5.0"]
+
+[project.urls]
+Repository = "https://github.com/subhamviky/e2a-framework"
+
+[tool.setuptools]
+packages = ["e2a_adapters", "e2a_adapters.aws"]

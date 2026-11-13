@@ -1,0 +1,97 @@
+"""The DynamoDB adapters pass E2A's port contract kit on moto (no AWS account), plus the
+DynamoDB-specific checks: shared table layout, errors that are not a lost condition, value size."""
+import json
+import os
+
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+from moto import mock_aws
+
+from e2a import ClaimStatus
+from e2a.port_contract import check_checkpoint_store, check_idempotency_store, check_lease, check_transactional_store
+from e2a_adapters.aws import (MAX_VALUE_BYTES, DynamoDBCheckpointStore, DynamoDBIdempotencyStore, DynamoDBLease,
+                              DynamoDBTransactionalStore)
+
+
+@pytest.fixture
+def table():
+    os.environ.setdefault('AWS_DEFAULT_REGION', 'eu-west-1')
+    for k in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'):
+        os.environ[k] = 'testing'
+    with mock_aws():
+        ddb = boto3.resource('dynamodb')
+        t = ddb.create_table(TableName='app', BillingMode='PAY_PER_REQUEST',
+                             KeySchema=[{'AttributeName': 'pk', 'KeyType': 'HASH'},
+                                        {'AttributeName': 'sk', 'KeyType': 'RANGE'}],
+                             AttributeDefinitions=[{'AttributeName': 'pk', 'AttributeType': 'S'},
+                                                   {'AttributeName': 'sk', 'AttributeType': 'S'}])
+        yield t
+
+
+def test_idempotency_store_meets_the_contract(table):
+    assert len(check_idempotency_store(lambda clock: DynamoDBIdempotencyStore(table, clock=clock))) == 24
+
+
+def test_transactional_store_meets_the_contract(table):
+    assert len(check_transactional_store(lambda clock: DynamoDBTransactionalStore(table, clock=clock))) == 13
+
+
+def test_lease_meets_the_contract(table):
+    assert len(check_lease(lambda clock: DynamoDBLease(table, clock=clock))) == 11
+
+
+def test_checkpoint_store_meets_the_contract(table):
+    assert len(check_checkpoint_store(lambda clock: DynamoDBCheckpointStore(table, clock=clock))) == 8
+
+
+def test_it_shares_the_application_table_under_its_own_partitions(table):
+    table.put_item(Item={'pk': 'ORDER#1', 'sk': 'order', 'amount': 10})
+    store = DynamoDBIdempotencyStore(table)
+    c = store.claim('req-1', tenant_id='acme', ttl_seconds=3600)
+    store.complete('req-1', {'ok': True}, tenant_id='acme', owner=c.owner)
+    items = table.scan()['Items']
+    e2a = [i for i in items if i['pk'].startswith('E2A#')]
+    assert [i['pk'] for i in e2a] == ['E2A#IDEM#acme#req-1'] and e2a[0]['sk'] == 'idem'
+    assert e2a[0]['state'] == 'SUCCEEDED' and json.loads(e2a[0]['result']) == {'ok': True}
+    assert int(e2a[0]['ttl']) > 0, 'the ttl attribute is set for DynamoDB garbage collection'
+    assert table.get_item(Key={'pk': 'ORDER#1', 'sk': 'order'})['Item']['amount'] == 10
+
+
+def test_custom_key_names_and_client_form():
+    os.environ.setdefault('AWS_DEFAULT_REGION', 'eu-west-1')
+    with mock_aws():
+        client = boto3.client('dynamodb')
+        client.create_table(TableName='other', BillingMode='PAY_PER_REQUEST',
+                            KeySchema=[{'AttributeName': 'PK', 'KeyType': 'HASH'},
+                                       {'AttributeName': 'SK', 'KeyType': 'RANGE'}],
+                            AttributeDefinitions=[{'AttributeName': 'PK', 'AttributeType': 'S'},
+                                                  {'AttributeName': 'SK', 'AttributeType': 'S'}])
+        store = DynamoDBIdempotencyStore(client=client, table_name='other', partition_key='PK', sort_key='SK',
+                                         prefix='SVC#')
+        assert store.claim('k').status == ClaimStatus.CLAIMED
+        assert client.scan(TableName='other')['Items'][0]['PK']['S'] == 'SVC#IDEM#-#k'
+
+
+def test_an_error_that_is_not_a_lost_condition_is_raised(table):
+    store = DynamoDBIdempotencyStore(client=table.meta.client, table_name='missing-table')
+    with pytest.raises(ClientError) as e:
+        store.claim('k')
+    assert e.value.response['Error']['Code'] == 'ResourceNotFoundException'
+
+
+def test_a_value_too_large_for_an_item_is_refused_up_front(table):
+    rows = DynamoDBTransactionalStore(table)
+    with pytest.raises(ValueError, match='exceeds'):
+        rows.put_if_version('big', {'blob': 'x' * (MAX_VALUE_BYTES + 1)}, None)
+    assert rows.get('big') is None
+
+
+def test_a_lease_keeps_its_fencing_counter_across_release(table):
+    lease = DynamoDBLease(table)
+    tokens = []
+    for _ in range(3):
+        h = lease.acquire('job', 30)
+        tokens.append(h.fencing_token)
+        lease.release(h)
+    assert tokens == [1, 2, 3]

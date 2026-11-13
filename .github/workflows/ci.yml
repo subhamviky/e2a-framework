@@ -36,6 +36,20 @@ jobs:
             echo "== $t"
             python -I "$t.py" | tail -1
           done
+  adapters:
+    # e2a-adapters (design note D-02): every adapter passes the port contract kit, on moto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the core, then the adapters with their AWS and test extras
+        run: pip install . && pip install "./adapters[aws,test]"
+      - name: Adapter tests (port contract kit on moto)
+        run: python -m pytest -q adapters/tests
+      - name: Governed Entry Point rules over the adapters
+        run: python -m e2a.conformance --quiet adapters/e2a_adapters
   java:
     # e2a-java (design note D-01): the Java runtime, built and tested with E2A's tag
     runs-on: ubuntu-latest

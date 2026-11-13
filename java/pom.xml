@@ -5,7 +5,7 @@
     <!-- e2a-java: the E2A runtime for Java (design note D-01). Released with E2A's tag, at E2A's version. -->
     <groupId>com.subhamviky.e2a</groupId>
     <artifactId>e2a-java</artifactId>
-    <version>1.3.0</version>
+    <version>1.4.0</version>
     <packaging>pom</packaging>
     <name>e2a-java</name>
     <description>E2A runtime contracts for Java: the v1.2 agent lifecycle, declared workflows, governance stages,
