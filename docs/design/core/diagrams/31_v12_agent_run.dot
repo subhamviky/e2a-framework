@@ -1,0 +1,34 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>BaseAgent.run() in v1.2 — each hook receives only what it declares</b>>, fontcolor="#1F3864", nodesep=0.35, ranksep=0.32, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.16,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  in [label="run(state, config, ctx)\nctx = RequestContext (tenant, key, deadline, settings)", shape=note, fillcolor="#FFFFFF"];
+  screen [label="governance stages, phase 'screen'\ncapacity · token budget · sandbox · firewall", fillcolor="#E6F4F5", color="#0F7C8C"];
+  prep [label="_prepare(state, ctx, io_read)\nreads and retrieval; no side effects"];
+  decide [label="governance stages, phase 'decide'\napproval (needs the facts just read)", fillcolor="#E6F4F5", color="#0F7C8C"];
+  pol [label="_apply_policy(state, ctx)\nagent-specific policy (default: none)"];
+  msg [label="_build_messages(state, ctx)"];
+  none [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="None?"];
+  inf [label="_infer() → Tier 2b gateway\n_evaluate_output() ≥ min_confidence ?"];
+  fb [label="_fallback(state, ctx)\nevaluation = FALLBACK\nnothing material follows"];
+  ddl [shape=diamond, fillcolor="#E6F4F5", color="#0F7C8C", label="deadline\nleft?"];
+  act [label="_act(state, ctx, io_modify)\nmaterial tools only, always with a key"];
+  conf [label="_confirm(state, ctx, io_read, outcomes)\nstate['outcome']: UNKNOWN › NOT_COMMITTED › COMMITTED"];
+  red [label="egress: RedactionStage / redact_response\nstate['response']", fillcolor="#E6F4F5", color="#0F7C8C"];
+  ref [label="GovernanceRefusal → state['refusal']\n(code, stage, reason, retryable)", fillcolor="#FDECEA", color="#C0392B", fontcolor="#7B241C"];
+  pause [label="ApprovalRequired → the step pauses\n(checkpoint; resume() later)", fillcolor="#FFF8E1", color="#B7791F", fontcolor="#7A4F0F"];
+  in -> screen -> prep -> decide -> pol -> msg -> none;
+  none -> inf [label=" no: model step"];
+  none -> ddl [label=" yes: deterministic"];
+  inf -> ddl [label=" accepted"];
+  inf -> fb [label=" below threshold"];
+  ddl -> act [label=" yes"];
+  ddl -> red [label=" no: nothing material", style=dashed];
+  act -> conf -> red;
+  fb -> red [style=dashed];
+  screen -> ref [style=dotted, arrowhead=none];
+  decide -> pause [style=dotted, arrowhead=none];
+  {rank=same; screen; ref}
+  {rank=same; decide; pause}
+  {rank=same; inf; fb}
+}

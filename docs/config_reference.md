@@ -1,8 +1,10 @@
 # E2A Configuration Reference
 
-Every config key and environment variable used by the E2A framework, grouped by owner. The tables are generated from the E2A_CONFIG registry at the top of `e2a_base.py` (`config_reference_markdown()`), so they cannot drift from the code. `env.example` is generated from the same registry (`env_example()`).
+Every config key and environment variable used by the E2A framework, grouped by owner. The tables are generated from the E2A_CONFIG registry in `e2a/config.py` (re-exported by `e2a_base`) (`config_reference_markdown()`), so they cannot drift from the code. `env.example` is generated from the same registry (`env_example()`).
 
 **Resolution order** — identical for every key: call-time kwargs, then the config dict, then the environment variable, then the default. A provider-specific value is supplied through the same path by the concrete subclass; it is never a second key for the same resource. Object references (`llm_service`, `idempotency_store`, `cache_store`, `transactional_store`, `pipeline_state_store`, the engines) are not environment-resolvable and are passed in the config dict from the composition root. Secrets are env-resolvable but emitted empty in `env.example`.
+
+**v1.2** — the resolution is unchanged, but it happens once per request: `RequestContext.begin()` resolves every registered key (and any application key present in `config`) into the frozen `ctx.settings`, and a v1.2 hook reads `ctx.setting('key')` instead of calling `resolve_config()`. Stages read their limits the same way (for example `TokenBudgetStage` reads `max_token_budget`).
 
 ### Common
 

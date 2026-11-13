@@ -2,7 +2,24 @@
 
 All notable changes to the E2A framework documents and reference code.
 
-## v1.2.0 — in progress (release branch `release/v1.2.0`)
+## v1.2.1 — Documents for v1.2 (docs only)
+
+No code changes; the package version moves to 1.2.1 so the documents have a tag. Everything below describes v1.2.0.
+
+### Design documents
+- **Agentic core** (`docs/design/core/`): v1.2 folded in — the `e2a` package (7.1), request context and accessors (new 6.6), the v1.2 agent lifecycle and hooks (8.2), governance stages (8.7), declared steps and `resume()` (8.1, 9.3), RAG ports and the façade (8.5), `_get_endpoint` and `serve_async` (8.6), the conformance kit (new 8.18), a v1.2 extension skeleton (12.2), verification (66 tests), use cases UC-14 to UC-16, invariants INV-14 to INV-17, observations O-14 to O-17 with the status of the ones fixed since, a new Section 15 "What v1.2 changes", and traceability anchors pointing at the package modules. Two new diagrams: `31_v12_agent_run`, `32_v12_workflow_steps`.
+- **CQRS profile** (new Section 16), **AI-DLC profile** (new Section 15) and **family system design** (new Section 15): what v1.2 (and A2C v1.2.0) means for each; shared-contract homes and anchors updated.
+- The four Word documents are regenerated from the Markdown in the same house style; `docs/design/common/style.puml` (the shared PlantUML style) is restored.
+
+### Playbooks, landing zones and references
+- **Implementation Playbook:** new Section 2.20, "E2A v1.2 — Contracts and Migration Guide" (package layout; migrating agents, governance and workflows, with examples run against v1.2; conformance); the Governed Entry Point principle replaces the "Single Rule"; the `e2a_base.py` listing is marked as the v1.1 reference.
+- **CQRS and AI-DLC playbooks:** v1.2 notes.
+- **Cloud landing zone:** Principle 1 is now "Governed Entry Points = Governed Ingress"; new 9.2 maps the v1.2 contracts (stages, accessors, context, steps and checkpoints, conformance) to landing-zone components. **AI-DLC landing zone:** Phase A output for v1.2 services.
+- **Strategic overview, whitepaper, multimodal note:** v1.2 wording (governed entry points, request context, stages, conformance).
+- **Configuration reference:** source moved to `e2a/config.py`; how v1.2 resolves settings once per request (`ctx.setting`). The registry itself did not change.
+- **Master Abstraction Reference (.docx):** section 2.2 is the Governed Entry Point rule, with the v1.2 capabilities and conformance rules. **MultiCloud Reference (.docx):** examples import from `e2a` and raise `GovernanceRefusal` (they imported `GovernanceViolationError`, which is A2C's, not E2A's).
+
+## v1.2.0 — Governed entry points, request context, stages, declared steps
 
 Design: the v1.2 design notes in the o2c-platform-hub repository (roadmap/design/).
 

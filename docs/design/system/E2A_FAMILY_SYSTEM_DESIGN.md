@@ -9,8 +9,8 @@
 | Framework | E2A framework family — E2A core, CQRS profile, P0, G2C, A2C, AI-DLC profile |
 | Document type | System Design Document (cross-framework HLD + interface contracts) |
 | Author | Subham Gupta, Principal Platform Architect |
-| Source baseline | `subhamviky/e2a-framework` branch `fix/aidlc-cross-framework` @ db49af1 (`reference/`); `subhamviky/a2c-framework` branch `fix/g2c-p0-a2c-contracts` @ 0caa2ac |
-| Date | 7 November 2026 |
+| Source baseline | `subhamviky/e2a-framework` `v1.2.0` (`reference/`); `subhamviky/a2c-framework` `v1.2.0`; baseline of the v1.1 sections: e2a-framework @ db49af1, a2c-framework @ 0caa2ac |
+| Date | 13 November 2026 (E2A v1.2.0, A2C v1.2.0; baseline 7 November 2026) |
 | Status | Baseline system design; cross-framework behaviour verified by an integration test over the real modules |
 
 ## 1. Introduction
@@ -102,7 +102,7 @@ Each framework is correct against its own contract and its own tests. The family
 
 | Principle | Meaning across the family |
 |---|---|
-| One contract style | Every class follows E2A's three-layer method contract: one public entry point, protected hooks, private steps. |
+| One contract style | Every class follows E2A's three-layer method contract: governed entry points (a public method per genuine capability, usually one), protected hooks, private steps; checked by `e2a.conformance` since v1.2. |
 | Composition without wrappers | Composers call public entry points directly: `DeveloperPlatformWorkflow.generate()`, `bootstrap()`, `SDLCWorkflow.execute()`, `BasePipeline.run_pipeline()`. |
 | Composable siblings | P0 and A2C do not depend on each other; `BootstrapAndGenerateWorkflow` and AI-DLC compose them. |
 | Shared infrastructure by injection | Gateway, stores, registries and limits arrive in `config`; no framework creates its own. |
@@ -385,8 +385,23 @@ Fixed on the current branches: the missing `a2c_concurrency` module; `DeveloperP
 | X-7 | Without a request deadline the build lease is the configured 300 s, below A2C's worst case. | A long build can lose its claim. | Set `request_deadline_seconds`, or raise `idempotency_lease_seconds` for AI-DLC deployments. |
 | X-9 | A governance violation inside an agent settles retryable (E2A workflow settlement); AI-DLC also settles every failed build retryable. | Redelivery repeats a request that cannot pass. | Classify `GovernanceViolationError` and validation failures as final. |
 | X-10 | Business keys do not line up: P0 and the build include `build_tool`, A2C omits runtime, G2C is per class. | Python and Java variants of one project share an A2C key. | Add `language` to A2C's key; document the mapping in Table 4. |
-| X-12 | Two `Deadline` types, bridged by float seconds. | Works, but two implementations of one concept. | Use E2A's type when `e2a_base` is present. |
+| X-12 | Two `Deadline` types, bridged by float seconds. | Works, but two implementations of one concept. | Use E2A's type when `e2a_base` is present. Since A2C v1.2.0, E2A is a declared dependency (`e2a-framework` v1.2.0), so it always is. |
 | X-13 | The AI-DLC result keeps `generator_key` as an alias of the build key. | Readers can still confuse it with G2C's key. | Remove the alias after consumers move to `build_key`. |
+
+## 15. The Family at v1.2
+
+**Table 10 — Versions and how they fit**
+
+| Framework | Version | Depends on | v1.2 in one line |
+|---|---|---|---|
+| E2A core | `v1.2.0` (docs `v1.2.1`) | — | The `e2a` package; request context and accessors; governance stages; declared steps and `resume()`; RAG ports; conformance kit. v1.1 code runs unchanged with deprecation warnings. |
+| CQRS profile | in E2A `v1.2.0` | E2A shared contracts | Unchanged. |
+| AI-DLC profile | in E2A `v1.2.0` | E2A, A2C | Unchanged phases; the contract check runs `e2a.conformance`. |
+| A2C | `v1.2.0` | E2A `v1.2.0` | Declarations instead of patches (settings, contracts, Maven coordinates, monorepo), upgrades with a manifest; no application-service module. |
+| G2C | in A2C `v1.2.0` | E2A, A2C, P0 | Generates E2A v1.2 code, several agents per request (Python). |
+| P0 | in A2C `v1.2.0` | — | New request fields; a generated Python project depends on `e2a-framework` when its code imports `e2a`. |
+
+**Interfaces that changed.** A generated Python service now imports `e2a` (not a copied `common/e2a_base.py`), so the E2A version is pinned in its `pyproject.toml`; the G2C critic checks generated code with `e2a.conformance`. Every other hand-off contract in Section 7 is unchanged. Following Section 12's rules, the v1.1 adapters stay until v1.3.
 
 ## Appendix A. Glossary
 

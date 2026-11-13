@@ -30,9 +30,11 @@ The document is structured in four parts:
 
 - Part D — Central Configuration Registry (Section 5): one table of every config key and environment variable across every class, generated from E2A_CONFIG in the scaffold.
 
-> **Single Rule**
+> **The Governed Entry Point principle** (v1.2; was the "Single Rule")
 >
-> Every class has exactly one public entry point: validate() for BaseValidationService, run() for BaseAgent, execute() for BaseWorkflow and BaseToolService, retrieve() for BaseRAGPipeline, serve() for BaseMCPServer, ingest() for BaseIndexingPipeline. BaseLLMAgentService is the one class with two public entry points — process_inference() (unary) and process_inference_stream() (server-streaming) — because the two are distinct interaction modes that cannot share a return type; both run the same admission pipeline. The rule is therefore one public entry point per interaction mode. The operational lifecycle members of BaseLLMAgentService — drain(), ready and inflight — are shutdown and health controls, not entry points, and are not counted. Application code calls only this public method. All protected methods are called internally in a fixed sequence. Subclasses override only the protected methods they need.
+> Callers reach a class only through its public methods, and each public method is a distinct capability — its own caller or trigger, its own guarantees — that runs the class's governed lifecycle; it is never a shortcut to a hook. Usually that is one method: validate() for BaseValidationService, run() for BaseAgent, execute() for BaseWorkflow and BaseToolService, retrieve() for BaseRAGPipeline, serve() for BaseMCPServer, ingest() for BaseIndexingPipeline. v1.2 adds three genuine capabilities: BaseWorkflow.resume() (a human decision, days later), BaseMCPServer.serve_async() (async hosts) and BaseRAGPipeline.evaluate_answer() (release gates and agents). `python -m e2a.conformance src/` checks the rule (Section 2.20).
+
+> **E2A v1.2.** Since v1.2.0 the framework is the `e2a` package (`pip install e2a-framework`), and `e2a_base` is a compatibility module that re-exports every v1.1 name. The class contracts in Sections 2.1–2.19 and the listing in Section 3 describe the v1.1 style, which still runs unchanged (with one `DeprecationWarning` per class). Section 2.20 gives the v1.2 contracts and a migration guide; new code should use them. BaseLLMAgentService is the one class with two public entry points — process_inference() (unary) and process_inference_stream() (server-streaming) — because the two are distinct interaction modes that cannot share a return type; both run the same admission pipeline. The rule is therefore one public entry point per interaction mode. The operational lifecycle members of BaseLLMAgentService — drain(), ready and inflight — are shutdown and health controls, not entry points, and are not counted. Application code calls only this public method. All protected methods are called internally in a fixed sequence. Subclasses override only the protected methods they need.
 
 *Source Note: Implementation examples and the categorical breakdown of cloud-native primitives in this playbook align with the AWS AI Ecosystem architectural map by Prashant Rathi.*
 
@@ -827,7 +829,129 @@ Each class section above lists its own checks. The suites and what they cover:
 
 The tests run against in-memory test doubles. They prove the contracts of the scaffold; they do not prove a production adapter, which must be run against its real backend.
 
+## 2.20 E2A v1.2 — Contracts and Migration Guide
+
+v1.2.0 keeps every v1.1 contract and adds a declarative style. The design rationale is in the v1.2 design notes 01–05; the full contract cards are in the E2A Framework Design Document, Sections 6.6, 8 and 15.
+
+### 2.20.1 Package layout
+
+```text
+e2a/                 (pip install e2a-framework; import e2a, or e2a_base for v1.1 names)
+  core.py            exceptions, Deadline, PhysicalOutcome, ClaimStatus
+  config.py          E2A_CONFIG, resolve_config, register_config_key
+  context.py         RequestContext, MessageLog, FailedKeys, ReadAccess, ModifyAccess   (v1.2)
+  stages.py          IngressStage, EgressStage, the built-in stages, typed refusals    (v1.2)
+  agents.py          BaseAgent, LLMOnlyAgent
+  workflows.py       BaseWorkflow, Steps, Step, Route, ResumeRefused                   (v1.2: steps, resume)
+  governance.py      BaseGovernanceFramework (stages, tool_policy)
+  rag.py             BaseRAGPipeline, BaseIndexingPipeline, BaseEmbeddingModel, BaseVectorIndex, RAGPipeline
+  tools.py           BaseToolService, RestToolService, MCPToolService, BaseMCPServer
+  ports.py           stores, locks, BaseCheckpointStore, sweeper, reconciler
+  llm.py, resilience.py, observability.py, validation.py, pipeline.py, infra.py
+  conformance.py     python -m e2a.conformance; AgentContract                           (v1.2)
+```
+
+### 2.20.2 Migrating an agent
+
+A hook declares only the parameters it uses (`state`, `ctx`, `io_read`, `io_modify`, `messages`, `failed_keys`, `outcomes`); no `config` or `**kwargs`. As soon as one hook declares `ctx`, the agent runs the v1.2 order: screening stages → `_prepare` → decision stages → `_apply_policy` → `_build_messages` (`None` = no model step) → model → `_evaluate_output` / `_fallback` → `_act` → `_confirm` → redaction.
+
+| v1.1 | v1.2 |
+|---|---|
+| `_build_messages(self, state, config=None, **kwargs)` | `_build_messages(self, state, ctx)`; return `None` for a deterministic agent |
+| Tool reads inside `_build_messages` or `_apply_policy` | `_prepare(self, state, ctx, io_read)`: `io_read.call('get_order', {...})`, `io_read.resource('retriever')` |
+| Tool writes inside `_apply_policy`; `state['outcome']` set by hand | `_act(self, state, ctx, io_modify)` returns `[io_modify.call('submit_payment', {...})]`; `_confirm` derives `state['outcome']` |
+| `resolve_config('key', config, kwargs)` | `ctx.setting('key')` |
+| `kwargs['tenant_id']`, `kwargs['correlation_id']` | `ctx.tenant_id`, `ctx.correlation_id` |
+| `kwargs['message_log'].append({...})` | `messages.info('event', field=...)` |
+| `kwargs['failed_keys'].append(key)` | `failed_keys.add(key)` |
+| `_evaluate_output`, `_fallback`, `_apply_policy`, `_handle_error` always abstract | `_evaluate_output` / `_fallback` only with a model step; the others have defaults |
+| Tool class without a kind | `material = True` on a tool with an effect (reached only through `io_modify`) |
+| `get_endpoint(self, config, tenant_id, **kw)` override | `_get_endpoint(...)` (the old name is deprecated, rule D1) |
+| Workflow hooks `(self, state, config=None, **kwargs)` | `_generate_idempotency_key(self, state, ctx)`, `_handle_error(self, error, state, ctx)`, `_requires_idempotency_claim(self, state, ctx)`, `_request_fingerprint(self, state, ctx)`; `_build_workflow(self, ctx)` |
+| Tools looked up through `_get_tool_service` | The accessors use `config['tools']` ({name: tool service}) and `config['resources']` |
+
+```python
+import json
+from e2a import BaseAgent
+
+class OrderAgent(BaseAgent):                       # deterministic: reads a price, submits a payment
+    def _prepare(self, state, ctx, io_read):
+        state['price'] = io_read.call('get_price', {'sku': state['sku']})['price']
+    def _build_messages(self, state, ctx):
+        return None                                # no model step
+    def _act(self, state, ctx, io_modify):
+        return [io_modify.call('submit_payment', {'order_id': state['order_id'], 'amount': state['price']})]
+
+class RouterAgent(BaseAgent):                      # model step with a checked answer
+    def _build_messages(self, state, ctx):
+        return [{'role': 'user', 'content': state['text']}]
+    def _evaluate_output(self, response, state, ctx):
+        state['intent'] = json.loads(response['text']).get('intent')     # the Route step reads it
+        return 1.0 if state['intent'] in ('ORDER', 'STATUS') else 0.0
+    def _fallback(self, state, ctx):
+        state['intent'] = 'STATUS'
+        return {'text': '{"intent": "STATUS"}'}
+```
+
+### 2.20.3 Migrating governance
+
+```python
+from e2a import BaseGovernanceFramework
+from e2a.stages import CapacityStage, InflightLimiter, TokenBudgetStage, FirewallStage, ApprovalStage, RedactionStage
+
+class OrderGovernance(BaseGovernanceFramework):
+    stages = [CapacityStage(InflightLimiter(50)), TokenBudgetStage(), FirewallStage(),
+              ApprovalStage(required=lambda state, ctx: state.get('price', 0) * state.get('quantity', 1) > 10_000),  # 'decide': after _prepare priced it
+              RedactionStage()]                                                            # egress
+    tool_policy = {'RouterAgent': [], 'OrderAgent': ['get_price', 'submit_payment']}
+```
+
+A refusal is a `GovernanceRefusal` (`code`, `stage`, `reason`, `retryable`) recorded in `state['refusal']`, and still an instance of the v1.1 exception (`NFRViolationError`, `ValueError`, `PermissionError`). A v1.1 governance class with the abstract hooks keeps working.
+
+### 2.20.4 Migrating a workflow
+
+```python
+from e2a import BaseWorkflow, Steps, Step, Route
+
+class OrderWorkflow(BaseWorkflow):
+    def _build_workflow(self, ctx):
+        return Steps(Step('route', RouterAgent()),
+                     Route('act', by='intent', agents={'ORDER': OrderAgent(), 'STATUS': StatusAgent()}, material=True))
+    def _generate_idempotency_key(self, state, ctx):
+        return f"{ctx.tenant_id}:{state['order_id']}"
+    def _handle_error(self, error, state, ctx):                # still abstract on BaseWorkflow
+        state['error_code'] = type(error).__name__
+
+result = OrderWorkflow().execute(state, config)            # config: llm_service, governance_engine, idempotency_store,
+                                                           # checkpoint_store, tools {name: BaseToolService}
+if result.get('status') == 'AWAITING_WEBHOOK':             # ApprovalStage paused the 'act' step
+    OrderWorkflow().resume(result['checkpoint_id'], {'approved': True, 'decided_by': 'jane'},
+                           config, tenant_id=state['tenant_id'])
+```
+
+One claim covers the whole workflow, taken before the first material step; a repeat of a material request is `REPLAYED`. `state['steps']` records every step. `resume()` needs `config['checkpoint_store']` and refuses an unknown checkpoint, a second decision and a decider who is the requester (`ResumeRefused`).
+
+### 2.20.5 Checking the result
+
+```bash
+python -m e2a.conformance src/ --strict      # R1-R3 and D1; exit 1 on an error
+```
+
+```python
+from e2a.conformance import AgentContract
+
+class TestOrderAgent(AgentContract):
+    def make_agent(self):
+        return OrderAgent()
+    valid_state = {'tenant_id': 't1', 'order_id': 'o-1', 'sku': 'A-1'}
+    config = {...}             # the tools the agent calls; a model step gets a simulated model by default
+```
+
+The O2C migration (order-to-cash-agentic-ai, branch `feature/e2a-v1.2`) is the worked example: five agents, a workflow, governance and validation moved to v1.2 with all 39 tests passing. The unmigrated v1.1.2 code also passes on v1.2, so a service can migrate one class at a time. v1.3 removes the v1.1 adapters and makes rule R2 an error.
+
 # 3. Scaffold File — e2a_base.py
+
+> **v1.2.** The listing below is the v1.1.x single-file scaffold, kept as a readable reference. Since v1.2.0 the same code lives in the `e2a` package (Section 2.20.1), installed with `pip install e2a-framework`; `e2a_base` re-exports every name below, so `from e2a_base import ...` keeps working. Do not copy the file into a project any more: depend on the package and pin its version.
 
 Drop this file into any repository as the foundation layer. All E2A abstract classes are defined here with full docstrings, @abstractmethod decorators, config/env resolution, and the cross-class propagation wiring baked in from the start — not layered on after. Developers import and subclass these without modifying this file.
 

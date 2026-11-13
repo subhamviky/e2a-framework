@@ -141,7 +141,7 @@ The three UI input panels the developer fills in before clicking Execute map dir
 
 | Phase | Framework | Entry Point | Quality Gate | Artifacts Produced |
 |---|---|---|---|---|
-| A | G2C | `DeveloperPlatformWorkflow.generate()` | GeneratorCriticAgent ≥ 0.75 (structural: access modifiers, required abstract methods, inheritance) | `common/e2a_base.py` (or `a2c_base.py`) if generated; inherited agent/workflow class file |
+| A | G2C | `DeveloperPlatformWorkflow.generate()` | GeneratorCriticAgent ≥ 0.75 (structural: access modifiers, required abstract methods, inheritance) | `common/e2a_base.py` (or `a2c_base.py`) if generated — none for a Python service on E2A v1.2 (A2C v1.2.0), which depends on the `e2a` package; inherited agent/workflow class file |
 | A | P0 | `BaseProjectBootstrapper.bootstrap()` (invoked inline by G2C's inherited-class generator, phases 7–8) | `_validate_output()` — manifest + README + Docker + Makefile presence | `pyproject.toml`/`pom.xml`, directory tree, Dockerfile, Makefile, `.env.example`, `.gitignore` |
 | B | A2C | `SDLCWorkflow.execute(dev_request)` — conditional on `harness.a2c_sdlc.enabled` | CodeCriticAgent ≥ 0.75 (structural: mandatory NFR patterns present in code, not comments) | Terraform IaC, GitHub Actions CI/CD workflow, remaining Clean Architecture business-logic source |
 | C | E2A | `BasePipeline` — first 3 of 7 stages only | Each stage is itself a pass/fail gate; any failure aborts before compile/deploy stages are ever reached | Static-scan report, test results, scaffold-contract compliance report |

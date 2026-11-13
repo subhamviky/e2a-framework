@@ -9,9 +9,9 @@
 | Framework | E2A — Enterprise-to-Agentic Architecture Framework |
 | Document type | Design Document (HLD + LLD) |
 | Author | Subham Gupta, Principal Platform Architect |
-| Source baseline | `subhamviky/e2a-framework` @ `main` 32c99c0 — `reference/e2a_cqrs_base.py` (540 lines) and the shared contracts it imports from `reference/e2a_base.py` |
-| Date | 7 November 2026 |
-| Status | Baseline design, aligned to the current reference implementation |
+| Source baseline | `subhamviky/e2a-framework` `v1.2.0` — `reference/e2a_cqrs_base.py` (unchanged since baseline 32c99c0) and the shared contracts it imports through `e2a_base` from the `e2a` package |
+| Date | 13 November 2026 (E2A v1.2.0; baseline 7 November 2026) |
+| Status | Aligned to E2A v1.2.0; the profile's own classes did not change in v1.2 (Section 16) |
 
 ## 1. Introduction
 
@@ -96,7 +96,7 @@ The CQRS profile therefore keeps everything that is profile-independent and repl
 | Edge validation | `BaseValidationService` | Reused unmodified; also classifies read vs write intent |
 | Governance | Token budget, MCP sandbox | Tenant request quota, external-API isolation (same ABC shape) |
 | Observability | Token and cost metrics | Command / query / cache-hit / error counters (same ABC shape) |
-| Concurrency contracts | `e2a_base.py` | Imported unchanged from `e2a_base.py` |
+| Concurrency contracts | `e2a_base.py` | Imported unchanged from `e2a_base.py` (since v1.2 defined in the `e2a` package and re-exported unchanged by `e2a_base`) |
 | Inference tier (2b) | `BaseLLMAgentService` | Not provisioned; tier numbers 0–5 unchanged |
 
 ### 2.3 Design goals
@@ -340,7 +340,7 @@ Inside `execute()` these are bundled into a `common` dict and passed as keyword 
 
 ### 6.4 Configuration keys
 
-All keys resolve through `resolve_config(key, config, kwargs, scope=None)` from the central registry in `e2a_base.py`. This profile adds no keys of its own; its one profile-specific default is `max_latency` = 1.0 s under scope `CQRS`.
+All keys resolve through `resolve_config(key, config, kwargs, scope=None)` from the central registry (`e2a/config.py`, re-exported by `e2a_base`). This profile adds no keys of its own; its one profile-specific default is `max_latency` = 1.0 s under scope `CQRS`.
 
 **Table 15 — Configuration consumed by the CQRS path**
 
@@ -600,7 +600,7 @@ Each contract card lists the class's purpose, its collaborators and invariants, 
 
 ### 8.9 Shared concurrency contracts (summary)
 
-These are defined in `e2a_base.py` and documented in full in the E2A Framework Design Document; the CQRS profile uses them as follows.
+These are defined in `e2a_base.py` (since v1.2 defined in the `e2a` package and re-exported unchanged by `e2a_base`) and documented in full in the E2A Framework Design Document; the CQRS profile uses them as follows.
 
 **Table 26 — Imported contracts and their use in this profile**
 
@@ -901,9 +901,24 @@ The following were found by reading the reference implementation against this de
 | O-8 | When `cache_store` is bound, `_write_to_cache()` is never called, but remains abstract. | Subclasses must still implement a hook that is unused on the preferred path. | Implement as a no-op when a `cache_store` is always bound. |
 | O-9 | Governance, idempotency and observability are fail-open when not bound. | A misconfigured deployment silently loses quota, claims or telemetry. | Assert all five ports and engines in the scaffold-compliance gate for production. |
 
+## 16. E2A v1.2 and This Profile
+
+E2A v1.2.0 changed the agentic core (E2A Framework Design Document, Section 15); this profile's classes are unchanged, and its tests pass unchanged.
+
+**Table 36 — What v1.2 means for the CQRS profile**
+
+| v1.2 change | Effect here |
+|---|---|
+| The `e2a` package; `e2a_base` re-exports every v1.1 name | `e2a_cqrs_base.py` still imports from `e2a_base`; the imported objects are the same. The traceability anchors (Appendix B) point at the package modules. |
+| Governed entry points | Already satisfied: each CQRS class has one capability and one public method. `python -m e2a.conformance` can check a CQRS project; rule R1 protects the framework-owned public methods of the e2a classes it subclasses. |
+| Request context, `io_read` / `io_modify`, stages, declared steps | Agentic-core contracts. A CQRS service keeps its own `BaseGovernanceFramework` (tenant quota, latency) and its command / query split, which already separates reads from material writes. |
+| Typed governance refusals | Not used by this profile: its gate raises `NFRViolationError` and the deterministic errors, as before. |
+
+An agentic service and a CQRS service still meet at the shared contracts (claims, outcomes, deadlines, stores), which v1.2 did not change.
+
 ## Appendix A. Glossary
 
-**Table 36 — Glossary**
+**Table 37 — Glossary**
 
 | Term | Definition |
 |---|---|
@@ -919,21 +934,21 @@ The following were found by reading the reference implementation against this de
 
 ## Appendix B. Traceability
 
-**Table 37 — Requirement → design element → code anchor**
+**Table 38 — Requirement → design element → code anchor**
 
 | Requirement / HLD element | Class / method | Code anchor (`reference/`) |
 |---|---|---|
 | G-1, UC-1/2, INV-02/03 | `BaseOrchestrator.execute` claim; `_request_fingerprint` | `e2a_cqrs_base.py` L265–299, L358 |
 | INV-04 | `__settle_claim` | `e2a_cqrs_base.py` L395 |
-| G-2, UC-3, INV-05 | `BaseCommandService._commit_versioned` | `e2a_cqrs_base.py` L456; `e2a_base.py` `put_if_version` L2522 |
-| G-3, UC-4 | `BaseQueryService.fetch`; `BaseCacheStore.get_or_load` | `e2a_cqrs_base.py` L489; `e2a_base.py` L2575 |
+| G-2, UC-3, INV-05 | `BaseCommandService._commit_versioned` | `e2a_cqrs_base.py` L456; `e2a/ports.py` `put_if_version` L87 |
+| G-3, UC-4 | `BaseQueryService.fetch`; `BaseCacheStore.get_or_load` | `e2a_cqrs_base.py` L489; `e2a/ports.py` L140 |
 | UC-5 | `_synchronize_cache` | `e2a_cqrs_base.py` L480 |
-| G-4, INV-10 | `__resolve_deadline`; `Deadline` | `e2a_cqrs_base.py` L370; `e2a_base.py` L133 |
-| G-5, UC-7, INV-08 | `__settle_claim` UNKNOWN branch; `BaseReconciliationService` | `e2a_cqrs_base.py` L400; `e2a_base.py` L2893 |
+| G-4, INV-10 | `__resolve_deadline`; `Deadline` | `e2a_cqrs_base.py` L370; `e2a/core.py` L64 |
+| G-5, UC-7, INV-08 | `__settle_claim` UNKNOWN branch; `BaseReconciliationService` | `e2a_cqrs_base.py` L400; `e2a/ports.py` L480 |
 | UC-6 | `BaseGovernanceFramework.__trigger_dehydration` | `e2a_cqrs_base.py` L192 |
 | INV-06/07 | `execute` except branches; DLQ guard | `e2a_cqrs_base.py` L315–341 |
 | G-6 | `BaseGovernanceFramework`, `BaseObservability` | `e2a_cqrs_base.py` L92, L159 |
 | T1 edge | `BaseValidationService.validate` | `e2a_cqrs_base.py` L234 |
-| Central config | `resolve_config` | `e2a_base.py` L453 |
-| Capacity gate | `validate_capacity` | `e2a_base.py` L693 |
-| Scheduled repair | `BaseOutboxSweeper`, `BaseDistributedLock` | `e2a_base.py` L2835, L2735 |
+| Central config | `resolve_config` | `e2a/config.py` L231 |
+| Capacity gate | `validate_capacity` | `e2a/resilience.py` L242 |
+| Scheduled repair | `BaseOutboxSweeper`, `BaseDistributedLock` | `e2a/ports.py` L422, L322 |

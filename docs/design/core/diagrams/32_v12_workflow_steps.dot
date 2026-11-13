@@ -1,0 +1,19 @@
+digraph G {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=13, labelloc=t, label=<<b>Declared steps — one context, one claim, a pause and resume()</b>>, fontcolor="#1F3864", nodesep=0.3, ranksep=0.4, pad=0.2];
+  node [shape=box, style="rounded,filled", fillcolor="#F4F8FC", color="#1F3864", fontname="DejaVu Sans", fontsize=11, fontcolor="#1F3864", margin="0.16,0.06"];
+  edge [color="#2E4A6B", fontname="DejaVu Sans", fontsize=10];
+  ex [label="execute(state, config)\nRequestContext.begin() once", shape=note, fillcolor="#FFFFFF"];
+  s1 [label="Step 'route'\nRouterAgent\n(read-only)"];
+  claim [label="claim the idempotency key\n(before the first material step)", fillcolor="#E6F4F5", color="#0F7C8C"];
+  s2 [label="Route 'act' by state['intent']\nORDER → OrderAgent\nSTATUS → StatusAgent\nmaterial=True"];
+  done [label="state['steps']: DONE / SKIPPED /\nFALLBACK / REFUSED / PAUSED\nsettle the claim"];
+  cp [label="checkpoint store\nstate at the pause (after _prepare),\nstep, key, fingerprint, requester", shape=cylinder, fillcolor="#FFF8E1", color="#B7791F", fontcolor="#7A4F0F"];
+  rs [label="resume(checkpoint_id, decision)\n_authorize_decision (four eyes)\ndecided once", fillcolor="#E6F4F5", color="#0F7C8C"];
+  rej [label="REJECTED\nnothing executed", fillcolor="#FDECEA", color="#C0392B", fontcolor="#7B241C"];
+  ex -> s1 -> claim -> s2 -> done;
+  s2 -> cp [label=" ApprovalRequired", style=dashed];
+  cp -> rs [label=" days later"];
+  rs -> s2 [label=" approved: continue at this step,\n same key", style=dashed, constraint=false];
+  rs -> rej [label=" rejected"];
+  {rank=same; s2; cp}
+}

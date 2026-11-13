@@ -14,9 +14,9 @@ github.com/subhamviky · April 2026
 
 # 1. Executive Summary
 
-The E2A, A2C, P0, and G2C frameworks define a four-layer abstract class hierarchy governing how enterprise-grade agentic AI systems are structured, generated, and deployed. Each framework applies the Template Method Pattern: a single public entry point orchestrates a fixed lifecycle, protected abstract methods encapsulate domain variability, and private methods enforce infrastructure invariants that subclasses never touch.
+The E2A, A2C, P0, and G2C frameworks define a four-layer abstract class hierarchy governing how enterprise-grade agentic AI systems are structured, generated, and deployed. Each framework applies the Template Method Pattern: governed public entry points (since E2A v1.2, one per genuine capability, usually one per class) orchestrate a fixed lifecycle, protected abstract methods encapsulate domain variability, and private methods enforce infrastructure invariants that subclasses never touch.
 
-This document establishes a formal architectural thesis: the same structural discipline that governs these framework class hierarchies — single entry point, layered abstraction, lifecycle enforcement, governance before business logic — maps directly and completely onto a cloud-native landing zone. A class IS a distributed application zone. A method IS a cloud component. Inheritance IS environment promotion. Abstract enforcement IS policy-as-code.
+This document establishes a formal architectural thesis: the same structural discipline that governs these framework class hierarchies — governed entry points, layered abstraction, lifecycle enforcement, governance before business logic — maps directly and completely onto a cloud-native landing zone. A class IS a distributed application zone. A method IS a cloud component. Inheritance IS environment promotion. Abstract enforcement IS policy-as-code.
 
 > **KEY INSIGHT**
 >
@@ -37,7 +37,7 @@ Every E2A framework class follows an identical three-tier method access pattern.
 |               |                                                                                                                                    |                                                                                                                                |                                                                                |
 |---------------|------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
 | **Layer**     | **Framework Contract**                                                                                                             | **Cloud Landing Zone Equivalent**                                                                                              | **Governance Rule**                                                            |
-| **PUBLIC**    | Single entry point — run() / execute() / bootstrap(). Orchestrates full lifecycle. Never overridden.                               | API Gateway / Application Load Balancer — single ingress, traffic governance, auth enforcement, rate limiting.                 | One door in. Governance enforced at the boundary.                              |
+| **PUBLIC**    | Governed entry points — run() / execute() / bootstrap(), plus a second method only for a genuine capability (v1.2: resume(), serve_async()). Orchestrate the full lifecycle. Never overridden. | API Gateway / Application Load Balancer — single ingress, traffic governance, auth enforcement, rate limiting.                 | One door in. Governance enforced at the boundary.                              |
 | **PROTECTED** | Abstract domain hooks — _build_messages(), _apply_policy(), _evaluate_output(). Subclass overrides for domain logic.             | Business Logic Tier — ECS/EKS microservices, Lambda functions, LangGraph agents. Domain-specific; replaceable per environment. | Domain changes here. Infrastructure constraints enforced by abstract contract. |
 | **PRIVATE**   | Infrastructure helpers — __write_file(), __ensure_idempotency(), __track_usage(). Fixed mechanics. Never touched by subclasses. (The model call itself is delegated to BaseLLMAgentService.) | Data & Infrastructure Tier — RDS/DynamoDB, S3, SQS, Secrets Manager, VPC internals. Shared; never directly exposed.            | No direct access. Infrastructure as immutable contract.                        |
 
@@ -485,7 +485,7 @@ The intake bucket sits in the Data & Messaging Perimeter (Tier 3), matching how 
 
 ## 9.1 Seven Principles of the Framework-to-Landing-Zone Mapping
 
-> Principle 1 — Single Entry Point = Single Ingress Every framework class exposes one public method. Every cloud zone exposes one ingress point. Multiple public methods = multiple attack surfaces = architecture violation in both contexts.
+> Principle 1 — Governed Entry Points = Governed Ingress (E2A v1.2; was "Single Entry Point = Single Ingress"). A framework class exposes a public method per genuine capability — its own caller or trigger, its own guarantees — and every one runs the same governed lifecycle; usually that is one method. A cloud zone exposes routes only through its governed ingress (gateway, load balancer, WAF), every route behind the same authentication and policy. A public method that is a shortcut to a hook is an ungoverned back door, exactly like a route that bypasses the gateway: an architecture violation in both contexts. `e2a.conformance` (rules R1–R3) checks the code side as policy-as-code, as SCPs check the cloud side.
 
 > Principle 2 — Abstract Contract = Service Control Policy Every @abstractmethod in the framework is a required NFR. Every required NFR has a corresponding SCP rule that blocks non-compliant resource creation. Framework enforcement at code time + SCP enforcement at infrastructure time = double-lock governance.
 
@@ -498,6 +498,16 @@ The intake bucket sits in the Data & Messaging Perimeter (Tier 3), matching how 
 > Principle 6 — NFR-First = Infrastructure-First A2C's NFR-First methodology mandates: scaffold → IaC → observability → CI/CD → NFRs → business logic. Cloud landing zone provisioning follows the same sequence: account → network → monitoring → pipeline → security → workload. Business logic is built last in both paradigms, on a production-ready foundation.
 
 > Principle 7 — G2C Self-Reference = Platform Eats Itself G2C generators are E2A-governed agents. The platform account is provisioned by the same Terraform modules it uses to provision workload accounts. The governance layer must itself be governed. The meta-level principle is identical across both dimensions: recursive self-governance.
+
+## 9.2 What E2A v1.2 adds to the mapping
+
+| v1.2 contract | Landing-zone equivalent |
+|---|---|
+| Governance **stages** in order (capacity, token budget, sandbox, firewall; approval after the facts are read; redaction on egress), each refusal typed | The ingress filter chain: rate limiting and quotas, WAF and guard models before any backend is touched; a human-approval step in the orchestration service; DLP on egress. A typed refusal is the 429 / 403 with a reason code. |
+| `io_read` / `io_modify` accessors; tools marked `material` | Separate read-only and write IAM roles per service; a write role reachable only from the step that commits, always with an idempotency key. |
+| `RequestContext` created once (tenant, correlation, deadline, settings) | Request-scoped headers set at the edge (tenant claim, `traceparent`, deadline) and configuration resolved from the parameter store once per request. |
+| Declared workflow **steps** with one claim; `resume()` from a checkpoint | A durable orchestration (Step Functions / Workflows / Durable Functions) with a wait-for-callback task; the checkpoint is its persisted execution state, decided once. |
+| `e2a.conformance` in CI | Policy-as-code in the pipeline (OPA, tfsec, SCPs), applied to the code tier. |
 
 ## 9.2 What This Architecture Enables
 

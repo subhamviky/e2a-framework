@@ -18,7 +18,7 @@ How E2A resolves a request to one of four peer agents — RAG-grounded, MCP tool
 
 ## `LLMOnlyAgent` is a peer to `BaseAgent`, not a subclass
 
-`LLMOnlyAgent` ships in `e2a_base.py` as `class LLMOnlyAgent(ABC, _PropagationMixin)` — an independent abstract line beside `BaseAgent`, `BaseRAGPipeline`, and `BaseToolService`, not a subclass of `BaseAgent`. That mirrors a decision the framework already made: `BaseRAGPipeline` is its own abstract class beside `BaseAgent` rather than a subclass of it, because RAG grounding needed a different public contract than "build a prompt, call the model."
+`LLMOnlyAgent` ships in `e2a_base.py` (since v1.2 in `e2a/agents.py`, re-exported unchanged by `e2a_base`; its contract did not change in v1.2) as `class LLMOnlyAgent(ABC, _PropagationMixin)` — an independent abstract line beside `BaseAgent`, `BaseRAGPipeline`, and `BaseToolService`, not a subclass of `BaseAgent`. That mirrors a decision the framework already made: `BaseRAGPipeline` is its own abstract class beside `BaseAgent` rather than a subclass of it, because RAG grounding needed a different public contract than "build a prompt, call the model."
 
 `LLMOnlyAgent` needed the same kind of independence, for the same reason: its public contract dispatches on **modality** before a single prompt is ever built.
 

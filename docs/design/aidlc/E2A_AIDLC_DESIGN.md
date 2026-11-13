@@ -9,8 +9,8 @@
 | Framework | E2A — Enterprise-to-Agentic Architecture Framework (AI-DLC profile composing G2C, P0 and A2C) |
 | Document type | Design Document (HLD + LLD) |
 | Author | Subham Gupta, Principal Platform Architect |
-| Source baseline | `subhamviky/e2a-framework` @ `main` — `reference/ai_dlc_pipeline.py` (631 lines) and the shared contracts it imports from `reference/e2a_base.py`; composes `subhamviky/a2c-framework` @ `main` (G2C, P0 and A2C implementations) |
-| Date | 8 November 2026 |
+| Source baseline | `subhamviky/e2a-framework` `v1.2.0` — `reference/ai_dlc_pipeline.py` and the shared contracts it imports through `e2a_base` from the `e2a` package; composes `subhamviky/a2c-framework` `v1.2.0` (G2C, P0 and A2C implementations) |
+| Date | 13 November 2026 (E2A v1.2.0, A2C v1.2.0; baseline 8 November 2026) |
 | Status | Aligned to the current reference implementation |
 
 ## 1. Introduction
@@ -186,7 +186,7 @@ Network placement: the DMZ holds no repository content and no model credentials;
 
 | Phase | Framework | Entry point | Quality gate | Artifacts |
 |---|---|---|---|---|
-| A | G2C | `DeveloperPlatformWorkflow.generate()` | `GeneratorCriticAgent` ≥ 0.75 (structure: access modifiers, abstract methods, inheritance) | Abstract base (`common/e2a_base.py` or `a2c_base.py`) if generated; inherited class |
+| A | G2C | `DeveloperPlatformWorkflow.generate()` | `GeneratorCriticAgent` ≥ 0.75 (structure: access modifiers, abstract methods, inheritance) | Abstract base (`common/e2a_base.py` or `a2c_base.py`) if generated; inherited class. Since A2C v1.2.0 a Python service on E2A v1.2 generates no base: it depends on the `e2a` package |
 | A | P0 (inline) | `BaseProjectBootstrapper.bootstrap()` inside G2C's generator phases 7–8 | `_validate_output()` — manifest, README, Docker, Makefile present | Build manifest, directory tree, Dockerfile, Makefile, `.env.example`, `.gitignore`; `dev_request` when `config['a2c'].enabled` |
 | B | A2C (optional) | `SDLCWorkflow.execute(dev_request, config)` after `DevPlatformValidationService` | `CodeCriticAgent` ≥ 0.75 (mandatory NFR patterns present in code) | Terraform, CI/CD workflow, business-logic source written into the P0 workspace |
 | C | E2A | `AIDLCStaticPipeline.run_pipeline()` | Static security, test suite, scaffold-contract compliance | Scan report, test results, compliance report |
@@ -403,7 +403,7 @@ Phase A request construction: `g2c_request = harness ∪ {scaffold: context} ∪
 |---|---|---|
 | `_run_static_security_scans` | `True` | SAST and secret detection on the generated repository in the object store. |
 | `_execute_test_suite` | `True` | Run the generated project's `tests/` in an ephemeral build container. |
-| `_verify_scaffold_contracts` | `True` | Assert the single-entry-point rule on the generated classes. |
+| `_verify_scaffold_contracts` | `True` | Since v1.2 the base default runs the `e2a.conformance` rules over `conformance_paths` (findings in `self.conformance_findings`); it no longer requires one public method per class. |
 | `_run_rag_eval` | `1.0` | No-op — no RAG on this profile's path. |
 | `_compile_artifact` | `True` | No-op — `required_artifact_matrix` is empty. |
 | `_run_dynamic_security_checks` | `True` | No-op — DAST belongs to the generated CI/CD. |
@@ -626,6 +626,22 @@ Table 5 records every observation with its current status. Resolved items are ke
 | O-11 | Open | With `compensation_delete_orphan_abstract` set, deleting a shared base leaves settled G2C claims pointing at a missing file. | Replays return `recovery_required`; a new project in the tenant gets that result for the base until its claim record is reconciled. The claim store cannot reopen a completed record. | Keep deletion off, or add a reconciler for `recovery_required` outcomes. |
 | O-12 | Open | The AI-DLC `Deadline` and A2C's `Deadline` are separate types; G2C receives milliseconds (`deadline_ms`). | The remaining time is converted at the boundary and each framework runs its own checks. | Share one `Deadline` type. |
 | O-13 | Open | `generator_key` in the build result is a deprecated alias of `build_key` and differs in meaning from G2C's `generator_key`. | Consumers can confuse the two. | Remove the alias after consumers move to `build_key`. |
+
+## 15. E2A v1.2 and A2C v1.2 in the Pipeline
+
+The pipeline's phases, claims and Saga are unchanged. What changed underneath:
+
+**Table 6 — v1.2 changes seen by AI-DLC**
+
+| Change | Effect on a build |
+|---|---|
+| G2C generates E2A v1.2 code (A2C v1.2.0, `harness.e2a_contract`, default `"1.2"` for Python) | Phase A writes no abstract base for such a service; it generates the agents (several, from `harness.agents`), the declared workflow, the governance stages, the validation and tool stubs, and `AgentContract` and conformance tests. Java stays on 1.1. |
+| No application-service module (A2C v1.2.0) | Phase B's A2C chain runs six agent steps; the critic reviews the NFR module. |
+| Declarations (A2C v1.2.0: settings, contracts, Maven coordinates, monorepo layout) | Part of the request that reaches P0 and A2C; the build key covers them because the request is fingerprinted as a whole. |
+| `.a2c/manifest.json` and `aidlc-build --upgrade` | A rebuilt project can be upgraded instead of rescaffolded; the pipeline itself still builds new projects. |
+| `BasePipeline._verify_scaffold_contracts` runs `e2a.conformance` | Phase C's contract check reports R1–R3 findings instead of counting public methods. |
+
+The A2C, G2C and P0 Framework Design Documents (v1.2.0) describe these in full.
 
 ## Appendix A. Glossary
 

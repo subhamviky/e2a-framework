@@ -13,6 +13,9 @@
 
 ## 1. Purpose & Relationship to the Base Playbook
 
+> **E2A v1.2.** The CQRS profile's classes and this playbook's contracts are unchanged in v1.2.0. The shared contracts it imports (`resolve_config`, `Deadline`, claims, stores, outcomes) now live in the `e2a` package and reach `e2a_cqrs_base.py` through `e2a_base`, which re-exports them unchanged. The agentic-core additions (request context, governance stages, declared steps, `resume()`) do not apply here; `python -m e2a.conformance` can still check a CQRS project. See the E2A CQRS Design Document, Section 16.
+
+
 This document carries the method-level contract and runnable scaffold for the three classes that are new in the CQRS profile — `BaseOrchestrator`, `BaseCommandService`, `BaseQueryService` — plus the abstract-class Observability/Governance contract this profile depends on. `BaseValidationService` is reused from the base Implementation Playbook without modification and is not repeated here beyond the entry-point table in Section 2.
 
 > **Note:** `BaseObservability` and `BaseGovernanceFramework` below are CQRS-profile classes, not the agentic profile's classes reused verbatim. The abstract-class contract (`ABC`, the same `@abstractmethod` hook names) is identical to `e2a_base.py` — that part is intentionally unchanged so both profiles are pluggable behind the same `config['observability_engine']` / `config['governance_engine']` interface. What changes is the concern each hook enforces: LLM token budgets and MCP tool sandboxing are replaced with tenant request quotas and external-API-call isolation, since no LLM call and no MCP tool call ever occurs on this profile's request path.

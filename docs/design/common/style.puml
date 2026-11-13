@@ -1,0 +1,66 @@
+' Shared PlantUML style of the E2A / A2C / G2C / P0 design documents.
+' Included by every diagrams/*.puml as  !include ../../common/style.puml
+' Render: java -jar plantuml.jar -tpng -o ../images <file>.puml
+skinparam dpi 165
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 13
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam titleFontColor #1F3864
+skinparam titleFontSize 18
+skinparam titleFontStyle plain
+skinparam ArrowColor #2E4A6B
+skinparam ArrowFontColor #000000
+skinparam ArrowFontSize 13
+skinparam class {
+  BackgroundColor #F4F8FC
+  BorderColor #1F3864
+  BorderThickness 1.5
+  FontColor #1F3864
+  HeaderFontColor #1F3864
+  AttributeFontColor #1F1F1F
+  StereotypeFontColor #0F7C8C
+}
+skinparam classFontColor #1F3864
+hide empty methods
+hide empty fields
+skinparam participant {
+  BackgroundColor #F4F8FC
+  BorderColor #1F3864
+  FontColor #1F3864
+}
+skinparam actor {
+  BackgroundColor #F4F8FC
+  BorderColor #1F3864
+}
+skinparam database {
+  BackgroundColor #F4F8FC
+  BorderColor #1F3864
+}
+skinparam sequence {
+  LifeLineBorderColor #2E4A6B
+  GroupBorderColor #0F7C8C
+  GroupBackgroundColor #E6F4F5
+  DividerBackgroundColor #DCE8F5
+}
+skinparam note {
+  BackgroundColor #FFFFFF
+  BorderColor #0F7C8C
+}
+skinparam state {
+  BackgroundColor #F4F8FC
+  BorderColor #1F3864
+  FontColor #1F3864
+}
+skinparam activity {
+  BackgroundColor #F4F8FC
+  BorderColor #1F3864
+}
+<style>
+spot {
+  spotClass { BackgroundColor #0F7C8C }
+  spotInterface { BackgroundColor #2E75B6 }
+  spotAbstractClass { BackgroundColor #0F7C8C }
+  spotEnum { BackgroundColor #B7791F }
+}
+</style>

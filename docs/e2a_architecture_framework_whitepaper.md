@@ -12,7 +12,7 @@ Modern enterprise innovation thrives on rapid experimentation. Managed cloud AI 
 
 The **E2A (Enterprise-to-Agentic) Framework** serves as a natural bridge between rapid prototyping and long-term enterprise operations. Rather than replacing cloud-native prototyping tools or requiring ground-up rewrites, E2A functions as an **industrialization harness**. It ingests the metadata, client SDK bindings, and payload contracts discovered during prototyping and maps them into an invariant, production-ready architectural foundation.
 
-Through **structural isomorphism**, **single public entry points**, **invariant template pipelines**, and **stateless explicit context propagation**, E2A complements rapid cloud prototyping with enterprise-grade maintainability, cross-cutting observability, and rigorous governance.
+Through **structural isomorphism**, **governed public entry points**, **invariant template pipelines**, and **stateless explicit context propagation**, E2A complements rapid cloud prototyping with enterprise-grade maintainability, cross-cutting observability, and rigorous governance.
 
 ---
 
@@ -192,7 +192,7 @@ The primary function of the E2A framework is to act as an industrialization harn
 ┌────────────────────────────────────────────────────────────────────────┐
 │     Stage 3: Ingestion into Compliant E2A Framework                    │
 │     • Map harvested SDK calls into protected template hooks            │
-│     • Expose via standardized single entry points                      │
+│     • Expose via standardized governed entry points                    │
 │     • Inherit unified tracing, idempotency, and audit controls         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -243,7 +243,7 @@ Architects      Security        Economics        Resilience      Delivery
 ### Lens 2: Chief Information Security Officer (CISO) & Trust Engineering
 * **Primary Focus:** Zero Trust architecture, clear audit trails, and consistent security perimeters.
 * **E2A Value Realization:**
-  * **Controlled Ingress Gateways:** The single public entry point ensures that authentication verification, token claim validation, and rate limiting occur before any business or model logic executes.
+  * **Controlled Ingress Gateways:** The governed public entry points ensure that authentication verification, token claim validation, and rate limiting occur before any business or model logic executes.
   * **Stateless Concurrency:** Prohibiting mutable instance-level state prevents cross-request data leakage in shared container runtimes.
   * **Comprehensive Audit Records:** Every critical transaction and state change emits an append-only audit event containing tenant identifiers, correlation IDs, and transaction outcomes prior to final commit.
 
@@ -274,7 +274,7 @@ Architects      Security        Economics        Resilience      Delivery
 
 | Dimension | Prototyping Discovery Phase | E2A Enterprise Production Ingestion | Value to the Organization |
 | :--- | :--- | :--- | :--- |
-| **Ingress Control** | Flexible, ad-hoc endpoints for rapid discovery | Strict Single Public Entry Point (`validate`, `execute`, `mutate`, `fetch`) | Centralized perimeter defense and uniform telemetry across all invocations. |
+| **Ingress Control** | Flexible, ad-hoc endpoints for rapid discovery | Strict governed entry points (`validate`, `execute`, `mutate`, `fetch`; one per genuine capability) | Centralized perimeter defense and uniform telemetry across all invocations. |
 | **Lifecycle Design** | Dynamic scripts tailored for exploration | Invariant Template Method Lifecycle (`final` base orchestrators) | Guaranteed execution of audit, ownership, and tracing steps across all teams. |
 | **Runtime State** | Fast prototyping using script/instance state | Explicit Six-Field Context Propagation (`correlation_id`, `tenant_id`, etc.) | Thread-safe, horizontally scalable execution across container platforms. |
 | **Technology Strategy** | Optimized for fast local iteration | Deliberate Polyglot Alignment (e.g., Java for ACID paths, Python for Agents) | Pairs transactional consistency with AI and retrieval ecosystem strength. |

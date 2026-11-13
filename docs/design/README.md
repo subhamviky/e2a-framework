@@ -11,4 +11,6 @@ Detailed HLD and LLD documents for the E2A profiles and the family as a whole. E
 
 The P0, G2C and A2C documents are in the `a2c-framework` repository under `docs/design/`.
 
-The Python files in `reference/` remain the reference for line-level detail.
+All four are aligned to E2A v1.2.0 (docs release v1.2.1); the core document's Section 15 summarises what v1.2 changed. The PlantUML diagrams share `common/style.puml`; the Graphviz diagrams carry their style inline. Render with `dot -Tpng -Gdpi=220 diagrams/<name>.dot -o images/<name>.png` and `java -jar plantuml.jar -tpng -o ../images diagrams/<name>.puml`.
+
+The Python files in `reference/` (the `e2a` package) remain the reference for line-level detail.

@@ -9,15 +9,15 @@
 | Framework | E2A — Enterprise-to-Agentic Architecture Framework |
 | Document type | Design Document (HLD + LLD) |
 | Author | Subham Gupta, Principal Platform Architect |
-| Source baseline | `subhamviky/e2a-framework` @ `main` 32c99c0 — `reference/e2a_base.py` (3,320 lines), `reference/multimodal_orchestrator.py` (426 lines), `reference/e2a_inmemory_adapters.py` (178 lines) |
-| Date | 7 November 2026 |
-| Status | Baseline design, aligned to the current reference implementation |
+| Source baseline | `subhamviky/e2a-framework` `v1.2.0` — the `e2a` package (`reference/e2a/`, 19 modules, 5,159 lines), `reference/e2a_base.py` (compatibility module), `reference/multimodal_orchestrator.py`, `reference/e2a_inmemory_adapters.py`; baseline of the v1.1 sections: `main` 32c99c0 |
+| Date | 13 November 2026 (v1.2.0; baseline 7 November 2026) |
+| Status | Aligned to E2A v1.2.0 and its test suite (design notes 01–05) |
 
 ## 1. Introduction
 
 ### 1.1 Purpose
 
-E2A (Enterprise-to-Agentic) is an architecture framework for building multi-tenant, governed, AI-enabled enterprise services. It ships as a **scaffold** — `reference/e2a_base.py` — of abstract base classes that a project drops into `src/`, imports and subclasses, and never modifies. Each base class owns a fixed lifecycle behind one public entry point; projects fill in protected hooks with domain or vendor logic; private, base-owned methods enforce the invariants that must not vary between teams: idempotency, tenant isolation, bounded waits, typed outcomes, governance and telemetry.
+E2A (Enterprise-to-Agentic) is an architecture framework for building multi-tenant, governed, AI-enabled enterprise services. It ships as the **`e2a` package** (installed as `e2a-framework`; until v1.1 a single scaffold file, `reference/e2a_base.py`, which remains as a compatibility module) of base classes that a project imports and subclasses, and never modifies. Each base class owns a fixed lifecycle behind governed entry points, one public method per genuine capability; projects fill in protected hooks with domain or vendor logic; private, base-owned methods enforce the invariants that must not vary between teams: idempotency, tenant isolation, bounded waits, typed outcomes, governance and telemetry.
 
 This document is the design reference for that agentic core. It covers:
 
@@ -30,9 +30,12 @@ This document is the design reference for that agentic core. It covers:
 - dynamic behaviour as sequence, state and activity models (Section 9);
 - the concurrency, consistency and failure model (Section 10);
 - non-functional design: capacity, security, observability (Section 11);
-- how to extend the framework (Section 12), how it is verified (Section 13) and known gaps (Section 14).
+- how to extend the framework (Section 12), how it is verified (Section 13) and known gaps (Section 14);
+- what v1.2 changes, gathered in one place (Section 15).
 
 The deterministic CQRS profile and the AI-DLC profile have their own design documents; both import the shared contracts described here.
+
+> **v1.2.** E2A v1.2 keeps every v1.1 contract and adds a second, declarative style for new code: a frozen request context (`ctx`) and two accessors (`io_read`, `io_modify`) that a hook receives only if it declares them; governance as an ordered list of stages with typed refusals; workflows declared as steps, with `resume()` for a paused step; ports for RAG; and a conformance kit. A v1.1 subclass runs unchanged, with one `DeprecationWarning` per class. Section 15 summarises the changes; the sections they touch carry a **v1.2** note.
 
 ### 1.2 Audience
 
@@ -52,13 +55,15 @@ The deterministic CQRS profile and the AI-DLC profile have their own design docu
 |---|---|
 | **Implemented** | Present in the reference files and exercised by the smoke tests. |
 | **Abstract hook** | `@abstractmethod`: the scaffold defines the contract, a subclass supplies the body; a missing hook fails at instantiation with `TypeError`. |
+| **Default (v1.2)** | A protected hook that was abstract in v1.1 and now has a safe default (for example `BaseAgent._apply_policy`, `BaseWorkflow._get_agent`); a subclass overrides it only to specialise. |
+| **Deprecated (v1.2)** | Kept for v1.1 code with a `DeprecationWarning`; removed in v1.3 (the v1.1 hook signatures, `BaseToolService.get_endpoint`). |
 | **Reference** | Concrete, generic implementation shipped for reuse or as an example (e.g. `RestToolService`, `GCPInfraProvisioner`, the multimodal orchestrator). |
 | **Test double** | In-memory adapter used by the smoke tests; not for production. |
 | **Runtime obligation** | Behaviour the platform around the scaffold must provide (consumer loops, schedulers, the HTTP/gRPC server hosting a class). |
 
 ### 1.4 Source of truth and related documents
 
-Where this document and the code disagree, the code is authoritative and Section 14 records the difference. Configuration names, defaults and environment variables in Appendix A are generated directly from the registry in `e2a_base.py`.
+Where this document and the code disagree, the code is authoritative and Section 14 records the difference. Configuration names, defaults and environment variables in Appendix A are generated directly from the registry (`E2A_CONFIG` in `e2a/config.py`).
 
 **Table 2 — Related documents**
 
@@ -69,7 +74,8 @@ Where this document and the code disagree, the code is authoritative and Section
 | E2A Deterministic CQRS Profile — Design Document | Replaces the Tier 2 workflow/agent layer with command/query services; imports the contracts in Section 8.6. |
 | E2A AI-DLC — Design Document | Pipeline profile that composes G2C and A2C; uses the same idempotency, lease and capacity contracts. |
 | E2A Master Abstraction Reference | Framework-wide taxonomy and naming rules. |
-| `reference/smoke_test_*.py` | Executable evidence for Section 13. |
+| `reference/smoke_test_*.py`, `tests/` | Executable evidence for Section 13. |
+| E2A v1.2 design notes 01–05 (o2c-platform-hub, `roadmap/design/`) | Rationale for the v1.2 contracts in Section 15: entry points, request context, agent lifecycle, governance stages, workflows and structure. |
 
 ## 2. Problem Statement and Motivation
 
@@ -148,6 +154,9 @@ E2A addresses these structurally rather than by guidance:
 | UC-11 | Repair parked or stuck work | `BaseOutboxSweeper.sweep()`, `BaseReconciliationService.reconcile()` under a lease | Confirm physical truth before any replay |
 | UC-12 | Ship a change safely | `BasePipeline.run_pipeline()`: security, tests, capacity + contract gate, RAGAS, images, DAST, rollout | No deploy that violates capacity equations |
 | UC-13 | Stand up a tenant landing zone | `BaseInfraProvisioner.provision_landing_zone(tenant, POOL\|SILO, tier)` | Fixed step order; per-tier IAM |
+| UC-14 | Run several agents as one request (v1.2) | `_build_workflow(ctx)` returns `Steps(Step(...), Route(...))`; one context, one deadline, one claim before the first material step | Each step recorded in `state['steps']`; a fallback or refusal ends the workflow; a repeat of a material request is `REPLAYED` as a whole |
+| UC-15 | Approve a paused step days later (v1.2) | `ApprovalStage` pauses; the checkpoint is stored; `resume(checkpoint_id, decision)` | Decided once, by an allowed decider; an approval continues at the paused step under the original key; a rejection executes nothing |
+| UC-16 | Check a codebase against the contract (v1.2) | `python -m e2a.conformance src/ --strict`; `AgentContract` tests | Framework-owned methods are not overridden; hooks are not called from outside |
 
 ### 3.3 Non-goals
 
@@ -189,6 +198,10 @@ E2A addresses these structurally rather than by guidance:
 | INV-11 | Cache, KV handle, index and claim keys are tenant-scoped. | Hook contracts and `_apply_kv_caching`. |
 | INV-12 | No deploy violates the capacity equations. | `validate_capacity()` in the scaffold-compliance gate. |
 | INV-13 | Scheduled repair runs with one leader and fenced writes. | `BaseDistributedLock` lease + `fencing_token`. |
+| INV-14 | A v1.2 hook receives exactly the parameters it declares, from those its step offers. | `BaseAgent.run` / `BaseWorkflow` hook dispatch; declaring `io_modify` in `_prepare` is an error. |
+| INV-15 | A material effect goes only through `io_modify`, always with an idempotency key; `io_read` refuses material tools. | `ReadAccess` / `ModifyAccess`; tool `material = True`; `allowed_tools`, `tool_policy`. |
+| INV-16 | A request is screened before anything is read, and nothing material runs after the deadline or before an accepted evaluation. | `phase='screen'` stages before `_prepare`; `_act` only after evaluation, never after the deadline. |
+| INV-17 | A declared workflow takes one claim, before its first material step; a paused step is decided once. | `Steps.claim_at`; `BaseCheckpointStore.decide`; `ResumeRefused`. |
 
 ## 5. High-Level Design
 
@@ -306,6 +319,8 @@ Clients upload audio, documents and images by presigned URL to an isolated intak
 
 `BaseWorkflow.execute()` is the origin of the first six; it writes `tenant_id`, `correlation_id` and `idempotency_key` back into `state` and passes everything to `agent.run()` as keyword arguments.
 
+> **v1.2.** The inbound fields travel together as one frozen `RequestContext` (Section 6.6); the outbound ones as `MessageLog` and `FailedKeys`. A v1.2 agent receives the context as `ctx=`; a v1.1 agent still receives the keywords above.
+
 ### 6.2 Request state keys used by the base classes
 
 **Table 11 — State keys**
@@ -322,6 +337,11 @@ Clients upload audio, documents and images by presigned URL to an isolated intak
 | `status` | W | `REPLAYED`, `IN_PROGRESS`, `CONFLICT`, `RECOVERY_REQUIRED`, `FAILED_FINAL`, `AWAITING_WEBHOOK`. |
 | `idempotency_status`, `replayed` | W | Raw claim status and replay marker. |
 | `message_log`, `failed_keys` | W | Always written on exit. |
+| `steps` | W | v1.2: one record per declared step (`name`, `agent`, status `DONE` / `SKIPPED` / `FALLBACK` / `REFUSED` / `PAUSED`, latency). |
+| `refusal` | W | v1.2: a typed governance refusal (`code`, `stage`, `reason`, `retryable`). |
+| `evaluation`, `errors` | W | v1.2: `ACCEPTED` / `FALLBACK`; errors recorded by the default `_handle_error`. |
+| `slo_breached` | W | v1.1.2: latency breach recorded, not raised. |
+| `checkpoint_id`, `approved_by` | R/W | v1.2: set on a paused step and by `resume()`. |
 
 ### 6.3 Inference payload contract
 
@@ -352,22 +372,52 @@ All keys live in the `E2A_CONFIG` registry (106 keys in 18 groups) and resolve t
 
 Object references are also passed in `config`: `llm_service` (required for any agent that infers), `governance_engine`, `observability_engine`, `idempotency_store`, `cache_store`, `transactional_store`, `pipeline_state_store`.
 
+### 6.6 Request context and accessors (v1.2)
+
+A v1.2 hook declares only what it uses, from this set. The framework passes exactly the declared parameters; declaring one the step does not offer is an error.
+
+**Table 13 — v1.2 hook parameters**
+
+| Parameter | Type | Contents |
+|---|---|---|
+| `state` | `dict` | The business request, as in v1.1. |
+| `ctx` | `RequestContext` (frozen) | `tenant_id`, `correlation_id`, `idempotency_key`, `deadline`, `settings` (every registry key and application key, resolved once through `resolve_config`), `trace`; `ctx.setting(key)`, `ctx.child(...)`, `ctx.expired()`. Created once by `RequestContext.begin()` at the outermost entry point. |
+| `io_read` | `ReadAccess` | `call(tool, payload)` for replay-safe tools; `resource(name)` for named resources (retrievers, stores). Refuses a material tool. |
+| `io_modify` | `ModifyAccess` | `call(tool, payload, idempotency_key=None)` for material tools; always sends a key (derived from the request when none is given); a transport failure is `UNKNOWN`. Refuses a replay-safe tool. |
+| `messages` | `MessageLog` | `info` / `warn` / `error(event, **fields)`. |
+| `failed_keys` | `FailedKeys` | `add(key)`. |
+| `outcomes` | `list` | The typed results `_act` returned, offered to `_confirm`. |
+
+**Table 14 — What each step offers**
+
+| Hook | Offered |
+|---|---|
+| `_prepare` | `state`, `ctx`, `io_read`, `messages` |
+| `_build_messages` | `state`, `ctx`, `messages` (return `None` for no model step) |
+| `_evaluate_output`, `_fallback` | `response` (evaluate only), `state`, `ctx`, `messages` |
+| `_act` | `state`, `ctx`, `io_modify`, `messages`, `failed_keys` |
+| `_confirm` | `state`, `ctx`, `io_read`, `outcomes`, `messages` |
+| `_handle_error` | `error`, `state`, `ctx`, `messages`, `failed_keys` |
+
+An agent's `allowed_tools`, and the governance class's `tool_policy` ({agent: [tools]}), limit both accessors.
+
 ## 7. Low-Level Design — Class Model
 
 ### 7.1 Module structure
 
-**Table 13 — Modules**
+**Table 15 — Modules**
 
 | Module | Contents |
 |---|---|
-| `reference/e2a_base.py` | The scaffold. Exceptions and concurrency value types; configuration registry; resilience primitives; `_PropagationMixin`; foundation classes (observability, governance, validation); `BaseLLMAgentService`; `BaseAgent`, `BaseWorkflow`, `LLMOnlyAgent`; `BaseRAGPipeline`, `BaseIndexingPipeline`; `BaseToolService`, `RestToolService`, `MCPToolService`, `BaseMCPServer`, tool routing; `BasePromptRegistry`, `BaseMemoryManager`, `BaseSchemaTransformer`, `BaseWebhookDispatcher`; store and lock ports; `BaseOutboxSweeper`, `BaseReconciliationService`; `BasePipeline`; `BaseInfraProvisioner`, `GCPInfraProvisioner`. "Import and subclass. Never modify." |
+| `reference/e2a/` (v1.2) | The `e2a` package, one module per contract area: `core` (exceptions, `Deadline`, outcomes), `config` (`E2A_CONFIG`, `resolve_config`), `resilience`, `observability`, `governance`, `stages`, `validation`, `llm`, `context`, `agents`, `workflows`, `rag`, `tools`, `ports` (stores, locks, `BaseCheckpointStore`, sweeper, reconciler), `pipeline`, `infra`, `conformance`. Imports between modules are explicit; each public name has one home. |
+| `reference/e2a_base.py` | Compatibility module since v1.2: re-exports every name it defined in v1.1.x (the same objects). Until v1.1: the scaffold. Exceptions and concurrency value types; configuration registry; resilience primitives; `_PropagationMixin`; foundation classes (observability, governance, validation); `BaseLLMAgentService`; `BaseAgent`, `BaseWorkflow`, `LLMOnlyAgent`; `BaseRAGPipeline`, `BaseIndexingPipeline`; `BaseToolService`, `RestToolService`, `MCPToolService`, `BaseMCPServer`, tool routing; `BasePromptRegistry`, `BaseMemoryManager`, `BaseSchemaTransformer`, `BaseWebhookDispatcher`; store and lock ports; `BaseOutboxSweeper`, `BaseReconciliationService`; `BasePipeline`; `BaseInfraProvisioner`, `GCPInfraProvisioner`. "Import and subclass. Never modify." |
 | `reference/multimodal_orchestrator.py` | Reference `MultiAgentOrchestratorWorkflow` (LangGraph) with `RAGAgent`, `APIToolAgent`, `MCPToolAgent`, `GenericLLMOnlyAgent`, `FallbackAgent`, `ModalityPreprocessor`, `OrchestratorState`. Lives in `src/workflows/`. |
 | `reference/e2a_inmemory_adapters.py` | Test doubles: `InMemoryIdempotencyStore`, `InMemoryTransactionalStore`, `InMemoryCacheStore`, `InMemoryLease`. |
 | `src/…` (project) | Concrete workflows, agents, pipelines, tool services, inference binding, engines, store adapters, `settings.py` (project config keys). |
 
 ### 7.2 Class catalogue
 
-**Table 14 — Classes by layer**
+**Table 16 — Classes by layer**
 
 | Class | Status | Role |
 |---|---|---|
@@ -488,7 +538,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | Collaborators | Agent from `_get_agent()`; `idempotency_store`, `observability_engine` via `config`; `Deadline` |
 | Invariants | INV-01, INV-03 to INV-06 |
 
-**Table 15 — BaseWorkflow methods**
+**Table 17 — BaseWorkflow methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -507,6 +557,21 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `__short_circuit` | template | `(state, claim, log, cid, config) → dict` | Map claim status; copy replayable keys on `REPLAY`; flush logs locally; empty `failed_keys`. |
 | `__settle_claim` | template | `(store, key, tenant, owner, state, failed_keys, dehydrated, error, config)` | Dehydrated → `fail(retryable=True)`; `UNKNOWN` → park; failures → `fail(retryable = not deterministic)`; else `complete()`. |
 
+**v1.2 — declared steps and resume.** A v1.2 workflow implements `_build_workflow(self, ctx)` and returns `Steps(...)`; `_validate_workflow` and `_get_agent` then have defaults and are not needed.
+
+**Table 18 — BaseWorkflow v1.2 members**
+
+| Member | Kind | Signature → returns | Contract |
+|---|---|---|---|
+| `Step` | value | `(name, agent, when=None, stop_if=None, material=False)` | One agent run. `when(state)` false → `SKIPPED`; `stop_if(state)` true after the run → the workflow ends. |
+| `Route` | value | `(name, by, agents, default=None, when=None, stop_if=None, material=False)` | One agent chosen by `state[by]`; no match and no default → `ValueError`. |
+| `Steps` | value | `(*steps)` | Ordered, unique names; `claim_at` = the first material step (else 0). No loops, parallel branches or graphs. |
+| `execute` | entry | `(state, config=None, ctx=None, **kw) → dict` | With `Steps`: one context, one deadline, one log; the claim is taken before step `claim_at`, so a read-only request takes none and a repeat of a material one is `REPLAYED` as a whole; a fallback or refusal ends the workflow; `state['steps']` records each step. |
+| `resume` | entry | `(checkpoint_id, decision, config=None, tenant_id=None, **kw) → dict` | Needs `config['checkpoint_store']`. Refuses an unknown checkpoint or another tenant's (`UNKNOWN_CHECKPOINT`), a second or concurrent decision (`ALREADY_DECIDED`), a decider `_authorize_decision` rejects (`DECIDER_REFUSED`), each as `ResumeRefused`. Approved → continues at the paused step under the original key; rejected → `status REJECTED`, nothing executed. |
+| `_authorize_decision` | default | `(checkpoint, decision, ctx) → bool` | Four eyes: a named decider who is not the requester. |
+| `_rehydrate_state` | default | `(checkpoint, decision, ctx) → dict` | The stored state plus `approval_granted`, `approved_by`. |
+| `__execute_steps` | template | `(state, config, kwargs, ctx, start_at, fingerprint)` | Runs the steps; on `ApprovalRequired` stores the checkpoint (the state at the pause, after the step's `_prepare`). |
+
 ### 8.2 BaseAgent
 
 | Aspect | Detail |
@@ -516,7 +581,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | Collaborators | `BaseLLMAgentService` via `_infer()`; `BaseGovernanceFramework` via `config['governance_engine']`; tools via `_resolve_tool_call()` from `_apply_policy()`; optionally `BasePromptRegistry` and `BaseMemoryManager` composed into `_build_messages()` |
 | Input assumption | `state` already passed `BaseValidationService.validate()`; there is no `_validate_state` hook |
 
-**Table 16 — BaseAgent methods**
+**Table 19 — BaseAgent methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -528,6 +593,23 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `_handle_error` | hook | `(error, state, config, **kw)` | Record the failure; `failed_keys` is in kwargs. |
 | `__track_usage` | template | `(messages, response, config, **kw) → int` | Provider-reported tokens, else ≈ chars / 4. |
 
+**v1.2 — the agent lifecycle (Figure 20).** An agent whose hooks declare `ctx` runs the v1.2 order; one that does not runs exactly as in v1.1, with one `DeprecationWarning` per class.
+
+**Table 20 — BaseAgent v1.2 hooks**
+
+| Hook | Kind | Declares (subset of) | Contract |
+|---|---|---|---|
+| `_prepare` | default | `state, ctx, io_read, messages` | Read facts or retrieve before the prompt; no side effects. Runs after the `screen` governance stages. |
+| `_apply_policy` | default | `state, ctx` | Agent-specific policy (no-op by default); runs after the `decide` stages. |
+| `_build_messages` | hook | `state, ctx, messages` | The prompt; `None` means no model step (a deterministic agent). |
+| `_evaluate_output` | hook (model step only) | `response, state, ctx, messages` | Confidence in [0, 1]; below `min_confidence` → `_fallback`; records `state['evaluation']`. |
+| `_fallback` | hook (model step only) | `state, ctx, messages` | Degraded response; nothing material follows. |
+| `_act` | default | `state, ctx, io_modify, messages, failed_keys` | Material effects; only after an accepted evaluation and never after the deadline; returns the typed results. |
+| `_confirm` | default | `state, ctx, io_read, outcomes, messages` | Sets `state['outcome']`: `UNKNOWN` › `NOT_COMMITTED` › `COMMITTED`; no outcomes, no verdict. |
+| `_handle_error` | default | `error, state, ctx, messages, failed_keys` | Records `state['errors']`; the run does not raise. |
+
+A refused run records `state['refusal']`; a deterministic agent's response is what its steps put in `state['response']`.
+
 ### 8.3 LLMOnlyAgent
 
 | Aspect | Detail |
@@ -535,7 +617,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | Stereotype | Abstract; peer of `BaseAgent` (not a subclass) for model-only intents |
 | Why separate | Its contract dispatches on modality to a distinct handler before any prompt is built; it still exposes the same `run()` shape so `_get_agent()` can return it. |
 
-**Table 17 — LLMOnlyAgent methods**
+**Table 21 — LLMOnlyAgent methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -555,7 +637,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | Subclass duty | Implement the two `_dispatch_upstream_*` hooks for one provider — nothing else is vendor-specific |
 | Concurrency | All waits bounded by `min(timeout, deadline)`; permits always released; quota always settled |
 
-**Table 18 — BaseLLMAgentService public and protected members**
+**Table 22 — BaseLLMAgentService public and protected members**
 
 | Member | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -577,7 +659,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `_dispatch_upstream_call` | hook (async) | `(messages, model_id, temperature, max_tokens, tools, stop_sequences, cache_handle, config, **kw) → dict` | One provider call incl. provider-side cache and fallback cascade; return `{text, metadata.tokens_used}` and/or `{tool_calls}`. |
 | `_dispatch_upstream_stream` | hook | `(messages, model_id, temperature, max_tokens, config, **kw) → AsyncGenerator[str]` | Raw provider chunks. |
 
-**Table 19 — BaseLLMAgentService private (framework-owned) steps**
+**Table 23 — BaseLLMAgentService private (framework-owned) steps**
 
 | Step | Contract |
 |---|---|
@@ -593,7 +675,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 #### BaseRAGPipeline
 
-**Table 20 — BaseRAGPipeline methods**
+**Table 24 — BaseRAGPipeline methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -605,7 +687,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 #### BaseIndexingPipeline
 
-**Table 21 — BaseIndexingPipeline methods**
+**Table 25 — BaseIndexingPipeline methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -616,11 +698,13 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `_delete_from_index` | hook | `(doc_id, config, tenant_id, **kw)` | Remove all chunks of the doc in the tenant namespace. |
 | `_handle_error` | hook | `(error, document, config, **kw)` | — |
 
+**v1.2 — RAG ports and a façade.** `BaseEmbeddingModel` (`model_id`, `embed_documents`, `embed_query`) and `BaseVectorIndex` (`upsert`, `delete`, `search`). With `embedding_model` / `vector_index` set, `_embed_query`, `_search_index`, `_embed_documents`, `_write_index` and `_delete_from_index` have working defaults (namespace `f'{namespace_prefix}_{tenant}'`) and are no longer abstract. `BaseRAGPipeline.evaluate_answer(answer, retrieved)` is public and delegates to `_evaluate_answer`. `RAGPipeline(indexing, retrieval)` offers `ingest` / `retrieve` / `evaluate_answer` over the two pipelines and refuses different embedding models. `retrieve(…, ctx=…)` and `ingest(…, ctx=…)` take the tenant from the context and refuse a different `tenant_id`.
+
 ### 8.6 Integration tier
 
 #### BaseToolService, RestToolService, MCPToolService
 
-**Table 22 — BaseToolService methods**
+**Table 26 — BaseToolService methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -641,7 +725,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 #### BaseMCPServer
 
-**Table 23 — BaseMCPServer methods**
+**Table 27 — BaseMCPServer methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -651,6 +735,8 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `_call_tool` | default (async) | `(tool_name, arguments, config, tenant_id, **kw) → dict` | Delegate to `handler.execute()`; MCP content shape; unknown tool → `isError`. |
 | `__dispatch_jsonrpc` | template | `(request, config, **kw)` | Envelope handling. |
 
+**v1.2.** A tool declares `material = True` for an effect (reached only through `io_modify`). `BaseToolService._get_endpoint` is the protected hook; `get_endpoint` stays as a deprecated alias, and a v1.1 subclass that overrides it keeps precedence with one `DeprecationWarning` (conformance rule D1). `execute(…, ctx=…)` takes the tenant and the deadline from the context. `BaseMCPServer.serve_async` exposes the same JSON-RPC surface to async hosts.
+
 ### 8.7 BaseGovernanceFramework
 
 | Aspect | Detail |
@@ -658,7 +744,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | Stereotype | Abstract; template method; injected as `config['governance_engine']` |
 | Two public methods | `enforce_governance_gate()` before execution; `redact_response()` after a response exists — kept separate because there is nothing to redact pre-execution |
 
-**Table 24 — BaseGovernanceFramework methods**
+**Table 28 — BaseGovernanceFramework methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -674,9 +760,24 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `_circuit_breaker` | hook | `(failures, config, **kw) → bool` | Circuit transitions and metrics (not invoked by the base). |
 | `_dehydrate_state_to_perimeter` | hook | `(state, correlation_id, tenant_id, config)` | Persist resumable state to T3. |
 
+**v1.2 — governance as stages (`e2a.stages`).** A subclass declares `stages`, an ordered list, and optionally `tool_policy`; the v1.1 hooks above are then not used, and are no longer abstract.
+
+**Table 29 — Built-in stages**
+
+| Stage | Phase | Refusal (also the v1.1 exception type) |
+|---|---|---|
+| `CapacityStage(limiter=InflightLimiter(n), breakers=…)` | screen | `CapacityRefusal` (`NFRViolationError`) |
+| `TokenBudgetStage()` — reads `ctx.setting('max_token_budget')` | screen | `TokenBudgetRefusal` (`ValueError`) |
+| `SandboxStage()` | screen | `SandboxRefusal` (`PermissionError`) |
+| `FirewallStage(injection_patterns, redactions, max_length, fields)` | screen | `FirewallRefusal` (`PermissionError`) |
+| `ApprovalStage(required=…)` | decide | `ApprovalRequired` (a `DehydrationInterrupt`): the step pauses |
+| `RedactionStage(redactions, fields)` | egress | — (masks the response) |
+
+Every refusal is a `GovernanceRefusal` with `code`, `stage`, `reason` and `retryable`; tool limits raise `ToolRefusal`. `enforce_governance_gate(…, phase='screen' | 'decide')` runs the stages of one phase: `BaseAgent` runs `screen` before `_prepare` (nothing unscreened reaches a retriever) and `decide` after it (approval needs the facts `_prepare` read). Custom stages subclass `IngressStage.check(state, ctx, messages)` or `EgressStage.redact(response, state, ctx, messages)`; `compile_redactions` / `redact_text` load redaction rules from policy files.
+
 ### 8.8 BaseObservability
 
-**Table 25 — BaseObservability methods**
+**Table 30 — BaseObservability methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -687,7 +788,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.9 BaseValidationService
 
-**Table 26 — BaseValidationService methods**
+**Table 31 — BaseValidationService methods**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -700,7 +801,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.10 Other foundation classes
 
-**Table 27 — Interfaces and outbound dispatcher**
+**Table 32 — Interfaces and outbound dispatcher**
 
 | Class | Method | Contract |
 |---|---|---|
@@ -711,7 +812,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.11 Stores, lease and value types
 
-**Table 28 — Store and lease ports**
+**Table 33 — Store and lease ports**
 
 | Port | Methods | Contract |
 |---|---|---|
@@ -720,7 +821,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `BaseCacheStore` | `get`, `set`, `delete`, `get_or_load`, `aget_or_load`, `single_flight_stats` | Per-key single-flight inside a process; followers wait ≤ `min(cache_fill_timeout_seconds, deadline)` then `load` / `stale` / `raise`; loader failure propagates, not cached; cancelled leader degrades followers. |
 | `BaseDistributedLock` | `acquire`, `renew`, `release` | Lease (not lock): time-bound, renewable, owner-checked; strictly increasing `fencing_token` per key; release of a lost lease is a no-op. |
 
-**Table 29 — Value types**
+**Table 34 — Value types**
 
 | Type | Contract |
 |---|---|
@@ -732,18 +833,18 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.12 Resilience primitives
 
-**Table 30 — Resilience classes**
+**Table 35 — Resilience classes**
 
 | Class | Members | Contract |
 |---|---|---|
 | `RetryBudget` | `deposit()`, `withdraw() → bool`, `balance` | Each first attempt earns `ratio` tokens (capped at `cap`, starts at half); each retry spends one — retry amplification ≈ `ratio` of traffic. |
 | `CircuitBreaker` | `state`, `allow()`, `record_success()`, `record_failure()` | Closed → open after `failure_threshold` consecutive failures → half-open after `reset_seconds` with exactly one probe. |
 | `Bulkhead` | `slot(timeout)` (async ctx), `waiting` | In-flight cap with bounded wait; `BulkheadFullError` on timeout. |
-| `ResiliencePolicy` | `call(fn, *, deadline, max_retries=0, idempotent=False, retryable=None)`, `stats` | Deadline check → bulkhead → budget deposit → loop: circuit `allow()` else `CircuitOpenError`; call; success resets circuit; failure (non-deterministic, non-structural) counts; retry only if allowed (Figure 25) and the budget pays; full-jitter backoff never beyond the deadline. |
+| `ResiliencePolicy` | `call(fn, *, deadline, max_retries=0, idempotent=False, retryable=None)`, `stats` | Deadline check → bulkhead → budget deposit → loop: circuit `allow()` else `CircuitOpenError`; call; success resets circuit; failure (non-deterministic, non-structural) counts; retry only if allowed (Figure 27) and the budget pays; full-jitter backoff never beyond the deadline. |
 
 ### 8.13 _PropagationMixin and bridge
 
-**Table 31 — Shared helpers**
+**Table 36 — Shared helpers**
 
 | Helper | Signature | Contract |
 |---|---|---|
@@ -759,7 +860,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.14 Control plane
 
-**Table 32 — Scheduled repair**
+**Table 37 — Scheduled repair**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
@@ -769,14 +870,14 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `_confirm_physical_outcome` | default | `(entry, config, **kw) → PhysicalOutcome` | Default `UNKNOWN` — safe never-replay default. |
 | `_fetch_dlq_entries` / `_replay_dlq_entry` | hook | — | Replay through the same claim and governance path as live traffic. |
 
-**Table 33 — BasePipeline and BaseInfraProvisioner**
+**Table 38 — BasePipeline and BaseInfraProvisioner**
 
 | Method | Kind | Signature → returns | Contract |
 |---|---|---|---|
-| `BasePipeline.run_pipeline` | entry | `(config, correlation_id, message_log, failed_keys, **kw) → dict` | Seven gates in order (Figure 31); first failure → `status FAILED`, never raised; report includes stages, `capacity_violations`, `rag_eval_score`, deployment metadata. |
+| `BasePipeline.run_pipeline` | entry | `(config, correlation_id, message_log, failed_keys, **kw) → dict` | Seven gates in order (Figure 33); first failure → `status FAILED`, never raised; report includes stages, `capacity_violations`, `rag_eval_score`, deployment metadata. |
 | `_validate_capacity_budget` | default | `(config, **kw) → List[str]` | `validate_capacity()`; override to add rules. |
 | `_run_static_security_scans`, `_execute_test_suite`, `_verify_scaffold_contracts`, `_run_rag_eval`, `_compile_artifact`, `_run_dynamic_security_checks`, `_execute_deployment_rollout` | hook | — | SAST/secrets; tests; single-entry-point and no private-override check; RAGAS score; build and push one image; DAST; blue-green or canary. |
-| `BaseInfraProvisioner.provision_landing_zone` | entry | `(tenant_id, tenancy_model, availability_tier='STANDARD', config, correlation_id, **kw) → dict` | `POOL` or `SILO`; `STANDARD` / `HIGH` / `CRITICAL`. Seven steps (Figure 32) into a manifest; any failure → `status FAILED`, `error_trace`; never raises. |
+| `BaseInfraProvisioner.provision_landing_zone` | entry | `(tenant_id, tenancy_model, availability_tier='STANDARD', config, correlation_id, **kw) → dict` | `POOL` or `SILO`; `STANDARD` / `HIGH` / `CRITICAL`. Seven steps (Figure 34) into a manifest; any failure → `status FAILED`, `error_trace`; never raises. |
 | `_define_*` (5), `_apply_infrastructure_graph` | hook | — | Networks (AZ/region count honoured), edge, data perimeter (per tenancy), compute, IAM per tier; apply via Terraform / Pulumi / CDK. |
 | `_generate_saga_orchestrator` | default | `(compute_ctx, config, **kw) → dict` | AWS States Language skeleton; override syntax per cloud. |
 
@@ -784,7 +885,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.15 Configuration functions
 
-**Table 34 — Configuration API**
+**Table 39 — Configuration API**
 
 | Function | Contract |
 |---|---|
@@ -796,7 +897,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 
 ### 8.16 Reference orchestrator (multimodal_orchestrator.py)
 
-**Table 35 — Reference orchestrator classes**
+**Table 40 — Reference orchestrator classes**
 
 | Class | Behaviour |
 |---|---|
@@ -810,6 +911,21 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 ### 8.17 Test doubles
 
 `InMemoryIdempotencyStore` implements the full claim state machine per `(tenant, key)` with a lock standing in for the conditional write, plus `state_of()` for tests. `InMemoryTransactionalStore` keeps versioned rows and rejects stale fencing tokens. `InMemoryCacheStore` is a dict. `InMemoryLease` issues owner tokens and strictly increasing fencing tokens with expiry on an injectable clock.
+
+### 8.18 Conformance kit (v1.2)
+
+`e2a.conformance` checks the Governed Entry Point principle statically. The rule sets are read from the e2a classes, and subclasses are followed across files.
+
+**Table 41 — Conformance rules**
+
+| Rule | Level | Finding |
+|---|---|---|
+| R1 | error | A subclass overrides a framework-owned public method or a framework-private (`__`) method. |
+| R2 | warning (error with `--strict`; the default from v1.3) | Code outside a class calls that class's protected hook. |
+| R3 | info | An extra public method: allowed if it is a capability (its own caller or trigger, its own guarantees). Framework data attributes (`stages`, `tool_policy`) are not findings. |
+| D1 | warning | A subclass overrides a public method that became a hook in v1.2 (`get_endpoint`). |
+
+`python -m e2a.conformance src/ [--strict] [--quiet]` exits 1 on an error. `AgentContract` is a pytest kit: `run()` never raises on a hook error; a model step below `min_confidence` falls back and commits nothing; nothing material after the deadline; the request tenant reaches the result. `BasePipeline._verify_scaffold_contracts` runs the rules over `conformance_paths` (findings in `self.conformance_findings`) and no longer requires one public method per class.
 
 ## 9. Dynamic Behaviour
 
@@ -837,81 +953,93 @@ The claim precedes everything else, so a duplicate costs one store round trip an
 
 Ordering matters: messages are built before the governance gate (so the firewall sees the request state the prompt is built from), redaction happens after the fallback decision (so a fallback answer is also masked), and the stored replay result is taken from the redacted state.
 
+**v1.2.** Figure 20 shows the v1.2 order: screening before reading, the decision stages after it, effects only after an accepted evaluation.
+
+![Figure 20 — BaseAgent.run() in v1.2: screen, prepare, decide, model step, act, confirm](images/31_v12_agent_run.png)
+
+*Figure 20 — BaseAgent.run() in v1.2: screen, prepare, decide, model step, act, confirm*
+
 ### 9.3 Human-in-the-loop dehydration
 
-![Figure 20 — Dehydration and resume](images/21_seq_dehydration.png)
+![Figure 21 — Dehydration and resume](images/21_seq_dehydration.png)
 
-*Figure 20 — Dehydration and resume*
+*Figure 21 — Dehydration and resume*
+
+**v1.2.** With declared steps, `ApprovalStage` pauses the step and the workflow stores a checkpoint holding the state at the pause, so the approver sees what the decision is about; `resume()` continues at that step (Figure 22). A v1.1 workflow that pauses also gets a checkpoint and is resumed by running it again, approved.
+
+![Figure 22 — Declared steps, one claim, a pause and resume()](images/32_v12_workflow_steps.png)
+
+*Figure 22 — Declared steps, one claim, a pause and resume()*
 
 ### 9.4 Inference gateway
 
-![Figure 21 — process_inference(): the admission pipeline](images/15_seq_inference.png)
+![Figure 23 — process_inference(): the admission pipeline](images/15_seq_inference.png)
 
-*Figure 21 — process_inference(): the admission pipeline*
+*Figure 23 — process_inference(): the admission pipeline*
 
-![Figure 22 — process_inference_stream(): hold-back DLP](images/16_seq_stream.png)
+![Figure 24 — process_inference_stream(): hold-back DLP](images/16_seq_stream.png)
 
-*Figure 22 — process_inference_stream(): hold-back DLP*
+*Figure 24 — process_inference_stream(): hold-back DLP*
 
-![Figure 23 — Inference service life cycle and graceful shutdown](images/23_state_llm_lifecycle.png)
+![Figure 25 — Inference service life cycle and graceful shutdown](images/23_state_llm_lifecycle.png)
 
-*Figure 23 — Inference service life cycle and graceful shutdown*
+*Figure 25 — Inference service life cycle and graceful shutdown*
 
 ### 9.5 Tool calls and resilience
 
-![Figure 24 — Tool call: MCP-first routing, resilience and typed outcome](images/17_seq_tool_call.png)
+![Figure 26 — Tool call: MCP-first routing, resilience and typed outcome](images/17_seq_tool_call.png)
 
-*Figure 24 — Tool call: MCP-first routing, resilience and typed outcome*
+*Figure 26 — Tool call: MCP-first routing, resilience and typed outcome*
 
-![Figure 25 — ResiliencePolicy retry decision](images/24_flow_retry.png)
+![Figure 27 — ResiliencePolicy retry decision](images/24_flow_retry.png)
 
-*Figure 25 — ResiliencePolicy retry decision*
+*Figure 27 — ResiliencePolicy retry decision*
 
-![Figure 26 — CircuitBreaker state machine](images/22_state_circuit.png)
+![Figure 28 — CircuitBreaker state machine](images/22_state_circuit.png)
 
-*Figure 26 — CircuitBreaker state machine*
+*Figure 28 — CircuitBreaker state machine*
 
 ### 9.6 MCP server
 
-![Figure 27 — Wrapping an existing API as an MCP tool](images/18_seq_mcp_server.png)
+![Figure 29 — Wrapping an existing API as an MCP tool](images/18_seq_mcp_server.png)
 
-*Figure 27 — Wrapping an existing API as an MCP tool*
+*Figure 29 — Wrapping an existing API as an MCP tool*
 
 ### 9.7 Knowledge tier
 
-![Figure 28 — CDC-fed indexing and hybrid retrieval](images/19_seq_rag_indexing.png)
+![Figure 30 — CDC-fed indexing and hybrid retrieval](images/19_seq_rag_indexing.png)
 
-*Figure 28 — CDC-fed indexing and hybrid retrieval*
+*Figure 30 — CDC-fed indexing and hybrid retrieval*
 
 ### 9.8 Reference multimodal orchestration
 
-![Figure 29 — Intent routing to four peer agents](images/20_seq_multimodal.png)
+![Figure 31 — Intent routing to four peer agents](images/20_seq_multimodal.png)
 
-*Figure 29 — Intent routing to four peer agents*
+*Figure 31 — Intent routing to four peer agents*
 
 Two routing paths exist in the reference: the compiled LangGraph (`classify_intent` → `_route_intent` → agent node) and `BaseWorkflow.execute()`'s own `_get_agent()` call. Both read the same registry and threshold so they cannot diverge; `execute()` builds and validates the graph but routes through `_get_agent()`, passing full propagation fields to `run()`.
 
 ### 9.9 Scheduled repair
 
-![Figure 30 — Leased reconciliation](images/30_seq_reconcile.png)
+![Figure 32 — Leased reconciliation](images/30_seq_reconcile.png)
 
-*Figure 30 — Leased reconciliation*
+*Figure 32 — Leased reconciliation*
 
 ### 9.10 Delivery and provisioning
 
-![Figure 31 — BasePipeline.run_pipeline() gates](images/26_flow_pipeline.png)
+![Figure 33 — BasePipeline.run_pipeline() gates](images/26_flow_pipeline.png)
 
-*Figure 31 — BasePipeline.run_pipeline() gates*
+*Figure 33 — BasePipeline.run_pipeline() gates*
 
-![Figure 32 — provision_landing_zone() steps](images/27_flow_provision.png)
+![Figure 34 — provision_landing_zone() steps](images/27_flow_provision.png)
 
-*Figure 32 — provision_landing_zone() steps*
+*Figure 34 — provision_landing_zone() steps*
 
 ## 10. Concurrency, Consistency and Failure Model
 
 ### 10.1 Ownership of concurrency risks
 
-**Table 36 — Risk ownership**
+**Table 42 — Risk ownership**
 
 | Risk | Owner | Mechanism |
 |---|---|---|
@@ -930,7 +1058,7 @@ Two routing paths exist in the reference: the compiled LangGraph (`classify_inte
 
 ### 10.2 Error handling at each boundary
 
-**Table 37 — How each public method treats failures**
+**Table 43 — How each public method treats failures**
 
 | Boundary | Behaviour |
 |---|---|
@@ -960,7 +1088,7 @@ Little's Law sizes every pool: in-flight = arrival rate × mean service time. Fo
 
 ### 11.2 Latency budgets
 
-**Table 38 — In-code latency and wait bounds**
+**Table 44 — In-code latency and wait bounds**
 
 | Bound | Default | Where |
 |---|---|---|
@@ -975,7 +1103,7 @@ Little's Law sizes every pool: in-flight = arrival rate × mean service time. Fo
 
 ### 11.3 Security and governance controls
 
-**Table 39 — Controls by construction**
+**Table 45 — Controls by construction**
 
 | Control | Where |
 |---|---|
@@ -997,7 +1125,7 @@ Policy-as-code derived from the abstract contracts (landing zone governance matr
 
 Every class logs structured events to the request's `message_log`; `BaseWorkflow` hands it once to `record_telemetry()`. The metric catalogue (`E2A_METRICS`) defines names, types and labels once; `tenant_id` is a high-cardinality label to aggregate or sample.
 
-**Table 40 — Key log events**
+**Table 46 — Key log events**
 
 | Event | Emitter | Meaning |
 |---|---|---|
@@ -1021,7 +1149,8 @@ The full metric catalogue is Appendix B.
 2. **Implement validators** on a `BaseValidationService` subclass (`_validate_<agent_name>` per agent, `_enforce_entitlement_gate`).
 3. **Implement agents.** `BaseAgent` subclasses for prompt + tool flows; `LLMOnlyAgent` subclasses for model-only, modality-aware flows; reuse the reference agents where generic.
 4. **Implement knowledge and tools.** `BaseRAGPipeline` + `BaseIndexingPipeline` with the same embedding model and tenant namespace; tools through `RestToolService` / `MCPToolService` or a custom `_send_request`; wrap internal APIs with `BaseMCPServer`.
-5. **Implement the workflow.** Graph, validation, agent registry, deterministic idempotency key, error mapping; override `_requires_idempotency_claim` for read-only intents.
+5. **Implement the workflow.** Graph, validation, agent registry, deterministic idempotency key, error mapping; override `_requires_idempotency_claim` for read-only intents. v1.2: declare `Steps(...)` instead, mark the material steps, and set `checkpoint_store` if a step can pause.
+9. **(v1.2) Check conformance** in CI: `python -m e2a.conformance src/ --strict`, and an `AgentContract` test per agent.
 6. **Bind engines and ports** in `config`: `llm_service`, `governance_engine`, `observability_engine`, `idempotency_store`, and store adapters.
 7. **Register project config keys** with `register_config_key()` in `src/settings.py`; run `unknown_config_keys()` at start-up.
 8. **Wire the control plane:** sweeper and reconciler with a lease adapter, a `BasePipeline` subclass, and a `BaseInfraProvisioner` per cloud.
@@ -1055,9 +1184,33 @@ result = RefundWorkflow().execute(state, {'llm_service': ProviderLLMService(), '
                                           'governance_engine': gov, 'observability_engine': obs})
 ```
 
+The same service in the v1.2 style (`from e2a import ...`): each hook declares only what it uses.
+
+```python
+class RefundAgent(BaseAgent):
+    def _prepare(self, state, ctx, io_read):
+        state['order'] = io_read.call('get_order', {'order_id': state['order_id']})
+    def _build_messages(self, state, ctx):
+        return None                                   # deterministic: no model step
+    def _act(self, state, ctx, io_modify):
+        return [io_modify.call('issue_refund', {'order_id': state['order_id']})]
+
+class RefundGovernance(BaseGovernanceFramework):
+    stages = [CapacityStage(InflightLimiter(50)), FirewallStage(), ApprovalStage()]
+    tool_policy = {'RefundAgent': ['get_order', 'issue_refund']}
+
+class RefundWorkflow(BaseWorkflow):
+    def _build_workflow(self, ctx):
+        return Steps(Step('refund', RefundAgent(), material=True))
+    def _generate_idempotency_key(self, state, ctx):
+        return f"{ctx.tenant_id}:{state['order_id']}"
+    def _handle_error(self, error, state, ctx):
+        state['error_code'] = type(error).__name__
+```
+
 ### 12.3 Rules and anti-patterns
 
-**Table 41 — Do and do not**
+**Table 47 — Do and do not**
 
 | Do | Do not |
 |---|---|
@@ -1070,12 +1223,14 @@ result = RefundWorkflow().execute(state, {'llm_service': ProviderLLMService(), '
 | Keep one tool-service instance per dependency (`_get_tool_service`). | Create a new tool service (and resilience policy) per call. |
 | Tenant-scope every cache, index and handle key. | Share a global namespace across tenants. |
 | Register config keys centrally. | Read `os.getenv()` in subclasses or edit the scaffold. |
+| (v1.2) Declare only the hook parameters you use; read settings with `ctx.setting()`. | Use `**kwargs` in a v1.2 hook, or call another class's protected hook (R2). |
+| (v1.2) Mark material tools and steps. | Perform an effect in `_prepare` or through `io_read`. |
 
 ## 13. Verification
 
 The scaffold ships executable smoke tests against the in-memory doubles. At baseline 32c99c0 all pass: `smoke_test_concurrency.py` (48 checks), `smoke_test_llm_service.py` (37), `smoke_test_multimodal_concurrency.py` (6), and the `multimodal_orchestrator.py` self-test (six routing cases through the unmodified `BaseWorkflow.execute()`).
 
-**Table 42 — Selected evidence**
+**Table 48 — Selected evidence**
 
 | ID | Scenario | Evidence |
 |---|---|---|
@@ -1093,29 +1248,54 @@ The scaffold ships executable smoke tests against the in-memory doubles. At base
 | — | Inference: tenant required, injection blocked, quota refund, latency SLO, pod and tenant caps, RPM exhaustion, context budget, KV handle, DLP incl. split-card streaming, semantic cache, tool schema | `smoke_test_llm_service.py` |
 | — | Multimodal: request deadline bounds a tool call below the tool timeout | `smoke_test_multimodal_concurrency.py` |
 
+**v1.2.0:** `pytest tests` runs every smoke script above against the installed package, plus 51 tests of the v1.2 contracts: `test_contract.py` (14, context and accessors, the agent order), `test_governance_stages.py` (9), `test_entry_points.py` (9), `test_workflow_steps.py` (9), `test_conformance.py` (5) and `test_package.py` (5, every v1.1 name importable, one home per public name). 66 pass and 1 is skipped. CI also runs `python -m e2a.conformance --strict` over the framework and reference code. The O2C migration (39 tests and the three-service landscape demo) is the integration proof.
+
 Recommended additions from Section 14: MCP `tools/call` returns a resolved result; token budget enforcement through `io_config`; agent-internal deterministic error settles `FAILED_FINAL`; latency breach after a committed side effect does not re-execute.
 
 ## 14. Implementation Reality, Gaps and Design Observations
 
-These were found by reading the reference against this design. O-1 to O-4 were reproduced against the in-memory adapters at baseline 32c99c0. None changes a public signature.
+These were found by reading the reference against this design. O-1 to O-4 were reproduced against the in-memory adapters at baseline 32c99c0. None changes a public signature. The status of the ones fixed since is given in the last column; O-14 to O-17 come from v1.2.
 
-**Table 43 — Design observations**
+**Table 49 — Design observations**
 
 | ID | Observation | Effect | Recommendation |
 |---|---|---|---|
-| O-1 | `BaseMCPServer.__dispatch_jsonrpc()` calls the async `_call_tool()` without awaiting it. | `tools/call` returns a coroutine object in `result` (reproduced); the wrapped tool never runs. | Make `serve()` async and await, or run `_call_tool()` on the bridge loop. |
-| O-2 | `__enforce_token_budget` reads `max_token_budget` from `io_config`, but `_resolve_io_config()` keeps only `io_`-prefixed keys. | The budget resolves to its default (infinity); token budgets are never enforced (reproduced). When the key is present it raises `ValueError`, not the documented `NFRViolationError`. | Read `io_max_token_budget` (or resolve from `config`) and raise `NFRViolationError`. |
+| O-1 | `BaseMCPServer.__dispatch_jsonrpc()` calls the async `_call_tool()` without awaiting it. | `tools/call` returns a coroutine object in `result` (reproduced); the wrapped tool never runs. | Make `serve()` async and await, or run `_call_tool()` on the bridge loop.  **Status:** Resolved in v1.1.2 (E-2): `serve()` completes the call; v1.2 adds `serve_async`. |
+| O-2 | `__enforce_token_budget` reads `max_token_budget` from `io_config`, but `_resolve_io_config()` keeps only `io_`-prefixed keys. | The budget resolves to its default (infinity); token budgets are never enforced (reproduced). When the key is present it raises `ValueError`, not the documented `NFRViolationError`. | Read `io_max_token_budget` (or resolve from `config`) and raise `NFRViolationError`.  **Status:** Resolved in v1.1.2 (E-1); v1.2 `TokenBudgetStage` reads the budget from the request context. |
 | O-3 | `BaseAgent.run()` swallows exceptions into `failed_keys`; `BaseWorkflow.__settle_claim()` then sees no workflow-level error. | Deterministic errors inside the agent (validation, permission) settle as `FAILED_RETRYABLE`, so redeliveries retry them (reproduced). | Carry the agent's error type in `state` (e.g. `state['error_type']`) and use it in settlement. |
-| O-4 | `BaseAgent.run()` raises the latency SLO after the response and any tool side effect. | A slow run whose tool committed is dead-lettered and settled retryable; a redelivery executes the side effect again (reproduced). | Record the breach without raising once `outcome == COMMITTED`, or settle by outcome before failures. |
+| O-4 | `BaseAgent.run()` raises the latency SLO after the response and any tool side effect. | A slow run whose tool committed is dead-lettered and settled retryable; a redelivery executes the side effect again (reproduced). | Record the breach without raising once `outcome == COMMITTED`, or settle by outcome before failures.  **Status:** Resolved in v1.1.2 (E-3): the breach is recorded in `state['slo_breached']`, not raised. |
 | O-5 | `LLMOnlyAgent.run()` has no governance gate, no `redact_response()` and no latency SLO. | Model-only requests bypass the semantic firewall and egress masking (the gateway's own sanitiser and DLP still apply). | Mirror the `BaseAgent.run()` governance wiring. |
 | O-6 | `_resolve_tool_call()` creates a new `MCPToolService()` per call on the MCP path. | Each MCP call gets a fresh, empty circuit and retry budget, defeating per-dependency resilience. | Use the cached `_get_tool_service(tool, transport='mcp')`. |
-| O-7 | `BaseRAGPipeline.retrieve()` enforces no latency SLO, does not require `tenant_id`, and `__embed` is a placeholder. | Docs reference a retrieval SLO; an absent tenant reaches `_search_index`. | Add the SLO and tenant check; make embedding a hook. |
+| O-7 | `BaseRAGPipeline.retrieve()` enforces no latency SLO, does not require `tenant_id`, and `__embed` is a placeholder. | Docs reference a retrieval SLO; an absent tenant reaches `_search_index`. | Add the SLO and tenant check; make embedding a hook.  **Status:** Partly resolved: `_embed_query` is a hook (v1.1.2); v1.2 adds the embedding and index ports and takes the tenant from `ctx`. The retrieval SLO is still open. |
 | O-8 | `BaseToolService.execute()` does not apply `max_latency` (scoped 5.0 s). | Only per-attempt timeouts bound tool calls. | Apply the scoped SLO or document it as per-attempt only. |
 | O-9 | Several registry keys are not read by base classes: `approved_agents`, `approved_tools`, `approved_models`, `max_tokens`, `shadow_mode_enabled`, `shadow_target_pipeline`, `idempotency_store_url`, `rag_top_k`, `hybrid_alpha`, `tool_filter`, `mcp_protocol_version`; some `used_by` texts name retired methods (`__lookup_idempotency_store`). | Allow-lists and shadow mode look enforced but are subclass responsibilities. | Mark them "for subclass use" in the registry or wire them in. |
 | O-10 | `BaseWorkflow` short-circuit flushes logs locally but does not call `observability_engine`. | Replays and conflicts are invisible in the telemetry backend. | Ship telemetry on the short-circuit path. |
 | O-11 | `_circuit_breaker()` is abstract on governance but never called; `ResiliencePolicy` is the active circuit. | Two circuit concepts. | Document `_circuit_breaker` as a metrics/policy hook or remove it. |
 | O-12 | `BaseWebhookDispatcher.dispatch()` retries immediately without backoff or deadline. | Hot retry loop against a failing receiver. | Route through `ResiliencePolicy`. |
 | O-13 | In the reference orchestrator `_route_intent`/graph nodes call `agent.run(state)` without propagation fields; `execute()` routes via `_get_agent()` instead. | The compiled graph is validated but not executed by `execute()`. | Document the graph as the routing specification, or invoke it with propagation fields. |
+| O-14 | v1.2 keeps the v1.1 hook signatures and `get_endpoint` as deprecated adapters. | Two styles coexist; each v1.1 class warns once. | Migrate (the O2C migration is the worked example); v1.3 removes the adapters. |
+| O-15 | Conformance rule R2 is a warning by default. | A hook called from outside its class is reported but not blocking. | Run `--strict` in CI now; it becomes the default in v1.3. |
+| O-16 | The v1.2 contracts exist for Python only. | Java services (A2C generates them) stay on the v1.1 shape. | `e2a-java` (deferred wave D). |
+| O-17 | `Steps` has no loops, parallel branches or graphs. | A graph-shaped workflow keeps a v1.1 `_build_workflow`, or composes several workflows. | Intended: declared steps cover the projects so far; revisit on evidence. |
+
+## 15. What v1.2 Changes
+
+**Table 50 — E2A v1.2.0 at a glance**
+
+| Area | v1.1 | v1.2 | Where |
+|---|---|---|---|
+| Packaging | One scaffold file, `e2a_base.py` | The `e2a` package, one module per contract area; `e2a_base` re-exports every v1.1 name | 7.1 |
+| Entry points | "One public method per class" | Governed entry points: a public method per genuine capability; adds `resume`, `serve_async`, `evaluate_answer` | 4.1, 8.18 |
+| Request data | Keyword arguments on every hook, `**kwargs` | One frozen `RequestContext`; hooks declare only what they use (`ctx`, `io_read`, `io_modify`, …) | 6.6 |
+| Agent order | build messages → gate → model → evaluate → redact | screen → `_prepare` → decide → `_apply_policy` → model step (optional) → evaluate → `_act` → `_confirm` → redact | 8.2, 9.2 |
+| Effects | A tool call anywhere, usually in `_apply_policy` | Only `_act` through `io_modify`, with a key, after an accepted evaluation and before the deadline | 6.6, 8.6 |
+| Governance | Abstract hooks on one class | Ordered stages, typed refusals, `tool_policy` | 8.7 |
+| Workflows | `_build_workflow` + `_get_agent(intent)` | `Steps` / `Step` / `Route`, one claim, `state['steps']`, `resume()` | 8.1, 9.3 |
+| Knowledge | Abstract embedding and index hooks | `BaseEmbeddingModel`, `BaseVectorIndex`, `RAGPipeline` façade | 8.5 |
+| Contract checks | None (one-public-method check in the pipeline) | `e2a.conformance` (R1–R3, D1), `AgentContract` | 8.18, 13 |
+| Defaults | Most hooks abstract | Safe defaults where a hook is optional | 1.3 |
+
+**Compatibility.** Every v1.1 name imports from `e2a_base`; a v1.1 subclass runs unchanged with one `DeprecationWarning` per class; a v1.1 workflow that pauses gets a checkpoint. v1.3 removes the v1.1 adapters and makes R2 an error. The unmigrated O2C code (v1.1.2 style) passes its 39 tests on v1.2.
 
 ## Appendix A. Configuration Reference (generated from E2A_CONFIG)
 
@@ -1346,7 +1526,13 @@ Resolution order for every key: call-time kwargs › config dict › environment
 
 | Term | Definition |
 |---|---|
-| Scaffold | `e2a_base.py`: abstract classes copied into a project and subclassed, never modified. |
+| Scaffold | The base classes a project subclasses and never modifies: the `e2a` package since v1.2 (`e2a_base` is its compatibility module); `e2a_base.py` until v1.1. |
+| Request context (`ctx`) | v1.2: the frozen identity and settings of one request (`RequestContext`), created once at the outermost entry point. |
+| `io_read` / `io_modify` | v1.2: the accessors for replay-safe and material tools; a hook receives one only if it declares it. |
+| Stage | v1.2: one governance check in an ordered list (`screen`, `decide` or egress); a failure is a typed `GovernanceRefusal`. |
+| Steps / Step / Route | v1.2: a workflow's declared agent runs, under one context and one claim. |
+| Checkpoint | v1.2: the stored state of a paused step, decided once through `resume()`. |
+| Governed entry point | v1.2 principle: a public method per genuine capability, delegating to hooks; checked by `e2a.conformance`. |
 | Propagation fields | Request-scoped arguments threaded through every class: `correlation_id`, `tenant_id`, `idempotency_key`, `io_config`, `message_log`, `failed_keys`, plus `deadline`, `trace_context`, `expected_version`, `fencing_token`. |
 | Inference gateway (Tier 2b) | The deployed `BaseLLMAgentService` binding; the only model egress. |
 | Physical outcome | Whether a material effect committed in the system of record: `COMMITTED`, `NOT_COMMITTED`, `UNKNOWN`. |
@@ -1359,24 +1545,28 @@ Resolution order for every key: call-time kwargs › config dict › environment
 | Bulkhead | Per-dependency in-flight cap with a bounded wait. |
 | Structural isomorphism | One-to-one mapping between class boundaries and landing-zone tiers. |
 
-**Table G-2 — Traceability: goal or invariant → class → code anchor (`reference/e2a_base.py` unless noted)**
+**Table G-2 — Traceability: goal or invariant → class → code anchor (`reference/e2a/` at v1.2.0)**
 
 | Goal / invariant | Class · method | Anchor |
 |---|---|---|
-| G-1, INV-02 | `_PropagationMixin._infer` → `BaseLLMAgentService.process_inference` | L808, L1170 |
-| G-2, INV-03/04 | `BaseWorkflow.execute`, `__settle_claim`, `_physical_outcome` | L1833, L1990, L1952 |
-| INV-05 | `__settle_claim` UNKNOWN branch; `BaseReconciliationService.reconcile` | L1995, L2909 |
-| INV-06 | `BaseAgent.run` / `BaseWorkflow.execute` dehydration branches | L1770, L1884 |
-| G-3, INV-07 | `Deadline`; `__concurrency_permit`; `__admit_quota`; `ResiliencePolicy.call`; `_run_on_bridge_loop` | L133, L1591, L1629, L643, L51 |
-| INV-08 | `__concurrency_permit` finally; `__settle_quota` | L1591, L1670 |
-| INV-09, G-6 | `BaseToolService.__http_post`; `ResiliencePolicy.__attempts` | L2158, L654 |
-| G-4, INV-11 | `__tenant_entry`; `_apply_kv_caching`; `_search_index` contract | L1580, L1412, L2020 |
-| G-5, INV-10 | `enforce_governance_gate`, `redact_response`; `__sanitize_prompts`; `_redact_sensitive` | L915, L928, L1515, L1479 |
-| G-9 | `E2A_CONFIG`, `resolve_config`, `register_config_key` | L314, L453, L442 |
-| INV-12 | `validate_capacity`; `BasePipeline._validate_capacity_budget` | L693, L3078 |
-| INV-13 | `BaseDistributedLock`; `BaseOutboxSweeper.sweep` | L2735, L2846 |
-| T1 edge | `BaseValidationService.validate` | L1014 |
-| Knowledge tier | `BaseRAGPipeline.retrieve`; `BaseIndexingPipeline.ingest` | L2008, L2050 |
-| Integration tier | `BaseToolService.execute`; `_resolve_tool_call`; `BaseMCPServer.serve` | L2117, L2306, L2245 |
-| Landing zone | `BaseInfraProvisioner.provision_landing_zone` | L3128 |
+| G-1, INV-02 | `_PropagationMixin._infer` → `BaseLLMAgentService.process_inference` | `_propagation.py` L98, `llm.py` L117 |
+| G-2, INV-03/04 | `BaseWorkflow.execute`, `__settle_claim`, `_physical_outcome` | `workflows.py` L131, L535, L336 |
+| INV-05 | `__settle_claim` UNKNOWN branch; `BaseReconciliationService.reconcile` | `workflows.py` L535, `ports.py` L496 |
+| INV-06 | `BaseAgent.run` / `BaseWorkflow.execute` dehydration branches | `agents.py` L35, `workflows.py` L131 |
+| G-3, INV-07 | `Deadline`; `__concurrency_permit`; `__admit_quota`; `ResiliencePolicy.call`; `_run_on_bridge_loop` | `core.py` L64, `llm.py` L538, L576, `resilience.py` L192, L38 |
+| INV-08 | `__concurrency_permit` finally; `__settle_quota` | `llm.py` L538, L617 |
+| INV-09, G-6 | `BaseToolService.__http_post`; `ResiliencePolicy.__attempts` | `tools.py` L98, `resilience.py` L203 |
+| G-4, INV-11 | `__tenant_entry`; `_apply_kv_caching`; `_search_index` contract | `llm.py` L527, L359, `rag.py` L89 |
+| G-5, INV-10 | `enforce_governance_gate`, `redact_response`; `__sanitize_prompts`; `_redact_sensitive` | `governance.py` L45, L71, `llm.py` L462, L426 |
+| G-9 | `E2A_CONFIG`, `resolve_config`, `register_config_key` | `config.py` L92, L231, L220 |
+| INV-12 | `validate_capacity`; `BasePipeline._validate_capacity_budget` | `resilience.py` L242, `pipeline.py` L116 |
+| INV-13 | `BaseDistributedLock`; `BaseOutboxSweeper.sweep` | `ports.py` L322, L433 |
+| INV-14, INV-15 | `RequestContext`; `ReadAccess`; `ModifyAccess` | `context.py` L37, L190, L198 |
+| INV-16 | `IngressStage`, `FirewallStage`; `enforce_governance_gate(phase=…)` | `stages.py` L61, L181, `governance.py` L45 |
+| INV-17, UC-14/15 | `Steps`; `resume`; `__execute_steps`; `BaseCheckpointStore` | `workflows.py` L91, L256, L376, `ports.py` L300 |
+| UC-16 | `check_paths`; `AgentContract`; `_verify_scaffold_contracts` | `conformance.py` L109, L231, `pipeline.py` L133 |
+| T1 edge | `BaseValidationService.validate` | `validation.py` L39 |
+| Knowledge tier | `BaseRAGPipeline.retrieve`; `BaseIndexingPipeline.ingest`; `RAGPipeline` | `rag.py` L67, L132, L204 |
+| Integration tier | `BaseToolService.execute`, `_get_endpoint`; `_resolve_tool_call`; `BaseMCPServer.serve`, `serve_async` | `tools.py` L32, L70, L261, L185, L197 |
+| Landing zone | `BaseInfraProvisioner.provision_landing_zone` | `infra.py` L32 |
 | Reference orchestrator | `MultiAgentOrchestratorWorkflow` | `multimodal_orchestrator.py` L274 |
