@@ -12,15 +12,22 @@ It focuses on the boundary where probabilistic reasoning meets deterministic ent
 
 ## Install
 
-    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.1.2"
+    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.2.2"
 
-Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.1.2" }`.
-The modules keep their names: `from e2a_base import BaseAgent`, `from e2a_simulated_llm import SimulatedLLMService`.
+Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.2.2" }`.
+The framework is the `e2a` package (`from e2a import BaseAgent, BaseWorkflow, Steps, Step`); the release
+gate is `from e2a.release import ProjectReleaseGate`; v1.1 code keeps importing `e2a_base`.
+
+**Java (e2a-java, since v1.2.2):** the same contracts for Java 21 in [`java/`](java/README.md) —
+`e2a-core`, `e2a-cqrs`, `e2a-spring-jpa`, `e2a-test`, at this tag's version. There is no package
+registry: a service's CI builds it from the tag (`mvn -f java/pom.xml install -DskipTests`).
 
 ### Compatibility
 
 | e2a-framework | a2c-framework | capability-oriented-dsa |
 |---|---|---|
+| `v1.2.2` (Python + e2a-java `1.2.2`) | `v1.2.1` | `v0.2.x`, `v0.3.x` |
+| `v1.2.0`, `v1.2.1` (docs) | `v1.2.0` | `v0.2.x`, `v0.3.x` |
 | `v1.1.2` | `v1.1.2` | `v0.2.x` |
 | `v1.1.1` | `v1.1.1` | `v0.2.0` |
 | `v1.1.0` | `v1.1.0` | `v0.2.0` |

@@ -2,6 +2,26 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.2.2 — A release gate every project can reuse, and e2a-java
+
+### Added — `e2a.release` (design note C-04, D-1)
+- **`ProjectReleaseGate`**, a `BasePipeline` whose generic stages work as they are: a secret scan (`scan_paths`, `SECRET_PATTERNS`), `pytest`, the capacity equation plus `e2a.conformance` (strict by default), and `compileall`. The domain stages are one hook per case: `_score_case(case)` over `evals/golden.json` (the average is held to `faithfulness_threshold`) and `_probe(case)` over `evals/redteam.json`. A missing set is reported as `NOT_CONFIGURED`, not as a pass.
+- `python -m e2a.release [--root] [--skip-tests] [--report] [--config]`; a project gate calls `run_release_gate(gate_class=...)`. `gate_report()` adds the evidence (secret hits, the test summary, conformance findings, one row per case, red-team failures).
+- `load_cases()` reads an evaluation or red-team set (a list, or an object of lists with `kind`) and names what is wrong with it. `scan_secrets()` is the one list of secret patterns A2C's Phase C also uses.
+- `tests/test_release_gate.py`: 12 tests (79 in all).
+
+### Added — e2a-java (design note D-01, plan item G-4)
+- **`java/`**: the E2A runtime for Java 21, released with this tag at version `1.2.2`:
+  - `e2a-core`: `RequestContext`, `IdempotencyStore`, `ReadAccess` / `ModifyAccess`, governance stages, `LlmService`, `BaseAgent` with the v1.2 lifecycle, `BaseWorkflow` with declared steps and one claim;
+  - `e2a-cqrs`: the Deterministic CQRS profile, extracted from financial-settlement-platform;
+  - `e2a-spring-jpa`: `JpaIdempotencyStore`, auto-configured for Spring Boot 3.5;
+  - `e2a-test`: the `AgentContract` JUnit kit.
+- **Tests:** 27 tests, plus a `java` CI job.
+- **How services consume it:** there is no package registry. They build it from this tag in their CI (`java/README.md`).
+
+### Changed
+- Version `1.2.2`. No Python contract changed.
+
 ## v1.2.1 — Documents for v1.2 (docs only)
 
 No code changes; the package version moves to 1.2.1 so the documents have a tag. Everything below describes v1.2.0.
