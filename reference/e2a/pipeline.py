@@ -142,7 +142,7 @@ class BasePipeline(ABC, _PropagationMixin):
         from .conformance import check_paths, failed
         paths = [p for p in self.conformance_paths if Path(p).exists()]
         self.conformance_findings = check_paths(paths)
-        strict = bool(kwargs.get('conformance_strict', (config or {}).get('conformance_strict', False)))
+        strict = bool(kwargs.get('conformance_strict', (config or {}).get('conformance_strict', True)))   # v1.3: strict by default
         return not failed(self.conformance_findings, strict=strict)
  
     @abstractmethod

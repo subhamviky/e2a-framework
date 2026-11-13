@@ -62,11 +62,11 @@ def test_the_planted_violations_are_found_and_nothing_else():
     ])
 
 
-def test_r1_fails_r2_and_d1_fail_only_when_strict_and_r3_never_fails():
+def test_r1_r2_and_d1_fail_r3_never_fails_and_lenient_only_reports():
     only = lambda rule: [f for f in check_sources(PLANTED) if f.rule == rule]   # noqa: E731
-    assert failed(only("R1"))
-    assert not failed(only("R2")) and failed(only("R2"), strict=True)
-    assert not failed(only("D1")) and failed(only("D1"), strict=True)
+    assert failed(only("R1")) and failed(only("R1"), strict=False)
+    assert failed(only("R2")) and not failed(only("R2"), strict=False)       # v1.3: strict by default
+    assert failed(only("D1")) and not failed(only("D1"), strict=False)
     assert not failed(only("R3"), strict=True)
 
 
@@ -85,10 +85,11 @@ def test_the_command_line_exits_1_on_an_error(tmp_path, capsys):
     for name, text in PLANTED.items():
         (tmp_path / name).write_text(text)
     assert main([str(tmp_path)]) == 1
-    assert "1 R2 warning(s), 1 D1 deprecation(s)" in capsys.readouterr().out
+    assert "1 R2 error(s), 1 D1 removed-API error(s)" in capsys.readouterr().out
     (tmp_path / "agents.py").unlink()
-    assert main([str(tmp_path), "--quiet"]) == 0
-    assert main([str(tmp_path), "--strict"]) == 1
+    assert main([str(tmp_path), "--quiet"]) == 1                # v1.3: R2 and D1 fail by default
+    assert main([str(tmp_path), "--quiet", "--lenient"]) == 0
+    assert main([str(tmp_path), "--strict"]) == 1               # kept for v1.2 callers
 
 
 def test_base_pipeline_uses_the_rules_by_default(tmp_path):

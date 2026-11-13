@@ -118,7 +118,6 @@ def test_retrieve_and_ingest_take_the_tenant_from_the_context():
         pipeline.retrieve("payment", tenant_id="other", ctx=ctx)
 
 
-@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_pipeline_without_ports_still_needs_its_own_hooks():
     class Old(BaseRAGPipeline):
         def _rerank(self, results, config=None, **kw): return results
@@ -162,32 +161,21 @@ def test_serve_async_gives_the_same_answer_as_serve_inside_a_running_loop():
     assert "'echo': 7" in blocking["result"]["content"][0]["text"]
 
 
-def test_the_endpoint_is_a_protected_hook_and_the_public_name_is_an_alias():
+def test_the_endpoint_is_a_protected_hook_and_the_public_alias_is_gone():
     tool = EchoTool()
     result = asyncio.run(tool.execute({"x": 1}, {}, tenant_id="t1"))
     assert result["endpoint"] == "local://echo"
-    assert tool.get_endpoint({}, tenant_id="t1") == "local://echo"           # deprecated alias
+    assert not hasattr(tool, "get_endpoint")                                   # removed in v1.3
     assert RestToolService._get_endpoint is not BaseToolService._get_endpoint
     assert MCPToolService()._get_endpoint({"mcp_server_url": "http://mcp"}) == "http://mcp"
 
 
-@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
-def test_a_v1_1_get_endpoint_override_still_works_and_is_told_once_to_migrate():
-    class Legacy(RestToolService):                 # as O2C's HttpJsonTool: inherits a _get_endpoint
-        def _build_payload(self, payload, config=None, **kw): return payload
-
-        async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **kw):
-            return {"physical_success": True, "endpoint": endpoint}
-
-        def get_endpoint(self, config=None, tenant_id=None, **kw):
-            return f"local://legacy/{tenant_id}"
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        first = asyncio.run(Legacy().execute({"x": 1}, {}, tenant_id="t1"))
-        asyncio.run(Legacy().execute({"x": 1}, {}, tenant_id="t1"))
-    assert first["endpoint"] == "local://legacy/t1"
-    assert sum("v1.1 keyword signature" in str(w.message) for w in caught) == 1
+def test_a_get_endpoint_override_is_refused_when_its_class_is_defined():
+    """v1.3: get_endpoint() (deprecated in v1.2) is gone; a subclass that defines it is refused."""
+    with pytest.raises(TypeError, match=r"Legacy\.get_endpoint was removed in E2A v1.3"):
+        class Legacy(RestToolService):
+            def get_endpoint(self, config=None, tenant_id=None, **kw):
+                return f"local://legacy/{tenant_id}"
 
 
 def test_a_tool_without_an_endpoint_says_what_to_implement():

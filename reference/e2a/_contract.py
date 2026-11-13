@@ -1,17 +1,12 @@
 """Internal: calling hooks under the BOPF-style contract (v1.2).
 
-A hook written for v1.2 declares a parameter named `ctx`. It receives exactly the
-parameters it declares, from those its step makes available; declaring one the step
-does not offer (for example io_modify before the act step) is an error. A hook
-without `ctx` is a v1.1 hook and is called the v1.1 way, once per class with a
-DeprecationWarning.
+A hook declares a parameter named `ctx`. It receives exactly the parameters it declares,
+from those its step makes available; declaring one the step does not offer (for example
+io_modify before the act step) is an error. Since v1.3 a hook without `ctx` (the v1.1
+keyword signature) is refused when its class is defined.
 """
 import inspect
-import warnings
 from typing import Any, Callable, Dict
-
-_WARNED = set()
-
 
 def declares_ctx(fn: Callable) -> bool:
     try:
@@ -36,10 +31,13 @@ def call_hook(fn: Callable, step: str, available: Dict[str, Any]) -> Any:
     return fn(**args)
 
 
-def warn_legacy(owner: type, hook: str) -> None:
-    """One warning per class (naming the first hook seen), not one per hook."""
-    if owner not in _WARNED:
-        _WARNED.add(owner)
-        warnings.warn(f"{owner.__qualname__} uses the v1.1 keyword signature (for example {hook}); declare "
-                      f"the v1.2 contract parameters ('state, ctx, ...'). The v1.1 form is removed in v1.3.",
-                      DeprecationWarning, stacklevel=3)
+def refuse_v11_hooks(cls: type, hooks) -> None:
+    """v1.3: a hook a class defines must declare the v1.2 parameters ('state, ctx, ...').
+    The v1.1 keyword signature (config=None, **kwargs) was deprecated in v1.2 and is refused
+    here, when the class is defined, naming the hook."""
+    for name in hooks:
+        fn = cls.__dict__.get(name)
+        if callable(fn) and not declares_ctx(fn):
+            raise TypeError(f"{cls.__qualname__}.{name} uses the v1.1 keyword signature, removed in E2A v1.3: "
+                            f"declare the v1.2 contract parameters ('state, ctx, ...'); see the Implementation "
+                            f"Playbook 2.20")

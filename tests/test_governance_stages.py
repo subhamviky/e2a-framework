@@ -114,7 +114,6 @@ def test_the_engine_tool_policy_limits_what_an_agent_can_reach():
     assert state["refusal"]["code"] == "TOOL_DENIED"
 
 
-@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
 def test_a_v1_1_engine_without_stages_runs_as_before_with_typed_refusals():
     class Old(BaseGovernanceFramework):
         def _check_execution_capacity(self, state, io_config, config=None, **kw): return False
@@ -125,16 +124,15 @@ def test_a_v1_1_engine_without_stages_runs_as_before_with_typed_refusals():
     assert Old().redact_response({}, {"text": "x"}, {}) == {"text": "x"}
 
 
-@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
-def test_a_v1_1_agent_with_a_governance_engine_runs():
+def test_an_agent_with_a_governance_engine_without_stages_runs():
     """Regression: since v1.1, BaseAgent.run passed io_config twice to the gate, so any agent
-    configured with a governance_engine failed with 'multiple values for argument io_config'."""
+    configured with a governance_engine failed with 'multiple values for argument io_config'.
+    (v1.3: on the v1.2 hooks, with a v1.1 engine, which is still supported.)"""
     class Old(BaseAgent):
-        def _build_messages(self, state, config=None, **kw): return [{"role": "user", "content": "x"}]
-        def _apply_policy(self, state, config=None, **kw): pass
-        def _evaluate_output(self, response, state, config=None, **kw): return 1.0
-        def _fallback(self, state, config=None, **kw): return {}
-        def _handle_error(self, error, state, config=None, **kw): state["error"] = str(error)
+        def _build_messages(self, state, ctx): return [{"role": "user", "content": "x"}]
+        def _evaluate_output(self, response, state, ctx): return 1.0
+        def _fallback(self, state, ctx): return {}
+        def _handle_error(self, error, state, ctx): state["error"] = str(error)
 
     class Gate(BaseGovernanceFramework):
         pass

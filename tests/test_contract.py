@@ -205,19 +205,9 @@ def test_outputs_are_explicit():
     assert state["outcome"] == "COMMITTED"
 
 
-@pytest.mark.v11_adapters        # exercises the v1.1 adapters on purpose (V13-01)
-def test_a_v1_1_agent_still_runs_and_is_told_once_to_migrate():
-    class Old(BaseAgent):
-        def _build_messages(self, state, config=None, **kw): return [{"role": "user", "content": "x"}]
-        def _apply_policy(self, state, config=None, **kw): state["policy_tenant"] = kw["tenant_id"]
-        def _evaluate_output(self, response, state, config=None, **kw): return 1.0
-        def _fallback(self, state, config=None, **kw): return {}
-        def _handle_error(self, error, state, config=None, **kw): state["error"] = str(error)
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        state = Old().run({"tenant_id": "t1"}, config())
-        Old().run({"tenant_id": "t1"}, config())
-    assert state["policy_tenant"] == "t1" and "error" not in state
-    assert sum("v1.1 keyword signature" in str(w.message) for w in caught) == 1
+def test_a_v1_1_agent_is_refused_when_its_class_is_defined():
+    """v1.3: the v1.1 keyword signature (deprecated in v1.2) is refused, naming the hook."""
+    with pytest.raises(TypeError, match=r"Old\._build_messages uses the v1.1 keyword signature, removed in E2A v1.3"):
+        class Old(BaseAgent):
+            def _build_messages(self, state, config=None, **kw): return [{"role": "user", "content": "x"}]
     assert PhysicalOutcome  # imported for the type

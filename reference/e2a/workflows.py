@@ -29,7 +29,7 @@ from typing import Mapping, Sequence
 from .core import ClaimStatus, Deadline, DehydrationInterrupt, PhysicalOutcome, _DETERMINISTIC_ERRORS
 from .config import resolve_config
 from ._propagation import _PropagationMixin
-from ._contract import call_hook, declares_ctx, warn_legacy
+from ._contract import call_hook, declares_ctx
 from .context import MessageLog, RequestContext
 from .observability import BaseObservability
 from .agents import BaseAgent
@@ -348,7 +348,9 @@ class BaseWorkflow(ABC, _PropagationMixin):
         if declares_ctx(fn):
             return call_hook(fn, step, available)
         if getattr(type(self), name) is not getattr(BaseWorkflow, name, None):
-            warn_legacy(type(self), name)
+            # v1.3: a declared-steps workflow (its _build_workflow declares ctx) uses v1.2 hooks only
+            raise TypeError(f"{type(self).__qualname__}.{name} uses the v1.1 keyword signature, removed in E2A v1.3 "
+                            f"for a workflow of declared steps: declare the v1.2 parameters ('state, ctx, ...')")
         return fn(*legacy_args, **legacy_kwargs)
 
     def __checkpoint(self, snapshot, state, ctx, step_name, interrupt, config, fingerprint=None):

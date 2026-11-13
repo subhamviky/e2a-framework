@@ -2,6 +2,34 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.3.0 — The v1.1 agent hooks and get_endpoint are removed
+
+Announced in v1.2.0 and prepared in v1.2.3 (design note V13-01): every codebase in the family already runs without them.
+
+### Removed
+- **The v1.1 agent hook adapters.**
+  - A `BaseAgent` subclass hook with the v1.1 keyword signature (`config=None, **kwargs`, no `ctx`) is now refused when the class is defined: a `TypeError` naming the hook. It was deprecated with a warning in v1.2.
+  - `BaseAgent.run` has one order, the v1.2 one.
+  - In a workflow of declared steps (`_build_workflow(self, ctx)`), a v1.1 workflow hook is a `TypeError`.
+- **`BaseToolService.get_endpoint()`,** the public alias deprecated in v1.2. A subclass that defines `get_endpoint` is refused when the class is defined; implement `_get_endpoint`.
+- `_contract.warn_legacy`, which is no longer needed.
+
+### Changed
+- **`e2a.conformance` is strict by default.**
+  - R2 (a protected hook called from outside its class) and D1 (a removed public method) are errors.
+  - `--lenient` reports them without failing, while migrating; `--strict` is accepted and does nothing.
+  - `failed(findings, strict=True)` is the default.
+  - D1 now reports `get_endpoint` on any subclass of a class with `_get_endpoint`.
+- **`BasePipeline._verify_scaffold_contracts`** is strict by default (`conformance_strict=True`).
+- **Tests:** the tests that exercised the adapters now check that v1.3 refuses them. 79 tests pass.
+- **e2a-java:** version `1.3.0`, unchanged.
+
+### Kept, on purpose
+- **`e2a_base`:** the re-export of the `e2a` package.
+- **The v1.1 workflow form:** a graph plus `_get_agent`, with no `ctx`. It was never deprecated, and A2C's SDLC workflow and the reference orchestrator use it.
+- **The v1.1 governance hooks** of an engine without stages.
+- **The mirrored `state['tenant_id']` and `state['correlation_id']`.**
+
 ## v1.2.3 — Preparing for v1.3 (design note V13-01)
 
 Nothing is removed and no contract changed; this release makes E2A's own code ready for v1.3.

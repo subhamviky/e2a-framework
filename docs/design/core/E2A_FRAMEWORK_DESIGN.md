@@ -1311,6 +1311,15 @@ The proofs:
 - settlement's audit service gained a gate. Its seven evaluation cases must each be right, so its threshold is 1.0.
 - settlement-service moved onto e2a-java: its own `cqrs/` package and `E2ABase.java` were deleted, 611 lines net.
 
+### 15.2 v1.3.0: the v1.1 agent hooks and get_endpoint are removed
+
+As announced in v1.2.0 and prepared in v1.2.3 (design note V13-01):
+- **A v1.1 agent hook is refused when its class is defined:** a hook with the keyword signature `config=None, **kwargs` and no `ctx` raises a `TypeError` naming the hook. The same holds for a v1.1 workflow hook in a workflow of declared steps.
+- **`get_endpoint` is gone.** A tool implements `_get_endpoint`, and a subclass that still defines `get_endpoint` is refused.
+- **`e2a.conformance` is strict by default:** R2 and D1 are errors; `--lenient` reports them while migrating.
+- **What stays:** `e2a_base` (a re-export), the v1.1 workflow form (a graph and `_get_agent`, never deprecated), the v1.1 governance hooks of an engine without stages, and the mirrored `state['tenant_id']`.
+- **What changes for this document:** where it describes a v1.1 hook signature (Sections 8 and 12), read the v1.2 signature of Table 13 instead.
+
 ## Appendix A. Configuration Reference (generated from E2A_CONFIG)
 
 Resolution order for every key: call-time kwargs › config dict › environment variable › scaffold default (scoped defaults in parentheses). Object references (`llm_service`, engines, stores) are passed in `config` only.

@@ -23,7 +23,6 @@ from .core import Deadline, PhysicalOutcome
 from .config import resolve_config
 from .resilience import ResiliencePolicy, run_sync
 from ._propagation import _PropagationMixin
-from ._contract import warn_legacy
  
 # ==================================================
 # BaseToolService  (client — REST or MCP transport)
@@ -56,26 +55,22 @@ class BaseToolService(ABC, _PropagationMixin):
         key = kwargs.get('idempotency_key', payload.get('idempotency_key'))
         if key and not self._commit_gate(key, failed_keys, config, **kwargs):
             return {'status': 'blocked', 'reason': 'commit_gate'}
-        if type(self).get_endpoint is not BaseToolService.get_endpoint:
-            # a v1.1 subclass overrides the public get_endpoint(): it wins over any
-            # _get_endpoint() inherited from RestToolService/MCPToolService (until v1.3)
-            warn_legacy(type(self), 'get_endpoint')
-            endpoint = self.get_endpoint(config, tenant_id=tenant_id, **kwargs)
-        else:
-            endpoint = self._get_endpoint(config, tenant_id=tenant_id, **kwargs)
+        endpoint = self._get_endpoint(config, tenant_id=tenant_id, **kwargs)
         # tenant_id reaches every hook, so a transport can scope the call (v1.1.1)
         body = self._build_payload(payload, config, tenant_id=tenant_id, **kwargs)
         return await self.__http_post(endpoint, body, config, tenant_id=tenant_id, **kwargs)
  
     def _get_endpoint(self, config=None, tenant_id=None, **kwargs):
         """Protected hook (v1.2, E-19): where to send the call. kwargs: base_url,
-        service_name, tenant_routing_map. A v1.1 subclass that overrides the public
-        get_endpoint() keeps working until v1.3 (execute() calls that override)."""
+        service_name, tenant_routing_map. (The public get_endpoint() alias was removed in v1.3.)"""
         raise NotImplementedError('implement _get_endpoint()')
 
-    def get_endpoint(self, config=None, tenant_id=None, **kwargs):
-        """Deprecated public alias of _get_endpoint() (removed in v1.3)."""
-        return self._get_endpoint(config, tenant_id=tenant_id, **kwargs)
+    def __init_subclass__(cls, **kwargs):
+        """v1.3: get_endpoint() was removed; a subclass that still defines it is refused."""
+        super().__init_subclass__(**kwargs)
+        if 'get_endpoint' in cls.__dict__:
+            raise TypeError(f"{cls.__qualname__}.get_endpoint was removed in E2A v1.3: implement the protected "
+                            f"_get_endpoint(config=None, tenant_id=None, **kwargs) instead")
 
     @abstractmethod
     def _build_payload(self, payload, config=None, **kwargs):

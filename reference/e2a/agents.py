@@ -21,7 +21,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from .core import DehydrationInterrupt, PhysicalOutcome
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext
-from ._contract import call_hook, declares_ctx, warn_legacy
+from ._contract import call_hook, declares_ctx, refuse_v11_hooks
 from .stages import GovernanceRefusal
 from .config import resolve_config
 from ._propagation import _PropagationMixin
@@ -31,6 +31,12 @@ from .governance import BaseGovernanceFramework
 # ==================================================
  
 class BaseAgent(ABC, _PropagationMixin):
+
+    def __init_subclass__(cls, **kwargs):
+        """v1.3: a hook with the v1.1 keyword signature is refused when the class is defined."""
+        super().__init_subclass__(**kwargs)
+        refuse_v11_hooks(cls, ('_prepare', '_apply_policy', '_build_messages', '_evaluate_output',
+                               '_fallback', '_act', '_confirm', '_handle_error'))
  
     def run(self, state: Dict[str, Any], config: Dict[str, Any] = None,
             correlation_id: str = None, io_config: Dict[str, Any] = None,
@@ -86,40 +92,28 @@ class BaseAgent(ABC, _PropagationMixin):
             allowed = gov_engine.tool_policy[name]          # v1.2: the engine's per-agent tool policy
         io_read = ReadAccess(ctx, config, allowed=allowed, messages=messages)
         io_modify = ModifyAccess(ctx, config, allowed=allowed, messages=messages)
-        v2 = declares_ctx(self._build_messages) or (
-            type(self)._apply_policy is not BaseAgent._apply_policy and declares_ctx(self._apply_policy))
 
         def hook(name, step, legacy_args, legacy_kwargs, **available):
-            fn = getattr(self, name)
-            if declares_ctx(fn):
-                return call_hook(fn, step, available)
-            warn_legacy(type(self), name)
-            return fn(*legacy_args, **legacy_kwargs)
+            # v1.3: every hook declares the v1.2 parameters (checked when the class is defined)
+            return call_hook(getattr(self, name), step, available)
 
         start = time.time()
         try:
-            if v2:
-                # screening stages (capacity, budget, sandbox, firewall) before anything reads the
-                # request; deciding stages (approval) after _prepare has read the facts they need
-                if gov_engine:
-                    state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx, messages=messages,
-                                                               phase='screen', **gate_kw, **kwargs)
-                call_hook(self._prepare, 'prepare', dict(state=state, ctx=ctx, io_read=io_read, messages=messages))
-                if gov_engine:
-                    state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx, messages=messages,
-                                                               phase='decide', **gate_kw, **kwargs)
-                hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs),
-                     state=state, ctx=ctx, io_read=io_read, messages=messages, failed_keys=failed)
-                prompt = hook('_build_messages', 'build_messages', (state, config), dict(common, **kwargs),
-                              state=state, ctx=ctx)
-            else:   # the v1.1 order, unchanged
-                prompt = self._build_messages(state, config, **common, **kwargs)
-                if gov_engine:
-                    state = gov_engine.enforce_governance_gate(state, io_config, config, **gate_kw, **kwargs)
-                else:
-                    hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs))
+            # screening stages (capacity, budget, sandbox, firewall) before anything reads the
+            # request; deciding stages (approval) after _prepare has read the facts they need
+            if gov_engine:
+                state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx, messages=messages,
+                                                           phase='screen', **gate_kw, **kwargs)
+            call_hook(self._prepare, 'prepare', dict(state=state, ctx=ctx, io_read=io_read, messages=messages))
+            if gov_engine:
+                state = gov_engine.enforce_governance_gate(state, io_config, config, ctx=ctx, messages=messages,
+                                                           phase='decide', **gate_kw, **kwargs)
+            hook('_apply_policy', 'apply_policy', (state, config), dict(common, **kwargs),
+                 state=state, ctx=ctx, io_read=io_read, messages=messages, failed_keys=failed)
+            prompt = hook('_build_messages', 'build_messages', (state, config), dict(common, **kwargs),
+                          state=state, ctx=ctx)
             accepted, response = True, None
-            if prompt is not None or not v2:
+            if prompt is not None:
                 response = self._infer(prompt, config, **common, **kwargs)
                 tokens_used = self.__track_usage(prompt, response, config, **kwargs)
                 state['cumulative_tokens_used'] = state.get('cumulative_tokens_used', 0) + tokens_used
@@ -129,13 +123,12 @@ class BaseAgent(ABC, _PropagationMixin):
                     accepted = False
                     response = hook('_fallback', 'fallback', (state, config), dict(common, **kwargs),
                                     state=state, ctx=ctx, messages=messages)
-                if v2:      # a workflow step ends the workflow on a fallback (note 05)
-                    state['evaluation'] = 'ACCEPTED' if accepted else 'FALLBACK'
+                state['evaluation'] = 'ACCEPTED' if accepted else 'FALLBACK'   # a fallback ends a workflow (note 05)
             if accepted:
                 if ctx.expired():
                     outcomes = []
                     messages.warn('act_skipped_deadline')
-                    if declares_ctx(self._act) and type(self)._act is not BaseAgent._act:
+                    if type(self)._act is not BaseAgent._act:
                         state['outcome'] = PhysicalOutcome.NOT_COMMITTED.value
                 else:
                     outcomes = call_hook(self._act, 'act', dict(state=state, ctx=ctx, io_modify=io_modify,
@@ -144,11 +137,11 @@ class BaseAgent(ABC, _PropagationMixin):
                                                                    outcomes=list(outcomes), messages=messages))
                 if outcome is not None:
                     state['outcome'] = PhysicalOutcome(outcome).value
-            if v2 and prompt is None:   # a deterministic agent: its steps may set state['response']
+            if prompt is None:   # a deterministic agent: its steps may set state['response']
                 response = state.get('response')
             if gov_engine:
-                extra = dict(ctx=ctx, messages=messages) if v2 else {}
-                response = gov_engine.redact_response(state, response, config, **extra, **common, **kwargs)
+                response = gov_engine.redact_response(state, response, config, ctx=ctx, messages=messages,
+                                                      **common, **kwargs)
             state['response'] = response
         except DehydrationInterrupt:
             raise  # re-raised unchanged; BaseWorkflow.execute() catches it
@@ -165,7 +158,7 @@ class BaseAgent(ABC, _PropagationMixin):
         max_latency = resolve_config('max_latency', config, kwargs)
         self._log(messages.entries, ctx.correlation_id, 'INFO', 'agent_run_complete',
                    latency=round(latency, 3), tokens_used=state.get('cumulative_tokens_used', 0))
-        state['tenant_id'] = ctx.tenant_id            # mirrored for v1.1 code; removed in v1.3
+        state['tenant_id'] = ctx.tenant_id            # mirrored into the state for callers that read it
         state['correlation_id'] = ctx.correlation_id
         if latency > max_latency:
             # v1.1.2: recorded, not raised. The run has finished and may have committed

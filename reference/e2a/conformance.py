@@ -6,18 +6,18 @@ subclass implements them) and private methods (the framework owns them).
 
     R1  error    A subclass does not override a framework-owned public method or a
                  framework-private (__) method.
-    R2  warning  Code outside a class does not call that class's protected hooks
-                 (an error with --strict; an error by default from v1.3).
+    R2  error    Code outside a class does not call that class's protected hooks
+                 (an error since v1.3; --lenient reports it without failing, while migrating).
     R3  info     An extra public method on a subclass: allowed if it is a capability
                  (its own caller or trigger, its own guarantees, not a shortcut to a hook).
-    D1  warning  A subclass overrides a public method that became a protected hook in
-                 v1.2 (get_endpoint -> _get_endpoint); removed in v1.3 (an error with --strict).
+    D1  error    A subclass defines a public method that became a protected hook in v1.2
+                 and was removed in v1.3 (get_endpoint -> _get_endpoint).
 
 The rule sets are read from the e2a classes themselves, so they follow the framework:
 framework-owned = the public, non-abstract methods of an e2a class; hooks = its
 single-underscore methods.
 
-    python -m e2a.conformance src/ [--strict] [--quiet]     exit 1 on an error
+    python -m e2a.conformance src/ [--lenient] [--quiet]    exit 1 on an error
 
 The pytest kit (AgentContract) checks the behaviour every agent must keep.
 """
@@ -28,9 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 
-SEVERITY = {'R1': 'error', 'R2': 'warning', 'R3': 'info', 'D1': 'warning'}
+SEVERITY = {'R1': 'error', 'R2': 'error', 'R3': 'info', 'D1': 'error'}
 _FRAMEWORK_MODULES = ('e2a', 'e2a_base')
-_DEPRECATED_HOOKS = {'get_endpoint': '_get_endpoint'}      # public in v1.1, protected from v1.2
+_DEPRECATED_HOOKS = {'get_endpoint': '_get_endpoint'}      # public in v1.1, protected in v1.2, removed in v1.3
 
 
 @dataclass(frozen=True)
@@ -157,10 +157,10 @@ def check_sources(sources: Dict[str, str]) -> List[Finding]:
                 if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 name, where = item.name, f'{node.name}.{item.name}'
-                if name in _DEPRECATED_HOOKS and name in owned:
+                if name in _DEPRECATED_HOOKS and _DEPRECATED_HOOKS[name] in known:
                     findings.append(Finding('D1', SEVERITY['D1'], path, item.lineno, where,
-                                            f'{name}() is a deprecated public alias; implement '
-                                            f'{_DEPRECATED_HOOKS[name]}() (removed in v1.3)'))
+                                            f'{name}() was removed in E2A v1.3; implement '
+                                            f'{_DEPRECATED_HOOKS[name]}()'))
                 elif name in owned:
                     findings.append(Finding('R1', SEVERITY['R1'], path, item.lineno, where,
                                             f'overrides the framework-owned public method {name}() of '
@@ -200,8 +200,9 @@ def _outside_hook_calls(path: str, tree: ast.AST, hooks: frozenset) -> List[Find
     return found
 
 
-def failed(findings: Iterable[Finding], strict: bool = False) -> bool:
-    """R1 always fails; R2 and D1 fail with strict (the default from v1.3); R3 never fails."""
+def failed(findings: Iterable[Finding], strict: bool = True) -> bool:
+    """R1 always fails; R2 and D1 fail unless strict=False (v1.3: strict is the default);
+    R3 never fails."""
     return any(f.rule == 'R1' or (strict and f.rule in ('R2', 'D1')) for f in findings)
 
 
@@ -210,7 +211,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog='python -m e2a.conformance',
                                      description='Check the E2A Governed Entry Point rules (R1-R3).')
     parser.add_argument('paths', nargs='+', help='files or folders to check')
-    parser.add_argument('--strict', action='store_true', help='R2 and D1 findings fail too (the v1.3 default)')
+    parser.add_argument('--strict', action='store_true', help='kept for v1.2 callers: strict is the default since v1.3')
+    parser.add_argument('--lenient', action='store_true', help='report R2 and D1 without failing (while migrating)')
     parser.add_argument('--quiet', action='store_true', help='do not print R3 (info) findings')
     args = parser.parse_args(argv)
     findings = check_paths(args.paths)
@@ -218,9 +220,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not (args.quiet and f.rule == 'R3'):
             print(f)
     counts = {r: sum(f.rule == r for f in findings) for r in ('R1', 'R2', 'D1', 'R3')}
-    bad = failed(findings, args.strict)
-    print(f"e2a.conformance: {counts['R1']} R1 error(s), {counts['R2']} R2 warning(s), "
-          f"{counts['D1']} D1 deprecation(s), {counts['R3']} R3 note(s): {'FAILED' if bad else 'OK'}")
+    bad = failed(findings, strict=not args.lenient)
+    print(f"e2a.conformance: {counts['R1']} R1 error(s), {counts['R2']} R2 error(s), "
+          f"{counts['D1']} D1 removed-API error(s), {counts['R3']} R3 note(s): {'FAILED' if bad else 'OK'}")
     return 1 if bad else 0
 
 

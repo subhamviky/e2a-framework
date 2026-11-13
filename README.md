@@ -12,11 +12,11 @@ It focuses on the boundary where probabilistic reasoning meets deterministic ent
 
 ## Install
 
-    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.2.3"
+    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.3.0"
 
-Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.2.3" }`.
+Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.3.0" }`.
 The framework is the `e2a` package (`from e2a import BaseAgent, BaseWorkflow, Steps, Step`); the release
-gate is `from e2a.release import ProjectReleaseGate`; v1.1 code keeps importing `e2a_base`.
+gate is `from e2a.release import ProjectReleaseGate`; the `e2a_base` module re-exports the same names. Since v1.3 hooks use the v1.2 signature (`state, ctx, …`).
 
 **Java (e2a-java, since v1.2.2):** the same contracts for Java 21 in [`java/`](java/README.md) —
 `e2a-core`, `e2a-cqrs`, `e2a-spring-jpa`, `e2a-test`, at this tag's version. There is no package
@@ -26,6 +26,7 @@ registry: a service's CI builds it from the tag (`mvn -f java/pom.xml install -D
 
 | e2a-framework | a2c-framework | capability-oriented-dsa |
 |---|---|---|
+| `v1.3.0` (v1.1 agent hooks and `get_endpoint` removed; e2a-java `1.3.0`) | `v1.3.0` | `v0.2.x`, `v0.3.x` |
 | `v1.2.3` (v1.3 preparation; e2a-java `1.2.3`) | `v1.2.2` | `v0.2.x`, `v0.3.x` |
 | `v1.2.2` (Python + e2a-java `1.2.2`) | `v1.2.1`, `v1.2.2` | `v0.2.x`, `v0.3.x` |
 | `v1.2.0`, `v1.2.1` (docs) | `v1.2.0` | `v0.2.x`, `v0.3.x` |
