@@ -1,5 +1,12 @@
-"""The DynamoDB adapters pass E2A's port contract kit on moto (no AWS account), plus the
-DynamoDB-specific checks: shared table layout, errors that are not a lost condition, value size."""
+"""The DynamoDB adapters pass E2A's port contract kit:
+
+- on moto (no AWS account, always runs), without the concurrent races: moto's in-process
+  backend does not evaluate condition expressions atomically across threads;
+- on DynamoDB Local (Amazon's emulator, which does), the whole kit including the races. Run
+  it and set DYNAMODB_LOCAL_ENDPOINT (CI does both); otherwise those tests are skipped.
+
+Plus the DynamoDB-specific checks: shared table layout, errors that are not a lost condition, value size."""
+import uuid
 import json
 import os
 
@@ -30,19 +37,19 @@ def table():
 
 
 def test_idempotency_store_meets_the_contract(table):
-    assert len(check_idempotency_store(lambda clock: DynamoDBIdempotencyStore(table, clock=clock))) == 24
+    assert len(check_idempotency_store(lambda clock: DynamoDBIdempotencyStore(table, clock=clock), race=1)) == 23
 
 
 def test_transactional_store_meets_the_contract(table):
-    assert len(check_transactional_store(lambda clock: DynamoDBTransactionalStore(table, clock=clock))) == 13
+    assert len(check_transactional_store(lambda clock: DynamoDBTransactionalStore(table, clock=clock), race=1)) == 12
 
 
 def test_lease_meets_the_contract(table):
-    assert len(check_lease(lambda clock: DynamoDBLease(table, clock=clock))) == 11
+    assert len(check_lease(lambda clock: DynamoDBLease(table, clock=clock), race=1)) == 10
 
 
 def test_checkpoint_store_meets_the_contract(table):
-    assert len(check_checkpoint_store(lambda clock: DynamoDBCheckpointStore(table, clock=clock))) == 8
+    assert len(check_checkpoint_store(lambda clock: DynamoDBCheckpointStore(table, clock=clock), race=1)) == 7
 
 
 def test_it_shares_the_application_table_under_its_own_partitions(table):
@@ -95,3 +102,43 @@ def test_a_lease_keeps_its_fencing_counter_across_release(table):
         tokens.append(h.fencing_token)
         lease.release(h)
     assert tokens == [1, 2, 3]
+
+
+# ------------------------------------------------ DynamoDB Local: the whole kit, races included
+local = pytest.mark.skipif(not os.getenv('DYNAMODB_LOCAL_ENDPOINT'),
+                           reason='DYNAMODB_LOCAL_ENDPOINT not set (DynamoDB Local not running)')
+
+
+@pytest.fixture
+def local_table():
+    for k, v in (('AWS_ACCESS_KEY_ID', 'local'), ('AWS_SECRET_ACCESS_KEY', 'local'), ('AWS_DEFAULT_REGION', 'eu-west-1')):
+        os.environ[k] = v
+    ddb = boto3.resource('dynamodb', endpoint_url=os.environ['DYNAMODB_LOCAL_ENDPOINT'])
+    t = ddb.create_table(TableName=f'e2a-{uuid.uuid4().hex[:8]}', BillingMode='PAY_PER_REQUEST',
+                         KeySchema=[{'AttributeName': 'pk', 'KeyType': 'HASH'},
+                                    {'AttributeName': 'sk', 'KeyType': 'RANGE'}],
+                         AttributeDefinitions=[{'AttributeName': 'pk', 'AttributeType': 'S'},
+                                               {'AttributeName': 'sk', 'AttributeType': 'S'}])
+    t.wait_until_exists()
+    yield t
+    t.delete()
+
+
+@local
+def test_on_dynamodb_local_idempotency_store_meets_the_whole_contract(local_table):
+    assert len(check_idempotency_store(lambda clock: DynamoDBIdempotencyStore(local_table, clock=clock))) == 24
+
+
+@local
+def test_on_dynamodb_local_transactional_store_meets_the_whole_contract(local_table):
+    assert len(check_transactional_store(lambda clock: DynamoDBTransactionalStore(local_table, clock=clock))) == 13
+
+
+@local
+def test_on_dynamodb_local_lease_meets_the_whole_contract(local_table):
+    assert len(check_lease(lambda clock: DynamoDBLease(local_table, clock=clock))) == 11
+
+
+@local
+def test_on_dynamodb_local_checkpoint_store_meets_the_whole_contract(local_table):
+    assert len(check_checkpoint_store(lambda clock: DynamoDBCheckpointStore(local_table, clock=clock))) == 8

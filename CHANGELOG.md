@@ -24,6 +24,9 @@ Additive: nothing changes for code on v1.3.0.
 
   Tested on moto: the four contract suites, plus the table layout, a non-condition error and the size limit.
 - **CI:** an `adapters` job installs the core and the adapters and runs their tests and strict conformance.
+- **The concurrent races run on DynamoDB Local** (Amazon's emulator, which evaluates condition expressions atomically), in CI and wherever `DYNAMODB_LOCAL_ENDPOINT` is set.
+  - On moto the kit runs without them (`race=1`): moto's in-process backend is not atomic under threads, so those scenarios failed about one run in eight without proving anything about the adapter.
+  - The kit's `race` argument documents this: a value below 2 leaves the race scenario out, and is only for backends that are not atomic under threads.
 
 ### Changed
 - e2a-java follows the version: `1.4.0` (no code change).

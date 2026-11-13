@@ -15,6 +15,11 @@ scenarios that passed.
 
 Values given to the stores are JSON-compatible dicts: that is all a durable adapter can promise
 to round-trip exactly.
+
+``race`` is how many threads each suite's last scenario races on one key (default 8). Pass a
+value below 2 to leave that scenario out, and only where the BACKEND is not atomic under
+threads (moto's in-process DynamoDB is not): the race then has to be proven on a real service
+or a faithful emulator (DynamoDB Local, the Firestore and Cosmos DB emulators).
 """
 import threading
 import uuid
@@ -150,11 +155,12 @@ def check_idempotency_store(make: Callable[[FakeClock], object], race: int = 8) 
     r.check('after its explicit expiry the key is claimable again (expiry is a field, not TTL timing)',
             s.claim(k, tenant_id='t1').status == ClaimStatus.CLAIMED)
 
-    k = _key('race')
-    results = _race(race, lambda i: s.claim(k, tenant_id='t1', lease_seconds=60))
-    r.check(f'{race} concurrent claims of one key: exactly one CLAIMED',
-            sum(1 for x in results if x.status == ClaimStatus.CLAIMED) == 1,
-            str([x.status.value for x in results]))
+    if race >= 2:
+        k = _key('race')
+        results = _race(race, lambda i: s.claim(k, tenant_id='t1', lease_seconds=60))
+        r.check(f'{race} concurrent claims of one key: exactly one CLAIMED',
+                sum(1 for x in results if x.status == ClaimStatus.CLAIMED) == 1,
+                str([x.status.value for x in results]))
     return r.passed
 
 
@@ -195,11 +201,12 @@ def check_transactional_store(make: Callable[[FakeClock], object], race: int = 8
     r.check('delete() removes, then reports nothing to delete', s.delete(k) is True and s.delete(k) is False
             and s.get(k) is None)
 
-    k = _key('race')
-    s.put_if_version(k, {'n': 0}, None)
-    results = _race(race, lambda i: s.put_if_version(k, {'n': i}, 1))
-    r.check(f'{race} concurrent compare-and-sets at one version: exactly one COMMITTED',
-            sum(1 for x in results if x.status == 'COMMITTED') == 1, str([x.status for x in results]))
+    if race >= 2:
+        k = _key('race')
+        s.put_if_version(k, {'n': 0}, None)
+        results = _race(race, lambda i: s.put_if_version(k, {'n': i}, 1))
+        r.check(f'{race} concurrent compare-and-sets at one version: exactly one COMMITTED',
+                sum(1 for x in results if x.status == 'COMMITTED') == 1, str([x.status for x in results]))
     return r.passed
 
 
@@ -232,9 +239,10 @@ def check_lease(make: Callable[[FakeClock], object], race: int = 8) -> List[str]
             bool(h3) and h3.fencing_token > h2.fencing_token)
     r.check('the expired owner cannot renew', s.renew(h2, 30) is False)
 
-    k = _key('race')
-    results = _race(race, lambda i: s.acquire(k, 60))
-    r.check(f'{race} concurrent acquires: exactly one handle', sum(1 for x in results if x) == 1)
+    if race >= 2:
+        k = _key('race')
+        results = _race(race, lambda i: s.acquire(k, 60))
+        r.check(f'{race} concurrent acquires: exactly one handle', sum(1 for x in results if x) == 1)
     return r.passed
 
 
@@ -261,10 +269,11 @@ def check_checkpoint_store(make: Callable[[FakeClock], object], race: int = 8) -
     r.check('the decision is recorded', after['status'] == 'APPROVED' and after['decided_by'] == 'alice', str(after))
     r.check('an unknown checkpoint cannot be decided', s.decide(_key('missing'), 'APPROVED', 'x') is False)
 
-    cid, cp = checkpoint()
-    s.save(cp)
-    results = _race(race, lambda i: s.decide(cid, 'APPROVED', f'user-{i}'))
-    r.check(f'{race} concurrent decisions: exactly one wins', sum(1 for x in results if x) == 1)
+    if race >= 2:
+        cid, cp = checkpoint()
+        s.save(cp)
+        results = _race(race, lambda i: s.decide(cid, 'APPROVED', f'user-{i}'))
+        r.check(f'{race} concurrent decisions: exactly one wins', sum(1 for x in results if x) == 1)
     return r.passed
 
 
