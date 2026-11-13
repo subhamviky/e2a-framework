@@ -394,11 +394,12 @@ Fixed on the current branches: the missing `a2c_concurrency` module; `DeveloperP
 
 | Framework | Version | Depends on | v1.2 in one line |
 |---|---|---|---|
-| E2A core | `v1.2.0` (docs `v1.2.1`) | — | The `e2a` package; request context and accessors; governance stages; declared steps and `resume()`; RAG ports; conformance kit. v1.1 code runs unchanged with deprecation warnings. |
+| E2A core | `v1.2.0` (docs `v1.2.1`; `v1.2.2`: `ProjectReleaseGate`, e2a-java) | — | The `e2a` package; request context and accessors; governance stages; declared steps and `resume()`; RAG ports; conformance kit. v1.1 code runs unchanged with deprecation warnings. |
 | CQRS profile | in E2A `v1.2.0` | E2A shared contracts | Unchanged. |
 | AI-DLC profile | in E2A `v1.2.0` | E2A, A2C | Unchanged phases; the contract check runs `e2a.conformance`. |
 | A2C | `v1.2.0` | E2A `v1.2.0` | Declarations instead of patches (settings, contracts, Maven coordinates, monorepo), upgrades with a manifest; no application-service module. |
-| G2C | in A2C `v1.2.0` | E2A, A2C, P0 | Generates E2A v1.2 code, several agents per request (Python). |
+| G2C | in A2C `v1.2.0` | E2A, A2C, P0 | Generates E2A v1.2 code, several agents per request (Python; Java on e2a-java, opt-in, since A2C `v1.2.1`). |
+| e2a-java | in E2A `v1.2.2` | — | The E2A contracts for Java 21: agent lifecycle, declared workflows, stages, CQRS profile, JPA idempotency store, `AgentContract`. |
 | P0 | in A2C `v1.2.0` | — | New request fields; a generated Python project depends on `e2a-framework` when its code imports `e2a`. |
 
 **Interfaces that changed.** A generated Python service now imports `e2a` (not a copied `common/e2a_base.py`), so the E2A version is pinned in its `pyproject.toml`; the G2C critic checks generated code with `e2a.conformance`. Every other hand-off contract in Section 7 is unchanged. Following Section 12's rules, the v1.1 adapters stay until v1.3.

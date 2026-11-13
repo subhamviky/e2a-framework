@@ -1297,6 +1297,20 @@ These were found by reading the reference against this design. O-1 to O-4 were r
 
 **Compatibility.** Every v1.1 name imports from `e2a_base`; a v1.1 subclass runs unchanged with one `DeprecationWarning` per class; a v1.1 workflow that pauses gets a checkpoint. v1.3 removes the v1.1 adapters and makes R2 an error. The unmigrated O2C code (v1.1.2 style) passes its 39 tests on v1.2.
 
+### 15.1 v1.2.2: a release gate every project can reuse, and e2a-java
+
+**Table 51 — E2A v1.2.2 additions**
+
+| Addition | What it is | Design |
+|---|---|---|
+| `e2a.release.ProjectReleaseGate` | A `BasePipeline` whose generic stages work as they are (secret scan, `pytest`, the capacity equation and strict `e2a.conformance`, `compileall`); the domain stages are one hook per case: `_score_case` over `evals/golden.json`, held to `faithfulness_threshold`, and `_probe` over `evals/redteam.json`. A missing set is `NOT_CONFIGURED`, never a silent pass. `python -m e2a.release`. | Note C-04 (D-1) |
+| e2a-java (`java/`) | The same contracts for Java 21, released with E2A's tag: `e2a-core` (request context, idempotency, accessors, stages, the v1.2 agent lifecycle, declared workflows with one claim), `e2a-cqrs` (the Deterministic CQRS profile), `e2a-spring-jpa` (a JPA idempotency store), `e2a-test` (`AgentContract`). In Java the compiler enforces R1 and R2: entry points are `final`, hooks `protected`. | Note D-01 (G-4) |
+
+The proofs:
+- O2C's release gate shrank from 134 to 70 lines on `ProjectReleaseGate`.
+- settlement's audit service gained a gate. Its seven evaluation cases must each be right, so its threshold is 1.0.
+- settlement-service moved onto e2a-java: its own `cqrs/` package and `E2ABase.java` were deleted, 611 lines net.
+
 ## Appendix A. Configuration Reference (generated from E2A_CONFIG)
 
 Resolution order for every key: call-time kwargs › config dict › environment variable › scaffold default (scoped defaults in parentheses). Object references (`llm_service`, engines, stores) are passed in `config` only.
