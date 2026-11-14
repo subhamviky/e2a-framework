@@ -58,6 +58,29 @@ class BasePromptRegistry(ABC):
 # subclass binds each one to a real backend.
 # ==================================================
  
+class BaseCredentialProvider(ABC):
+    """Where a tool's or a gateway's credentials come from (v1.6.0, design note MP-02, P20).
+    In managed deployments credentials come from the platform's chain (an IAM role, a managed
+    identity, workload identity, ADC) and are never written into configuration. Bound as the
+    seam `credential_provider` (config['credential_provider']); BaseToolService passes its
+    headers to _send_request as `auth_headers`. Without one, `auth_token` works as before."""
+
+    @abstractmethod
+    def headers(self, target: str, scope: Optional[str] = None, config: Dict[str, Any] = None,
+                **kwargs) -> Dict[str, str]:
+        """The HTTP headers that authenticate a call to `target` (an endpoint URL).
+        `scope`: an audience or OAuth scope, when the platform needs one."""
+
+
+class TokenCredentialProvider(BaseCredentialProvider):
+    """The default: a bearer token from the `auth_token` key (env TOOL_AUTH_TOKEN)."""
+
+    def headers(self, target, scope=None, config=None, **kwargs):
+        from .config import resolve_config
+        token = resolve_config('auth_token', config, kwargs)
+        return {'Authorization': f'Bearer {token}'} if token else {}
+
+
 class BaseTransactionalStore(ABC):
     """Vendor-neutral durable read/write contract. put_if_version() is the
     AUTHORITY for competing writers (optimistic concurrency): a version

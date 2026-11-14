@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "e2a-framework"
-version = "1.5.1"
+version = "1.6.0"
 description = "E2A - Enterprise-to-Agentic runtime contracts (reference implementation)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -13,7 +13,9 @@ requires-python = ">=3.11"
 dependencies = ["pydantic>=2.7"]
 
 [project.optional-dependencies]
-test = ["pytest>=8.2"]
+test = ["pytest>=8.2", "pyyaml>=6.0"]
+# YAML provider profiles (JSON profiles need nothing)
+profiles = ["pyyaml>=6.0"]
 
 [project.urls]
 Repository = "https://github.com/subhamviky/e2a-framework"
@@ -24,6 +26,7 @@ Repository = "https://github.com/subhamviky/e2a-framework"
 # existing code keep working unchanged.
 package-dir = { "" = "reference" }
 packages = ["e2a"]
+package-data = { e2a = ["profiles/*.json"] }
 py-modules = [
     "e2a_base",
     "e2a_cqrs_base",

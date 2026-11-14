@@ -117,9 +117,14 @@ class BaseAgent(ABC, _PropagationMixin):
                 response = self._infer(prompt, config, **common, **kwargs)
                 tokens_used = self.__track_usage(prompt, response, config, **kwargs)
                 state['cumulative_tokens_used'] = state.get('cumulative_tokens_used', 0) + tokens_used
-                confidence = hook('_evaluate_output', 'evaluate_output', (response, state, config),
-                                  dict(common, **kwargs), response=response, state=state, ctx=ctx, messages=messages)
-                if confidence < resolve_config('min_confidence', config, kwargs):
+                refused = isinstance(response, dict) and response.get('status') == 'REFUSED'
+                if refused:                  # v1.6.0: a model refusal goes straight to the fallback
+                    state['model_refusal'] = response.get('refusal') or {}
+                    messages.warn('model_refused', **{k: v for k, v in state['model_refusal'].items() if v})
+                confidence = 0.0 if refused else hook(
+                    '_evaluate_output', 'evaluate_output', (response, state, config),
+                    dict(common, **kwargs), response=response, state=state, ctx=ctx, messages=messages)
+                if refused or confidence < resolve_config('min_confidence', config, kwargs):
                     accepted = False
                     response = hook('_fallback', 'fallback', (state, config), dict(common, **kwargs),
                                     state=state, ctx=ctx, messages=messages)

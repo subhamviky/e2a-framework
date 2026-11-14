@@ -94,6 +94,10 @@ class BaseToolService(ABC, _PropagationMixin):
         timeout = float(resolve_config('timeout', config, kwargs))
         retries = int(resolve_config('retries', config, kwargs))
         token = resolve_config('auth_token', config, kwargs)
+        # v1.6.0: a bound credential provider (platform identity) supplies the headers;
+        # a subclass sends kwargs['auth_headers'] when present, else the token as before
+        provider = (config or {}).get('credential_provider')
+        auth_headers = provider.headers(endpoint, config=config, **kwargs) if provider is not None else None
         deadline = Deadline.coerce(kwargs.get('deadline'))
         # A call is replay-safe only with an idempotency key (or an explicit
         # safe_to_retry for reads); only then may a timeout be retried.
@@ -102,7 +106,8 @@ class BaseToolService(ABC, _PropagationMixin):
         async def attempt():
             t = deadline.bound(timeout) if deadline else timeout
             return await asyncio.wait_for(
-                self._send_request(endpoint, body, token=token, timeout=t, config=config, **kwargs),
+                self._send_request(endpoint, body, token=token, timeout=t, config=config,
+                                   **({'auth_headers': auth_headers} if auth_headers is not None else {}), **kwargs),
                 timeout=t)
         try:
             result = await self._resilience_policy(config, kwargs).call(

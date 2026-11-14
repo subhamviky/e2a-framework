@@ -157,7 +157,7 @@ def test_a_plain_result_has_no_extra_fields():
 # ------------------------------------------------------------------ P12: version
 def test_log_records_carry_the_installed_version():
     from e2a.observability import _framework_version
-    assert _framework_version() == f'e2a-v{__version__}' and __version__ == '1.5.1'
+    assert _framework_version() == f'e2a-v{__version__}'
 
 
 # ------------------------------------------------------------------ P17: rerank query

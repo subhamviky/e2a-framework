@@ -11,4 +11,4 @@ Each backend is an optional extra and a subpackage, so a project installs only w
 Every adapter passes E2A's port contract kit (e2a.port_contract), the same suite the in-memory
 reference adapters pass.
 """
-__version__ = '1.5.1'
+__version__ = '1.6.0'

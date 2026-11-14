@@ -1,0 +1,11 @@
+{
+  "name": "simulated",
+  "provider": "simulated",
+  "cloud": "",
+  "description": "E2A's deterministic SimulatedLLMService: tests, local runs, the default for generated projects.",
+  "features": [],
+  "bindings": {
+    "llm_service": "e2a_simulated_llm:SimulatedLLMService"
+  },
+  "config": {}
+}

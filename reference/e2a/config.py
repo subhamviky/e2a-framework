@@ -92,6 +92,15 @@ def _k(key, env, default, cast, group, used_by, scoped=None, secret=False):
 E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
     # -- Propagation, logging, idempotency (all classes) --
     _k('io_config_prefix', 'IO_CONFIG_PREFIX', 'io_', str, 'Common', '_resolve_io_config()'),
+    # -- Bindings and profiles (v1.6.0, design note MP-02) --
+    _k('provider_profile', 'E2A_PROVIDER_PROFILE', None, str, 'Bindings', 'e2a.bindings.bindings_from_profile() — the profile name or path'),
+    _k('profile_settings', None, None, dict, 'Bindings', 'resolve_config() — the profile layer, below env (filled by e2a.bindings)'),
+    _k('required_capabilities', 'E2A_REQUIRED_CAPABILITIES', [], _to_json_list, 'Bindings', 'Bindings.verify() — capabilities the deployment relies on'),
+    _k('provider_options', 'E2A_PROVIDER_OPTIONS', {}, _to_json_map, 'Bindings', 'provider transports only — {provider: {vendor parameters}}, never read by base classes'),
+    _k('credential_provider', None, None, str, 'Bindings', 'BaseToolService — a BaseCredentialProvider (object reference); default: auth_token'),
+    _k('dlp_patterns', 'E2A_DLP_PATTERNS', [], _to_json_list, 'LLM service', 'v1.6.0: extra egress DLP patterns [{name, regex, validator?}], compiled at construction'),
+    _k('injection_patterns', 'E2A_INJECTION_PATTERNS', [], _to_json_list, 'LLM service', 'v1.6.0: extra prompt-injection patterns [{name, regex}], compiled at construction'),
+    _k('dlp_patterns_replace', 'E2A_DLP_PATTERNS_REPLACE', False, _to_bool, 'LLM service', 'v1.6.0: true replaces the built-in DLP patterns instead of adding to them'),
     _k('log_sink', 'LOG_SINK', 'stdout', str, 'Common', 'BaseObservability._ship_logs() / _flush_logs()'),
     _k('dlq_queue_url', 'DLQ_QUEUE_URL', None, str, 'Common', '_send_to_dlq()'),
     _k('commit_gate_enabled', 'COMMIT_GATE_ENABLED', True, _to_bool, 'Common', '_commit_gate()'),
@@ -227,15 +236,24 @@ def register_config_key(spec: ConfigKey) -> ConfigKey:
     is a no-op; a conflicting duplicate raises."""
     existing = E2A_CONFIG.get(spec.key)
     if existing is not None and existing != spec:
-        raise ValueError(f"config key '{spec.key}' is already registered differently")
+        # v1.6.0: the same key with the same meaning (env, default, type, secrecy) is
+        # compatible even if its description differs, e.g. a key a provider package registered
+        # before E2A took it over. The registered spec is kept; only a real conflict raises.
+        same = (existing.env, existing.default, existing.cast, existing.scoped_defaults, existing.secret) == \
+               (spec.env, spec.default, spec.cast, spec.scoped_defaults, spec.secret)
+        if not same:
+            raise ValueError(f"config key '{spec.key}' is already registered differently")
+        return existing
     E2A_CONFIG[spec.key] = spec
     return spec
 
 
 def resolve_config(key: str, config: Optional[Dict[str, Any]] = None,
                    kwargs: Optional[Dict[str, Any]] = None, scope: Optional[str] = None):
-    """kwargs > config > environment variable > default, for any registered
-    key. `scope` selects a per-class default (e.g. 'BaseToolService')."""
+    """kwargs > config > environment variable > profile > default, for any
+    registered key. `scope` selects a per-class default (e.g. 'BaseToolService').
+    The profile layer (v1.6.0) is config['profile_settings'], which e2a.bindings
+    fills from a profile file: an environment variable overrides a profile value."""
     spec = E2A_CONFIG.get(key)
     if spec is None:
         raise KeyError(f"'{key}' is not in the central E2A_CONFIG registry — "
@@ -248,6 +266,9 @@ def resolve_config(key: str, config: Optional[Dict[str, Any]] = None,
         raw = os.getenv(spec.env)
         if raw is not None:
             return spec.cast(raw)
+    profile = config.get('profile_settings') if config else None
+    if isinstance(profile, dict) and profile.get(key) is not None:
+        return profile[key]
     return spec.scoped_defaults.get(scope, spec.default) if scope else spec.default
 
 

@@ -2,6 +2,49 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.6.0 — Contracts for managed providers (design note MP-02)
+
+The vendor-neutral contracts lifted from the managed-providers prototype (assessment MP-00).
+Additive: nothing is removed, and no existing signature changes. Vendor knowledge (wire
+codecs, provider SDK adapters) stays out of E2A.
+
+### Added
+- **`e2a.llm_types` (P5):** canonical `Message`, `ToolCall`, `ToolDeclaration`, `Usage`, `StopReason` and `ModelResult`.
+  - They read and write the dicts E2A already passes around.
+  - Tool arguments are always a parsed dict.
+  - `_dispatch_upstream_call` may return a `ModelResult` or the dict, as before.
+- **Typed refusals (P6):** `ModelRefusal`.
+  - A transport raises it, or returns `stop_reason: refusal`.
+  - `process_inference` then returns status **`REFUSED`**: not `FAILED`, never retried, never counted toward the circuit, not a failed key.
+  - **`BaseAgent` routes a refusal to `_fallback`** (`state['model_refusal']` records it), so no subclass has to know the new status.
+  - `stop_reason: max_tokens` marks the payload `truncated`.
+- **`e2a.capabilities` (P4):** capabilities a bound object declares (`capabilities`, or the hook `_capabilities_for(config)`).
+  - Names come from a registry; a provider package adds its own with `register_capability`, and an unknown name is an error.
+- **`e2a.bindings` (P1):** `bindings_from_profile()`, `Bindings`, `Profile`.
+  - Seams are bound from a profile file and built lazily; `verify()` checks capabilities at startup.
+  - **Only registered provider packages may be bound** (entry-point group `e2a.providers`, or `register_provider_package`): a profile cannot import arbitrary code.
+  - JSON profiles need nothing; YAML needs the new extra `e2a-framework[profiles]`.
+  - `extends`, `${VAR:-default}` placeholders, and unknown fields and seams are errors.
+  - E2A ships the profile **`simulated`** (`SimulatedLLMService`).
+- **The profile configuration layer (P2):** `resolve_config` reads `kwargs > config > env > profile > default`.
+  - The profile's values travel as `config['profile_settings']`, so an environment variable overrides a profile value, and `RequestContext`'s per-request snapshot is unchanged.
+  - `provider_options` (`{provider: {...}}`) is the one untyped channel; only transports read it.
+- **`BaseCredentialProvider` (P20):** with `TokenCredentialProvider` as the default (it reads `auth_token`).
+  - A bound `credential_provider` gives `BaseToolService` the headers it passes to `_send_request` as `auth_headers`.
+- **DLP and injection patterns from configuration (P13):** `dlp_patterns`, `injection_patterns`, `dlp_patterns_replace`.
+  - Validators are named (`luhn`, `iban_mod97`); there is no code in configuration.
+  - Patterns are compiled when the service is constructed, so a bad one fails at startup.
+- **`e2a.port_contract.check_llm_service` (P25):** ten scenarios a model adapter must meet, driven through its own wire by a responder:
+  - the canonical conversation;
+  - text, tool call, structured output, stream;
+  - refusal, DLP, a throttle then a retry;
+  - stop reason, truncation.
+- **Keys:** `provider_profile`, `profile_settings`, `required_capabilities`, `provider_options`, `credential_provider`, `dlp_patterns`, `injection_patterns`, `dlp_patterns_replace`.
+
+### Changed
+- **`register_config_key`** accepts a key registered again with the same meaning (environment variable, default, type, secrecy) even if its description differs: the first registration is kept. Before, a package that had registered a key E2A later adopts (the prototype's `provider_profile`) failed at import.
+- e2a-adapters and e2a-java follow the version: `1.6.0` (no code change).
+
 ## v1.5.1 — Model-call retries and three smaller fixes (design note MP-01)
 
 Found while assessing the managed-providers proposal (hub MP-00). Nothing is removed, and no

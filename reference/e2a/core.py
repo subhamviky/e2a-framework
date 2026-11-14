@@ -152,6 +152,20 @@ class ClaimStatus(str, Enum):
     FAILED_FINAL = 'FAILED_FINAL'            # deterministic failure; never re-executed
 
 
+class ModelRefusal(Exception):
+    """The model declined the request on policy grounds (v1.6.0). A policy outcome, not a
+    fault: process_inference returns status 'REFUSED' (never retried, never counted toward the
+    circuit) and BaseAgent routes it to _fallback. A transport raises it, or returns
+    stop_reason 'refusal'."""
+
+    def __init__(self, provider: str = 'model', model: str = '', detail: str = '', category: str = ''):
+        super().__init__(f"{provider} model {model} declined the request" + (f': {detail}' if detail else ''))
+        self.provider, self.model, self.detail, self.category = provider, model, detail, category
+
+    def as_dict(self) -> Dict[str, str]:
+        return {'provider': self.provider, 'model': self.model, 'detail': self.detail, 'category': self.category}
+
+
 @dataclass(frozen=True)
 class ErrorClass:
     """What kind of failure an upstream call raised (v1.5.1). kind is one of:
@@ -203,6 +217,8 @@ def classify_error(error: BaseException) -> ErrorClass:
     status (status_code / status / code, or botocore's response), Retry-After headers, and
     connection or timeout exception types. Anything else is 'unknown' (not retried, and it
     counts toward the circuit, as before v1.5.1)."""
+    if isinstance(error, ModelRefusal):
+        return ErrorClass('refusal')
     if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
         return ErrorClass('transient')
     if isinstance(error, _DETERMINISTIC_ERRORS):

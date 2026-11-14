@@ -28,7 +28,7 @@ from typing import Callable, List
 from .core import ClaimStatus, PhysicalOutcome
 
 __all__ = ['FakeClock', 'check_idempotency_store', 'check_transactional_store', 'check_lease',
-           'check_checkpoint_store', 'check_all']
+           'check_checkpoint_store', 'check_llm_service', 'check_all']
 
 VALUE = {'amount': '100.25', 'count': 3, 'ratio': 0.5, 'ok': True, 'none': None,
          'nested': {'items': ['a', 'b'], 'unicode': 'Zürich €'}}
@@ -277,12 +277,93 @@ def check_checkpoint_store(make: Callable[[FakeClock], object], race: int = 8) -
     return r.passed
 
 
-def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None) -> dict:
+# -------------------------------------------------------------- llm service
+def check_llm_service(make: Callable[[Callable], object]) -> List[str]:
+    """A model adapter (BaseLLMAgentService subclass) meets E2A's model contract (v1.6.0).
+
+    ``make(responder)`` returns the adapter with its provider SDK pointed at a test transport
+    that, for each wire request, decodes the conversation, calls ``responder(messages)`` and
+    encodes the answer in the provider's wire format. The responder receives the canonical
+    conversation (a list of {'role', 'content', ...} dicts) and returns:
+
+        "text"                                   a plain answer
+        {"text", "tool_calls", "stop_reason", "metadata", "provider_request_id"}
+        {"error_status": 429, "retry_after": 0}  answer the HTTP request with that status
+                                                 (and a Retry-After header)
+    """
+    import asyncio
+    r = _Run('llm service')
+    system, user = {'role': 'system', 'content': 'You are terse.'}, {'role': 'user', 'content': 'Say hello'}
+
+    def scripted(*answers):
+        seen = {'calls': 0, 'messages': None}
+
+        def responder(messages):
+            seen['calls'] += 1
+            seen['messages'] = messages
+            answer = answers[min(seen['calls'], len(answers)) - 1]
+            return answer
+        return responder, seen
+
+    def infer(svc, **kw):
+        return asyncio.run(svc.process_inference([system, user], tenant_id='t1', **kw))
+
+    responder, seen = scripted('hello')
+    out = infer(make(responder))
+    r.check('a plain answer is SUCCESS with its text', out.get('status') == 'SUCCESS' and out.get('text') == 'hello',
+            str(out))
+    msgs = seen['messages'] or []
+    r.check('the conversation reaches the provider in the canonical shape',
+            any(m.get('role') == 'user' and 'Say hello' in str(m.get('content')) for m in msgs), str(msgs))
+
+    responder, _ = scripted({'text': '', 'tool_calls': [{'id': 'c1', 'name': 'lookup', 'arguments': {'q': 'x'}}],
+                             'stop_reason': 'tool_use'})
+    out = infer(make(responder), tools=[{'name': 'lookup', 'description': 'find', 'parameters': {
+        'type': 'object', 'properties': {'q': {'type': 'string'}}}}])
+    calls = out.get('tool_calls') or []
+    r.check('a tool call comes back with parsed arguments',
+            len(calls) == 1 and calls[0].get('name') == 'lookup' and calls[0].get('arguments') == {'q': 'x'}, str(out))
+
+    responder, _ = scripted('{"amount": 12}')
+    out = infer(make(responder), response_schema={'type': 'object', 'properties': {'amount': {'type': 'integer'}}})
+    r.check('structured output is parsed', out.get('structured_output') == {'amount': 12}, str(out))
+
+    responder, _ = scripted('hello streaming world')
+
+    async def stream(svc):
+        return ''.join([c async for c in svc.process_inference_stream([system, user], tenant_id='t1')])
+    r.check('a stream yields the answer', asyncio.run(stream(make(responder))).replace(' ', '') == 'hellostreamingworld')
+
+    responder, _ = scripted({'text': 'I cannot help with that.', 'stop_reason': 'refusal'})
+    out = infer(make(responder))
+    r.check('a provider refusal is REFUSED, not an answer', out.get('status') == 'REFUSED', str(out))
+
+    responder, _ = scripted('The SSN is 123-45-6789.')
+    out = infer(make(responder))
+    r.check("E2A's egress DLP still applies", '123-45-6789' not in str(out.get('text')), str(out))
+
+    responder, seen = scripted({'error_status': 429, 'retry_after': 0}, 'after the throttle')
+    out = infer(make(responder))
+    r.check('a throttled call is retried by E2A', out.get('status') == 'SUCCESS' and seen['calls'] == 2
+            and out.get('text') == 'after the throttle', f'{out} calls={seen["calls"]}')
+
+    responder, _ = scripted({'text': 'ok', 'stop_reason': 'end_turn', 'provider_request_id': 'req-1'})
+    out = infer(make(responder))
+    r.check('the stop reason reaches the payload', out.get('stop_reason') == 'end_turn', str(out))
+
+    responder, _ = scripted({'text': 'cut', 'stop_reason': 'max_tokens'})
+    out = infer(make(responder))
+    r.check('an answer cut by the token limit is marked truncated', out.get('truncated') is True, str(out))
+    return r.passed
+
+
+def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None, llm_service=None) -> dict:
     """Run the suites for the factories given; returns {port: [passed scenario names]}."""
     out = {}
     for name, fn, make in (('idempotency', check_idempotency_store, idempotency),
                            ('transactional', check_transactional_store, transactional),
-                           ('lease', check_lease, lease), ('checkpoint', check_checkpoint_store, checkpoint)):
+                           ('lease', check_lease, lease), ('checkpoint', check_checkpoint_store, checkpoint),
+                           ('llm_service', check_llm_service, llm_service)):
         if make is not None:
             out[name] = fn(make)
     return out

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "e2a-adapters"
-version = "1.5.1"
+version = "1.6.0"
 description = "Production adapters for the E2A foundation ports: DynamoDB, Firestore, Cosmos DB"
 readme = "README.md"
 license = "Apache-2.0"

@@ -20,7 +20,8 @@ from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from .core import (AdmissionTimeout, Deadline, DeadlineExceeded, DehydrationInterrupt, ErrorClass,
-                   NFRViolationError, classify_error)
+                   ModelRefusal, NFRViolationError, classify_error)
+from .llm_types import ModelResult
 from .config import resolve_config
 from .resilience import ResiliencePolicy
 from ._propagation import _PropagationMixin
@@ -51,6 +52,39 @@ def _luhn_valid(candidate: str) -> bool:
                 d -= 9
         total += d
     return total % 10 == 0
+
+
+def _iban_valid(value: str) -> bool:
+    """ISO 13616 mod-97 check for an IBAN candidate."""
+    iban = re.sub(r'\s+', '', value).upper()
+    if not re.fullmatch(r'[A-Z]{2}\d{2}[A-Z0-9]{11,30}', iban):
+        return False
+    digits = ''.join(str(int(c, 36)) for c in iban[4:] + iban[:4])
+    return int(digits) % 97 == 1
+
+
+# v1.6.0: validators a configured DLP pattern may name (no code in configuration)
+DLP_VALIDATORS = {'luhn': _luhn_valid, 'iban_mod97': _iban_valid}
+
+
+def _compile_patterns(entries, kind: str, with_validator: bool):
+    out = []
+    for i, entry in enumerate(entries or []):
+        if not isinstance(entry, dict) or not entry.get('name') or not entry.get('regex'):
+            raise ValueError(f'{kind}[{i}]: each pattern needs a name and a regex')
+        try:
+            pattern = re.compile(entry['regex'], re.IGNORECASE if entry.get('ignore_case') else 0)
+        except re.error as e:
+            raise ValueError(f"{kind} '{entry['name']}': invalid regex: {e}") from e
+        if not with_validator:
+            out.append(pattern)
+            continue
+        name = entry.get('validator')
+        if name and name not in DLP_VALIDATORS:
+            raise ValueError(f"{kind} '{entry['name']}': unknown validator {name!r} "
+                             f"(available: {', '.join(sorted(DLP_VALIDATORS))})")
+        out.append((entry['name'], pattern, DLP_VALIDATORS.get(name)))
+    return out
 
 
 class _TenantPermit:
@@ -92,6 +126,14 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
 
     def __init__(self, config: Dict[str, Any] = None, **kwargs):
         self._config: Dict[str, Any] = dict(config or {})
+        # v1.6.0: patterns from configuration, compiled now: a bad one fails at startup
+        extra_dlp = _compile_patterns(self._resolve_param('dlp_patterns', self._config, kwargs), 'dlp_patterns', True)
+        replace = bool(self._resolve_param('dlp_patterns_replace', self._config, kwargs))
+        self._DLP_PATTERNS = extra_dlp if replace else list(type(self)._DLP_PATTERNS) + extra_dlp
+        self._INJECTION_PATTERNS = list(type(self)._INJECTION_PATTERNS) + _compile_patterns(
+            [dict(e, ignore_case=e.get('ignore_case', True)) if isinstance(e, dict) else e
+             for e in self._resolve_param('injection_patterns', self._config, kwargs) or []],
+            'injection_patterns', False)
         replicas = max(1, int(self._resolve_param('llm_replica_count', self._config, kwargs)))
         self._pod_semaphore = asyncio.Semaphore(
             max(1, int(self._resolve_param('pod_concurrency', self._config, kwargs))))
@@ -224,6 +266,11 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                     retryable=_retryable,
                     counts_for_circuit=lambda e: self._classify_error(e).kind in circuit_counts,
                     delay_for=lambda e: self._classify_error(e).retry_after)
+                if isinstance(raw, ModelResult):          # v1.6.0: canonical result or legacy dict
+                    raw = raw.to_raw()
+                if isinstance(raw, dict) and raw.get('stop_reason') == 'refusal':
+                    raise ModelRefusal(getattr(self, 'provider', 'model'), str(model_id), str(raw.get('text') or ''),
+                                       str((raw.get('metadata') or {}).get('refusal_category') or ''))
 
             payload = self._format_and_validate_output(
                 raw, kwargs.get('response_schema'), model_id, cache_handle is not None,
@@ -237,6 +284,8 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                 value = raw.get(field) if isinstance(raw, dict) and field in raw else provider_meta.get(field)
                 if value is not None:
                     payload[field] = value
+            if payload.get('stop_reason') == 'max_tokens':
+                payload['truncated'] = True          # v1.6.0: the answer was cut by the token limit
             if self._resolve_param('dlp_enabled', cfg, kwargs) and 'text' in payload:
                 payload['text'], payload['dlp_redactions'] = self._redact_sensitive(payload['text'])
             self.__settle_quota(quota, dispatched, used=payload['tokens_used'])
@@ -254,6 +303,11 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             self.stats['cancelled_cleanups'] += 1
             self._emit_metric('counter', 'e2a.cancellation.cleanup_total', 1, {'owner': 'llm_service'})
             raise
+        except ModelRefusal as refusal:
+            # v1.6.0: a policy outcome, not a fault: no failed key, no _handle_error
+            self.__settle_quota(quota, dispatched, used=None)
+            payload = {'status': 'REFUSED', 'correlation_id': correlation_id, 'tenant_id': tenant_id,
+                       'refusal': refusal.as_dict(), 'text': '', 'physical_success': False, 'tokens_used': 0}
         except Exception as e:
             self.__settle_quota(quota, dispatched, used=None)
             key = idempotency_key or correlation_id
