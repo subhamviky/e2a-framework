@@ -168,3 +168,37 @@ def test_the_reference_outbox_meets_the_outbox_contract():
     from e2a import InMemoryOutboxStore
     from e2a.port_contract import check_outbox_store
     assert len(check_outbox_store(InMemoryOutboxStore)) == 11
+
+
+# ------------------------------------------------------------------ v1.7.2: settle() and resumable handlers
+def test_settle_says_what_happened_to_one_message():
+    broker, q, _ = fresh()
+    consumer = Ledger(broker, InMemoryIdempotencyStore(), q)
+    broker.publish(q, {'amount': 5}, {'tenant_id': 't1', 'idempotency_key': 'a'})
+    first = consumer.settle(broker.receive(q)[0], q)
+    assert first['decision'] == 'processed' and first['result']['physical_success'] is True
+    broker.publish(q, {'amount': 5}, {'tenant_id': 't1', 'idempotency_key': 'a'})
+    again = consumer.settle(broker.receive(q)[0], q)
+    assert again['decision'] == 'duplicate' and again['result'] == first['result']
+    broker.publish(q, {'x': 1}, {'tenant_id': 't1', 'idempotency_key': 'b'})
+    poison = consumer.settle(broker.receive(q)[0], q)
+    assert poison['decision'] == 'dead_lettered' and isinstance(poison['error'], ValueError)
+    report = Ledger(broker, InMemoryIdempotencyStore(), q).consume()
+    assert report['messages'] == []                                    # nothing left to receive
+    broker.publish(q, {'amount': 6}, {'tenant_id': 't1', 'idempotency_key': 'c'})
+    report = consumer.consume()
+    assert [m['decision'] for m in report['messages']] == ['processed'] and 'error' not in report['messages'][0]
+
+
+def test_a_resumable_handler_takes_over_an_expired_claim():
+    from e2a.port_contract import FakeClock
+    clock = FakeClock()
+    store, (broker, q, _) = InMemoryIdempotencyStore(clock=clock), fresh()
+    store.claim('k', {}, tenant_id='t1', owner='crashed', lease_seconds=1)     # an invocation that stopped
+    clock.advance(5)
+    broker.publish(q, {'amount': 1}, {'tenant_id': 't1', 'idempotency_key': 'k'})
+    strict = Ledger(broker, store, q).settle(broker.receive(q)[0], q, {'consumer_resume_expired': False})
+    assert strict['decision'] == 'dead_lettered' and 'RECOVERY_REQUIRED' in strict['reason']
+    broker.publish(q, {'amount': 1}, {'tenant_id': 't1', 'idempotency_key': 'k'})
+    resumed = Ledger(broker, store, q).settle(broker.receive(q)[0], q, {'consumer_resume_expired': True})
+    assert resumed['decision'] == 'processed'

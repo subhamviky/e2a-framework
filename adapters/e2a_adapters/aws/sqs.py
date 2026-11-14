@@ -90,3 +90,93 @@ class SQSBroker(BaseMessageBroker):
 
     def ack_dead_letter(self, source, message, config=None):
         self.client.delete_message(QueueUrl=self._url(source + self.suffix), ReceiptHandle=message.receipt)
+
+
+class SQSLambdaBatch(BaseMessageBroker):
+    """v1.7.2: one Lambda invocation's SQS batch as a BaseMessageBroker, so IdempotentConsumer
+    settles messages that Lambda pushed (an event source mapping) as it does pulled ones.
+
+        broker = SQSLambdaBatch(event, sqs_client)
+        consumer.consume(broker.source)                 # every record of the batch
+        return broker.batch_item_failures()             # the Lambda response
+
+    ack: nothing to do (a record not reported as failed is deleted by Lambda). nack: the record
+    is reported in batchItemFailures, and SQS delivers it again after its visibility timeout (a
+    delay is not possible). dead_letter: the record is sent to <queue><suffix> with the reason,
+    then counts as done. The mapping must enable ReportBatchItemFailures. Dead letters are read
+    and settled through SQS itself (the scheduled reconcile() uses SQSBroker or this class).
+    A record whose body is not JSON arrives with body {"_raw": <text>} and the attribute
+    `e2a_body_error`, so a consumer can dead-letter it with the reason instead of failing the batch."""
+    capabilities = frozenset({'messaging', 'dead_letter'})
+
+    def __init__(self, event: Dict[str, Any], client=None, dead_letter_suffix: str = '-dlq') -> None:
+        self._records = [r for r in (event or {}).get('Records') or [] if r.get('eventSource') == 'aws:sqs']
+        self._queue = SQSBroker(client, dead_letter_suffix=dead_letter_suffix) if client is not None else None
+        self._failed: List[str] = []
+        self._taken = False
+
+    @staticmethod
+    def _queue_name(record: Dict[str, Any]) -> str:
+        return str(record.get('eventSourceARN') or '').rsplit(':', 1)[-1]
+
+    @property
+    def source(self) -> str:
+        """The queue the batch came from (one event source mapping, one queue)."""
+        names = {self._queue_name(r) for r in self._records}
+        if len(names) != 1:
+            raise ValueError(f'an SQS batch comes from one queue, not {sorted(names) or "none"}')
+        return names.pop()
+
+    def _sqs(self) -> SQSBroker:
+        if self._queue is None:
+            raise ValueError('SQSLambdaBatch needs an SQS client for dead letters and publishing')
+        return self._queue
+
+    def publish(self, destination, body, attributes=None, config=None):
+        return self._sqs().publish(destination, body, attributes, config)
+
+    def receive(self, source, max_messages=10, wait_seconds=0.0, config=None):
+        if self._taken:
+            return []                               # one batch per invocation
+        self._taken = True
+        out = []
+        for r in self._records:
+            if self._queue_name(r) != source:
+                continue
+            attrs = {k: v.get('stringValue') for k, v in (r.get('messageAttributes') or {}).items()
+                     if v.get('stringValue') is not None}
+            try:
+                body = json.loads(r.get('body') or '')
+                if not isinstance(body, dict):
+                    raise ValueError('the body is JSON but not an object')
+            except ValueError as e:
+                body, attrs = {'_raw': r.get('body')}, {**attrs, 'e2a_body_error': str(e)[:200]}
+            count = int((r.get('attributes') or {}).get('ApproximateReceiveCount', 0)) or None
+            out.append(BrokerMessage(r['messageId'], body, attrs, count, source, r.get('receiptHandle')))
+        return out
+
+    def ack(self, source, message, config=None):
+        return None
+
+    def nack(self, source, message, delay_seconds=0.0, config=None):
+        if message.id not in self._failed:
+            self._failed.append(message.id)
+
+    def dead_letter(self, source, message, reason, config=None):
+        attrs = {**{k: v for k, v in message.attributes.items() if v is not None},
+                 'dead_letter_reason': str(reason)[:1000], 'dead_letter_source': source}
+        body = message.body if '_raw' not in message.body else {'_raw': message.body['_raw']}
+        self._sqs().client.send_message(QueueUrl=self._sqs()._url(source + self._sqs().suffix),
+                                        MessageBody=json.dumps(body, ensure_ascii=False, separators=(',', ':')),
+                                        MessageAttributes=self._sqs()._attrs(attrs))
+        # not reported as failed: Lambda deletes it from the source
+
+    def receive_dead_letters(self, source, max_messages=10, config=None):
+        return self._sqs().receive_dead_letters(source, max_messages, config)
+
+    def ack_dead_letter(self, source, message, config=None):
+        return self._sqs().ack_dead_letter(source, message, config)
+
+    def batch_item_failures(self) -> Dict[str, List[Dict[str, str]]]:
+        """The Lambda response: the records to deliver again."""
+        return {'batchItemFailures': [{'itemIdentifier': i} for i in self._failed]}

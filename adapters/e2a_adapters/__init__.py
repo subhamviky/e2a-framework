@@ -15,4 +15,4 @@ No AI vendor SDK is imported here (tests/test_boundary.py).
 """
 from . import config_keys  # noqa: F401  (registers the cloud keys)
 
-__version__ = '1.7.1'
+__version__ = '1.7.2'

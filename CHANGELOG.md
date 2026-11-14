@@ -2,6 +2,21 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.7.2 — Consumers for pushed deliveries (design note MP-05)
+
+Additive. What a project needs when its broker pushes messages to it (Lambda with SQS, and
+later push subscriptions), and when its handler can resume work it already started.
+
+### Added
+- **`IdempotentConsumer.settle(message, source, config)`:** settles ONE received message under its claim and returns what happened: `{message_id, idempotency_key, decision, reason, result, error}`.
+  - The decision is one of `processed`, `duplicate` (with the stored result), `deferred`, `retried` or `dead_lettered`.
+  - `consume()` calls it for every message, and **`report['messages']`** lists each decision.
+  - A synchronous entry point (an HTTP request, a local run) can settle the message it publishes itself, so the queued and the direct paths share one claim.
+- **`consumer_resume_expired`** (default false): for a handler that checks what is already done before acting (a resumable one), a redelivery takes over a claim whose owner stopped. Without it, such a message goes to the dead letters for `reconcile()`, which confirms physical truth first.
+- **e2a-adapters 1.7.2: `SQSLambdaBatch`** is one Lambda invocation's SQS batch as a broker.
+  - ack is the default success; nack reports the record in `batch_item_failures()` (the Lambda response, with `ReportBatchItemFailures`); dead_letter sends it to `<queue>-dlq` with the reason.
+  - A body that is not JSON arrives as `{"_raw": ...}`, so it can be dead-lettered with a reason instead of failing the batch.
+
 ## v1.7.1 — Durable outbox stores (design note MP-05)
 
 ### Added
