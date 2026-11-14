@@ -96,8 +96,7 @@ class BaseToolService(ABC, _PropagationMixin):
         token = resolve_config('auth_token', config, kwargs)
         # v1.6.0: a bound credential provider (platform identity) supplies the headers;
         # a subclass sends kwargs['auth_headers'] when present, else the token as before
-        provider = (config or {}).get('credential_provider')
-        auth_headers = provider.headers(endpoint, config=config, **kwargs) if provider is not None else None
+        auth_headers = self._auth_headers(endpoint, config, **kwargs)
         deadline = Deadline.coerce(kwargs.get('deadline'))
         # A call is replay-safe only with an idempotency key (or an explicit
         # safe_to_retry for reads); only then may a timeout be retried.
@@ -123,6 +122,14 @@ class BaseToolService(ABC, _PropagationMixin):
         # callers must check this, never an agent's narrative about it.
         result.setdefault('outcome', PhysicalOutcome.COMMITTED if result.get('physical_success') else PhysicalOutcome.NOT_COMMITTED)
         return result
+
+    credential_provider = None      # v1.6.1: a per-instance BaseCredentialProvider (wins over config's)
+
+    def _auth_headers(self, endpoint, config=None, **kwargs):
+        """Hook (v1.6.1): the auth headers for one call, or None for the auth_token path.
+        Default: this tool's credential_provider, else config['credential_provider']."""
+        provider = self.credential_provider or (config or {}).get('credential_provider')
+        return provider.headers(endpoint, config=config, **kwargs) if provider is not None else None
 
     async def _send_request(self, endpoint, body, token=None, timeout=None, config=None, **kwargs):
         """Protected transport hook (aiohttp/httpx call in a real subclass).
@@ -154,9 +161,19 @@ class MCPToolService(BaseToolService):
     Points at either an external MCP server or one hosted locally via
     a BaseMCPServer instance."""
  
+    server_url: Optional[str] = None     # v1.6.1: this instance's server (wins over mcp_server_url)
+
+    def __init__(self, server_url: Optional[str] = None, credential_provider=None) -> None:
+        """v1.6.1: one instance per MCP server (a managed gateway, a partner's server), each
+        with its own endpoint and identity. Without arguments it behaves as before."""
+        if server_url is not None:
+            self.server_url = server_url
+        if credential_provider is not None:
+            self.credential_provider = credential_provider
+
     def _get_endpoint(self, config=None, tenant_id=None, **kwargs):
         config = config or {}
-        return resolve_config('mcp_server_url', config, kwargs)
+        return kwargs.get('mcp_server_url') or self.server_url or resolve_config('mcp_server_url', config, kwargs)
  
     def _build_payload(self, payload, config=None, **kwargs):
         tool_name = kwargs.get('mcp_tool_name', payload.get('_tool_name'))
@@ -214,6 +231,24 @@ class BaseMCPServer(ABC, _PropagationMixin):
             'input_schema': input_schema,
         }
  
+    def export_tool_manifest(self, config: Dict[str, Any] = None, fmt: str = 'mcp', **kwargs) -> Dict[str, Any]:
+        """Public (v1.6.1, P19): the server's tools as a manifest, for registering them with an
+        MCP gateway or a catalogue. Same list as tools/list, so the two cannot drift.
+        fmt 'mcp': {server, protocol_version, tools: [{name, description, inputSchema}]};
+        fmt 'declarations': E2A's canonical tool declarations {server, tools: [{name,
+        description, parameters}]}, which every provider adapter maps to its own wire."""
+        server = self.server_name if self.server_name and self.server_name != 'e2a-mcp-server' \
+            else resolve_config('mcp_server_name', config, kwargs)
+        tools = self._list_tools(config, **kwargs)
+        if fmt == 'mcp':
+            return {'server': server, 'protocol_version': resolve_config('mcp_protocol_version', config, kwargs),
+                    'tools': tools}
+        if fmt == 'declarations':
+            return {'server': server, 'tools': [{'name': t['name'], 'description': t.get('description', ''),
+                                                 'parameters': t.get('inputSchema') or {'type': 'object'}}
+                                                for t in tools]}
+        raise ValueError(f"export_tool_manifest: fmt must be 'mcp' or 'declarations', not {fmt!r}")
+
     def _list_tools(self, config: Dict[str, Any] = None, **kwargs) -> List[dict]:
         """Default: derive tools/list output from registered_tools.
         Override only to filter/augment (e.g. per-tenant visibility)."""

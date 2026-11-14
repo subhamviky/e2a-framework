@@ -27,8 +27,10 @@ from ._propagation import _PropagationMixin
  
 class BaseEmbeddingModel(ABC):
     """Port (v1.2): one embedding model shared by the indexing and the retrieval side,
-    so documents and queries are embedded by the same model by construction."""
+    so documents and queries are embedded by the same model by construction.
+    v1.6.1: `dimensions` (None = not declared) is checked against the index's."""
     model_id: str = 'unspecified'
+    dimensions: Optional[int] = None
 
     @abstractmethod
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -40,7 +42,9 @@ class BaseEmbeddingModel(ABC):
 
 
 class BaseVectorIndex(ABC):
-    """Port (v1.2): the index both sides share, namespaced per tenant."""
+    """Port (v1.2): the index both sides share, namespaced per tenant.
+    v1.6.1: `dimensions` (None = not declared) must equal the embedding model's."""
+    dimensions: Optional[int] = None
 
     @abstractmethod
     def upsert(self, namespace: str, chunks: List[Dict[str, Any]], vectors: List[List[float]]) -> None:
@@ -55,6 +59,27 @@ class BaseVectorIndex(ABC):
         """Hybrid keyword + vector search."""
 
 
+class BaseReranker(ABC):
+    """Port (v1.6.1, design note MP-04, P17): reorders retrieved hits for a query (a
+    cross-encoder, a managed rerank service). Bound as BaseRAGPipeline.reranker, it is the
+    default _rerank; a pipeline that implements _rerank itself keeps doing so."""
+    model_id: str = 'unspecified'
+
+    @abstractmethod
+    def rerank(self, query: str, hits: List[dict], top_n: int, config: Dict[str, Any] = None) -> List[dict]:
+        """The top_n hits, best first, each with a `rerank_score`. Must not add hits."""
+
+
+def check_dimensions(embedding_model: Optional['BaseEmbeddingModel'], vector_index: Optional['BaseVectorIndex']) -> None:
+    """v1.6.1: an index built for one vector size cannot serve another model's vectors.
+    Raises ValueError when both declare `dimensions` and they differ."""
+    a = getattr(embedding_model, 'dimensions', None)
+    b = getattr(vector_index, 'dimensions', None)
+    if a is not None and b is not None and int(a) != int(b):
+        raise ValueError(f'embedding model {getattr(embedding_model, "model_id", "?")!r} makes {a}-dimension '
+                         f'vectors; the vector index expects {b}')
+
+
 class BaseRAGPipeline(ABC, _PropagationMixin):
     """Read side. Public: retrieve() and (v1.2) evaluate_answer(). Optional v1.2 ports:
     `embedding_model` (BaseEmbeddingModel) and `vector_index` (BaseVectorIndex); with
@@ -62,6 +87,7 @@ class BaseRAGPipeline(ABC, _PropagationMixin):
 
     embedding_model: Optional[BaseEmbeddingModel] = None
     vector_index: Optional[BaseVectorIndex] = None
+    reranker: Optional[BaseReranker] = None          # v1.6.1
     namespace_prefix: str = 'rag'
 
     def retrieve(self, query: str, config: Dict[str, Any] = None,
@@ -96,9 +122,17 @@ class BaseRAGPipeline(ABC, _PropagationMixin):
         return self.vector_index.search(f'{self.namespace_prefix}_{tenant_id}', query_text, query_vector,
                                         int(kwargs.get('top_k', resolve_config('rag_top_k', config, kwargs))))
 
-    @abstractmethod
     def _rerank(self, results, config=None, **kwargs):
-        """kwargs: rerank_top_n"""
+        """kwargs: rerank_top_n, query. Default (v1.6.1, was abstract): the bound `reranker`
+        port, else the results in index order; both cut to rerank_top_n when it is set."""
+        top_n = kwargs.get('rerank_top_n') or resolve_config('rerank_top_n', config, kwargs)
+        results = list(results or [])
+        if self.reranker is not None:
+            ranked = self.reranker.rerank(kwargs.get('query') or '', results, int(top_n or len(results)), config)
+            if len(ranked) > len(results):
+                raise ValueError(f'{type(self.reranker).__name__}.rerank() returned hits it was not given')
+            return ranked
+        return results[:int(top_n)] if top_n else results
  
     @abstractmethod
     def _evaluate_answer(self, answer, config=None, **kwargs):
@@ -217,6 +251,8 @@ class RAGPipeline:
 
     def __init__(self, indexing: BaseIndexingPipeline, retrieval: BaseRAGPipeline) -> None:
         a, b = indexing.embedding_model, retrieval.embedding_model
+        check_dimensions(a, indexing.vector_index)              # v1.6.1
+        check_dimensions(b, retrieval.vector_index)
         if a is not None and b is not None and a.model_id != b.model_id:
             raise ValueError(f'embedding models differ: indexing uses {a.model_id!r}, retrieval {b.model_id!r}')
         if (a is None) != (b is None):

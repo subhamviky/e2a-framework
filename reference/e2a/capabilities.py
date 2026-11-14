@@ -18,7 +18,7 @@ __all__ = ['CAPABILITIES', 'CapabilityError', 'register_capability', 'capabiliti
 CAPABILITIES = {
     # model calls
     'tool_use', 'structured_output', 'streaming', 'prompt_caching', 'reasoning_effort',
-    'refusal_fallback', 'mcp_connector', 'server_web_search', 'batch',
+    'refusal_fallback', 'refusal_fallback_server', 'mcp_connector', 'server_web_search', 'batch',
     # retrieval
     'embeddings', 'vector_search', 'hybrid_search', 'managed_retrieval', 'rerank',
     # safety, prompts, runtimes

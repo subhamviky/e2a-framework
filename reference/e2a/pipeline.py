@@ -28,6 +28,21 @@ from ._propagation import _PropagationMixin
 # Run once per commit/deploy, not per request.
 # ==================================================
  
+# v1.6.1: high-confidence credential shapes for the built-in secret scan
+SECRET_PATTERNS = [
+    ('aws_access_key_id', re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b')),
+    ('private_key', re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----')),
+    ('anthropic_api_key', re.compile(r'\bsk-ant-[A-Za-z0-9_-]{20,}')),
+    ('openai_api_key', re.compile(r'\bsk-(?:proj-)?[A-Za-z0-9]{32,}')),
+    ('google_api_key', re.compile(r'\bAIza[0-9A-Za-z_-]{35}\b')),
+    ('github_token', re.compile(r'\bgh[pousr]_[A-Za-z0-9]{36,}\b')),
+    ('slack_token', re.compile(r'\bxox[baprs]-[A-Za-z0-9-]{10,}')),
+    ('azure_storage_key', re.compile(r'AccountKey=[A-Za-z0-9+/]{80,}={0,2}')),
+]
+_BINARY_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.pdf', '.zip', '.gz', '.jar', '.class', '.pyc', '.so',
+                    '.whl', '.ico', '.woff', '.woff2', '.parquet'}
+
+
 class BasePipeline(ABC, _PropagationMixin):
  
     def __init__(self):
@@ -57,6 +72,17 @@ class BasePipeline(ABC, _PropagationMixin):
         failed_keys = failed_keys if failed_keys is not None else []
         report = {'correlation_id': correlation_id, 'stages': {}, 'status': 'IN_PROGRESS'}
         try:
+            # v1.6.1 (P24): a built-in secret scan before the project's own scans, and the
+            # deployment's bindings verified before anything is built
+            leaks = self._scan_for_secrets(config, **kwargs)
+            report['secret_findings'] = leaks
+            if leaks:
+                raise ValueError('Secret scan failed: ' + '; '.join(leaks[:5]))
+            bindings = kwargs.get('bindings') or config.get('bindings')
+            if bindings is not None:
+                report['bindings'] = bindings.verify()
+                report['binding_warnings'] = list(getattr(bindings, 'warnings', []))
+                report['stages']['binding_verification'] = 'PASSED'
             if not self._run_static_security_scans(config, **kwargs):
                 raise ValueError('Static security check failed: vulnerabilities or exposed secrets.')
             report['stages']['static_security'] = 'PASSED'
@@ -86,12 +112,14 @@ class BasePipeline(ABC, _PropagationMixin):
             report['stages']['ragas_gate'] = 'PASSED'
             self._log(message_log, correlation_id, 'INFO', 'ragas_gate_passed', score=rag_score)
  
-            for artifact in self.required_artifact_matrix:
+            # v1.6.1: `artifact_matrix` replaces the default list (a deployment whose retrieval or
+            # tools are managed services builds fewer images)
+            artifacts = list(resolve_config('artifact_matrix', config, kwargs) or self.required_artifact_matrix)
+            for artifact in artifacts:
                 if not self._compile_artifact(artifact, config, **kwargs):
                     raise RuntimeError(f'Failed to compile/push artifact: {artifact}')
             report['stages']['artifact_compilation'] = 'PASSED'
-            self._log(message_log, correlation_id, 'INFO', 'artifacts_compiled',
-                       count=len(self.required_artifact_matrix))
+            self._log(message_log, correlation_id, 'INFO', 'artifacts_compiled', count=len(artifacts))
  
             if not self._run_dynamic_security_checks(config, **kwargs):
                 raise ValueError('DAST failed in the ephemeral staging sandbox.')
@@ -119,6 +147,29 @@ class BasePipeline(ABC, _PropagationMixin):
         amplification, lease and shutdown windows). Returns violations;
         override only to add project-specific rules."""
         return validate_capacity(config, **kwargs)
+
+    def _scan_for_secrets(self, config, **kwargs) -> List[str]:
+        """v1.6.1: credentials committed in `secret_scan_paths` (default: src). Matches only
+        high-confidence key shapes (cloud access keys, model-provider API keys, private keys,
+        tokens), so it is a floor, not a replacement for the project's scanner. Returns
+        'path:line: kind' findings; override to add patterns, never to drop the scan."""
+        from pathlib import Path
+        findings: List[str] = []
+        for root in resolve_config('secret_scan_paths', config, kwargs) or []:
+            base = Path(root)
+            files = [base] if base.is_file() else (sorted(base.rglob('*')) if base.is_dir() else [])
+            for path in files:
+                if not path.is_file() or path.suffix in _BINARY_SUFFIXES or path.stat().st_size > 2_000_000:
+                    continue
+                try:
+                    lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+                except OSError:
+                    continue
+                for n, line in enumerate(lines, 1):
+                    for kind, pattern in SECRET_PATTERNS:
+                        if pattern.search(line) and 'e2a: allow-secret' not in line:
+                            findings.append(f'{path}:{n}: {kind}')
+        return findings
 
     @abstractmethod
     def _run_static_security_scans(self, config, **kwargs) -> bool:

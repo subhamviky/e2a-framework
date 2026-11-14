@@ -101,6 +101,21 @@ E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
     _k('dlp_patterns', 'E2A_DLP_PATTERNS', [], _to_json_list, 'LLM service', 'v1.6.0: extra egress DLP patterns [{name, regex, validator?}], compiled at construction'),
     _k('injection_patterns', 'E2A_INJECTION_PATTERNS', [], _to_json_list, 'LLM service', 'v1.6.0: extra prompt-injection patterns [{name, regex}], compiled at construction'),
     _k('dlp_patterns_replace', 'E2A_DLP_PATTERNS_REPLACE', False, _to_bool, 'LLM service', 'v1.6.0: true replaces the built-in DLP patterns instead of adding to them'),
+    # -- v1.6.1 (design note MP-04): routes, features, telemetry, admission, scopes --
+    _k('model_routes', 'E2A_MODEL_ROUTES', [], _to_json_list, 'LLM service', 'v1.6.1: [{on: [error kinds | "refusal"], to: model_id, llm_service: seam, max_attempts}] — answer a failure or refusal with another model, once'),
+    _k('structured_output_strict', 'E2A_STRUCTURED_OUTPUT_STRICT', False, _to_bool, 'LLM service', 'v1.6.1: true makes a structured result that fails its schema FAILED (StructuredOutputInvalid); false only marks it'),
+    _k('reasoning_effort', 'LLM_REASONING_EFFORT', None, str, 'LLM service', 'v1.6.1: minimal | low | medium | high | max; providers map it to their own control'),
+    _k('model_price_table', 'E2A_MODEL_PRICE_TABLE', {}, _to_json_map, 'LLM service', 'v1.6.1: {model_id: {input_per_mtok, output_per_mtok, cache_read_per_mtok}} USD — sets cost_usd on results'),
+    _k('quota_authority', 'E2A_QUOTA_AUTHORITY', 'e2a', str, 'LLM service', 'v1.6.1: e2a (the pod token bucket admits) | gateway (a gateway enforces quota; E2A skips its bucket, keeps concurrency)'),
+    _k('admission_throttle_decay', 'E2A_ADMISSION_THROTTLE_DECAY', 0.5, float, 'LLM service', 'v1.6.1: a provider throttle multiplies the pod admission share by this'),
+    _k('admission_throttle_floor', 'E2A_ADMISSION_THROTTLE_FLOOR', 0.1, float, 'LLM service', 'v1.6.1: the lowest admission share after throttles'),
+    _k('admission_recovery_seconds', 'E2A_ADMISSION_RECOVERY_SECONDS', 60.0, float, 'LLM service', 'v1.6.1: seconds for the share to recover linearly to 1 after a throttle'),
+    _k('guardrail_fields', 'GUARDRAIL_FIELDS', ['query'], _to_json_list, 'Governance', 'v1.6.1: ManagedGuardrailStage — state fields the classifier screens'),
+    _k('guardrail_fail_open', 'GUARDRAIL_FAIL_OPEN', False, _to_bool, 'Governance', 'v1.6.1: true lets a request through when the classifier cannot answer (default: refuse)'),
+    _k('delegated_max_turns', 'DELEGATED_MAX_TURNS', 8, int, 'LLM service', 'v1.6.1: DelegatedRuntime — most tool round-trips in one managed session'),
+    _k('artifact_matrix', 'E2A_ARTIFACT_MATRIX', [], _to_json_list, 'Pipeline', 'v1.6.1: BasePipeline — the images to build (empty: the default matrix)'),
+    _k('secret_scan_paths', 'E2A_SECRET_SCAN_PATHS', ['src'], _to_json_list, 'Pipeline', 'v1.6.1: BasePipeline built-in secret scan roots ([] turns it off)'),
+    _k('scopes', 'E2A_SCOPES', {}, _to_json_map, 'Bindings', 'v1.6.1: {"tenant:<id>": {key: value}, "agent:<name>": {...}} — overlays applied per call (tenant, then agent)'),
     _k('log_sink', 'LOG_SINK', 'stdout', str, 'Common', 'BaseObservability._ship_logs() / _flush_logs()'),
     _k('dlq_queue_url', 'DLQ_QUEUE_URL', None, str, 'Common', '_send_to_dlq()'),
     _k('commit_gate_enabled', 'COMMIT_GATE_ENABLED', True, _to_bool, 'Common', '_commit_gate()'),
@@ -230,6 +245,20 @@ E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
 ]}
 
 
+def _same_cast(a, b, default) -> bool:
+    """v1.6.1: two casts mean the same when they are the same function or read the default's
+    environment spelling alike (a provider package's own list parser and E2A's JSON list
+    parser both read '["query"]' as ['query']), so a key E2A takes over from a provider
+    package keeps working with the package's earlier registration."""
+    if a is b:
+        return True
+    probe = json.dumps(default) if isinstance(default, (list, dict)) else ('' if default is None else str(default))
+    try:
+        return a(probe) == b(probe)
+    except Exception:
+        return False
+
+
 def register_config_key(spec: ConfigKey) -> ConfigKey:
     """Add a project-specific key to the central registry (call once at
     start-up, e.g. from src/settings.py). Re-registering an identical spec
@@ -239,8 +268,8 @@ def register_config_key(spec: ConfigKey) -> ConfigKey:
         # v1.6.0: the same key with the same meaning (env, default, type, secrecy) is
         # compatible even if its description differs, e.g. a key a provider package registered
         # before E2A took it over. The registered spec is kept; only a real conflict raises.
-        same = (existing.env, existing.default, existing.cast, existing.scoped_defaults, existing.secret) == \
-               (spec.env, spec.default, spec.cast, spec.scoped_defaults, spec.secret)
+        same = (existing.env, existing.default, existing.scoped_defaults, existing.secret) == \
+               (spec.env, spec.default, spec.scoped_defaults, spec.secret) and _same_cast(existing.cast, spec.cast, spec.default)
         if not same:
             raise ValueError(f"config key '{spec.key}' is already registered differently")
         return existing
@@ -270,6 +299,47 @@ def resolve_config(key: str, config: Optional[Dict[str, Any]] = None,
     if isinstance(profile, dict) and profile.get(key) is not None:
         return profile[key]
     return spec.scoped_defaults.get(scope, spec.default) if scope else spec.default
+
+
+# v1.6.1 (P3): keys a scope may not change. They identify or guard the request itself.
+UNSCOPABLE_KEYS = frozenset({'scopes', 'tenant_id', 'correlation_id', 'profile_settings', 'expected_version',
+                             'checkpoint_store', 'idempotency_store', 'idempotency_lease_seconds'})
+
+
+def scoped_config(config: Optional[Dict[str, Any]], agent_name: Optional[str] = None,
+                  tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """v1.6.1 (design note MP-04, P3): config with the matching `scopes` overlays applied,
+    tenant first, then agent (the agent's own settings are the more specific).
+
+        scopes = {"tenant:acme": {"max_output_tokens": 1024},
+                  "agent:triage": {"model_id": "small-model", "temperature": 0.0}}
+
+    An overlay sets config values, so it sits at the config layer: a per-call keyword still
+    wins, and an overlay beats environment variables and the profile. A scope key that is not
+    registered, or one that identifies the request (UNSCOPABLE_KEYS), raises ValueError, so a
+    typo fails at the first call rather than being silently ignored. No scopes: config as given."""
+    config = config or {}
+    scopes = resolve_config('scopes', config) or {}
+    if not scopes:
+        return config
+    out = dict(config)
+    for label in ([f'tenant:{tenant_id}'] if tenant_id else []) + ([f'agent:{agent_name}'] if agent_name else []):
+        overlay = scopes.get(label)
+        if not overlay:
+            continue
+        if not isinstance(overlay, dict):
+            raise ValueError(f'scopes[{label!r}] must be a mapping of config keys')
+        bad = sorted(k for k in overlay if k in UNSCOPABLE_KEYS)
+        if bad:
+            raise ValueError(f'scopes[{label!r}] may not set {", ".join(bad)}')
+        unknown = [k for k in unknown_config_keys(overlay)]
+        if unknown:
+            raise ValueError(f'scopes[{label!r}]: unregistered config keys {", ".join(unknown)}')
+        out.update(overlay)
+    for label in scopes:
+        if not (isinstance(label, str) and label.partition(':')[0] in ('tenant', 'agent') and label.partition(':')[2]):
+            raise ValueError(f'scopes: {label!r} must be "tenant:<id>" or "agent:<name>"')
+    return out
 
 
 def unknown_config_keys(config: Optional[Dict[str, Any]]) -> List[str]:
