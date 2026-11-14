@@ -2,6 +2,31 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.5.1 — Model-call retries and three smaller fixes (design note MP-01)
+
+Found while assessing the managed-providers proposal (hub MP-00). Nothing is removed, and no
+existing signature changes.
+
+### Fixed
+- **Model calls are retried (P7).** `process_inference` called the upstream with `max_retries=0`, so a model call was never retried, and every 429 counted toward the circuit breaker like an outage.
+  - Now a failure is classified (`ErrorClass`, through a new protected hook `_classify_error` with a default, `e2a.classify_error`). Only transient, throttled and overloaded failures are retried, up to `llm_max_retries` (default 2).
+  - `Retry-After` is honoured, and never past the request deadline; a `Retry-After` beyond `llm_retry_after_cap` (default 30 s) is not waited for.
+  - **Throttling no longer counts toward the circuit breaker** (`circuit_counts`).
+  - Deterministic (4xx), auth and unknown failures are not retried. An unknown failure still counts toward the circuit, as before.
+  - Streaming is unchanged: a stream is not retried.
+- **Provider metadata is kept (P6).** `payload['metadata']` was overwritten with `{model_id, tokens_used}`. Now the transport's `metadata` is kept (the base fields win), and `stop_reason`, `usage` and `provider_request_id` are copied to the payload when the transport returns them.
+- **The reranker receives the query (P17).** `retrieve()` now calls `_rerank(results, config, query=..., **kwargs)`, so a cross-encoder can score query-passage pairs. A `_rerank` override that does not accept `**kwargs` would need it: every override in the E2A family does.
+- **`framework_version` in log records (P12)** is the installed version (it said `e2a-v1.0` in every release).
+
+### Added
+- `ErrorClass`, `classify_error` in `e2a` (and `e2a.core`).
+- `ResiliencePolicy.call(..., counts_for_circuit=, delay_for=)`. Both are optional; every existing caller behaves as before.
+- Keys: `llm_max_retries` (2), `llm_retry_on` (`["transient", "throttled", "overloaded"]`), `circuit_counts` (`["transient", "overloaded", "unknown"]`), `llm_retry_after_cap` (30).
+- `tests/test_v151.py`: 28 tests.
+
+### Changed
+- e2a-adapters and e2a-java follow the version: `1.5.1` (no code change).
+
 ## v1.5.0 — Firestore and Cosmos DB adapters (design note D-03)
 
 Additive: nothing changes for code on v1.4.0.

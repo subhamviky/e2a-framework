@@ -152,6 +152,81 @@ class ClaimStatus(str, Enum):
     FAILED_FINAL = 'FAILED_FINAL'            # deterministic failure; never re-executed
 
 
+@dataclass(frozen=True)
+class ErrorClass:
+    """What kind of failure an upstream call raised (v1.5.1). kind is one of:
+    transient | throttled | overloaded | auth | deterministic | context_overflow | unknown.
+    retry_after: the server's minimum wait in seconds, when it gave one."""
+    kind: str
+    retry_after: Optional[float] = None
+
+
+_CONTEXT_MARKERS = ('context length', 'context_length', 'context window', 'maximum context',
+                    'too many tokens', 'prompt is too long', 'input is too long')
+
+
+def _http_status(error: BaseException) -> Optional[int]:
+    for attr in ('status_code', 'status', 'http_status', 'code'):
+        value = getattr(error, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool) and 100 <= value < 600:
+            return value
+    response = getattr(error, 'response', None)
+    if isinstance(response, dict):                       # botocore ClientError
+        value = (response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+        return value if isinstance(value, int) else None
+    value = getattr(response, 'status_code', None) or getattr(response, 'status', None)
+    return value if isinstance(value, int) else None
+
+
+def _retry_after(error: BaseException) -> Optional[float]:
+    response = getattr(error, 'response', None)
+    headers = getattr(response, 'headers', None) or getattr(error, 'headers', None)
+    if headers is None and isinstance(response, dict):
+        headers = (response.get('ResponseMetadata') or {}).get('HTTPHeaders')
+    if not headers:
+        return None
+    try:
+        lower = {str(k).lower(): v for k, v in dict(headers).items()}
+    except (TypeError, ValueError):
+        return None
+    for name, scale in (('retry-after-ms', 0.001), ('retry-after', 1.0)):
+        if name in lower:
+            try:
+                return max(0.0, float(lower[name]) * scale)
+            except (TypeError, ValueError):              # an HTTP-date: not honoured, backoff applies
+                return None
+    return None
+
+
+def classify_error(error: BaseException) -> ErrorClass:
+    """Default classification of an upstream failure, from what SDKs commonly expose: an HTTP
+    status (status_code / status / code, or botocore's response), Retry-After headers, and
+    connection or timeout exception types. Anything else is 'unknown' (not retried, and it
+    counts toward the circuit, as before v1.5.1)."""
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return ErrorClass('transient')
+    if isinstance(error, _DETERMINISTIC_ERRORS):
+        return ErrorClass('deterministic')
+    status = _http_status(error)
+    if status is not None:
+        if status == 429:
+            return ErrorClass('throttled', _retry_after(error))
+        if status in (503, 529):
+            return ErrorClass('overloaded', _retry_after(error))
+        if status >= 500:
+            return ErrorClass('transient', _retry_after(error))
+        if status in (401, 403):
+            return ErrorClass('auth')
+        if status in (400, 413) and any(m in str(error).lower() for m in _CONTEXT_MARKERS):
+            return ErrorClass('context_overflow')
+        if 400 <= status < 500:
+            return ErrorClass('deterministic')
+    name = type(error).__name__
+    if isinstance(error, ConnectionError) or 'Connect' in name or 'Timeout' in name:
+        return ErrorClass('transient')
+    return ErrorClass('unknown')
+
+
 @dataclass
 class ClaimResult:
     status: 'ClaimStatus'

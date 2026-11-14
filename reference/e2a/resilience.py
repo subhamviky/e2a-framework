@@ -191,16 +191,24 @@ class ResiliencePolicy:
 
     async def call(self, fn: Callable[[], Any], *, deadline: Optional[Deadline] = None,
                    max_retries: int = 0, idempotent: bool = False,
-                   retryable: Callable[[BaseException], bool] = None):
+                   retryable: Callable[[BaseException], bool] = None,
+                   counts_for_circuit: Callable[[BaseException], bool] = None,
+                   delay_for: Callable[[BaseException], Optional[float]] = None):
+        """v1.5.1: `counts_for_circuit(e)` False keeps a failure out of the circuit breaker
+        (throttling is not an outage); `delay_for(e)` gives a minimum wait before the retry
+        (a server's Retry-After). Both default to the previous behaviour."""
         if deadline:
             deadline.check(f'calling {self.name}')
         if self.bulkhead is None:
-            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable)
+            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable,
+                                         counts_for_circuit, delay_for)
         wait = deadline.bound(self.bulkhead_timeout) if deadline else self.bulkhead_timeout
         async with self.bulkhead.slot(wait):
-            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable)
+            return await self.__attempts(fn, deadline, max_retries, idempotent, retryable,
+                                         counts_for_circuit, delay_for)
 
-    async def __attempts(self, fn, deadline, max_retries, idempotent, retryable):
+    async def __attempts(self, fn, deadline, max_retries, idempotent, retryable,
+                         counts_for_circuit=None, delay_for=None):
         self.budget.deposit()
         attempt = 0
         while True:
@@ -219,7 +227,8 @@ class ResiliencePolicy:
             except Exception as e:
                 is_timeout = isinstance(e, (asyncio.TimeoutError, TimeoutError))
                 structural = isinstance(e, (CircuitOpenError, BulkheadFullError, DeadlineExceeded, AdmissionTimeout))
-                if not isinstance(e, _DETERMINISTIC_ERRORS) and not structural:
+                if (not isinstance(e, _DETERMINISTIC_ERRORS) and not structural
+                        and (counts_for_circuit(e) if counts_for_circuit else True)):
                     self.breaker.record_failure()
                 can_retry = (attempt <= max_retries and not isinstance(e, _DETERMINISTIC_ERRORS)
                              and not structural and not isinstance(e, NFRViolationError)
@@ -232,6 +241,9 @@ class ResiliencePolicy:
                 if not can_retry:
                     raise
                 delay = random.uniform(0.0, min(self.max_backoff, self.base * (2 ** (attempt - 1))))
+                hint = delay_for(e) if delay_for else None
+                if hint:
+                    delay = max(delay, float(hint))      # never retry sooner than the server asked
                 if deadline and deadline.remaining() <= delay:
                     raise
                 self.stats['retries'] += 1

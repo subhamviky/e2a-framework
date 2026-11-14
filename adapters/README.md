@@ -16,15 +16,15 @@ Firestore and Cosmos DB share one implementation of the ports, `e2a_adapters.cas
 The version follows E2A. Install e2a-framework from its tag first, as every project already does:
 
 ```bash
-pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.5.0" \
-            "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.5.0#subdirectory=adapters"
+pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.5.1" \
+            "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.5.1#subdirectory=adapters"
 ```
 
 Poetry:
 
 ```toml
-"e2a-framework" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.5.0" }
-"e2a-adapters" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.5.0", subdirectory = "adapters", extras = ["aws"] }
+"e2a-framework" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.5.1" }
+"e2a-adapters" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.5.1", subdirectory = "adapters", extras = ["aws"] }
 ```
 
 ## DynamoDB

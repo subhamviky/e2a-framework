@@ -28,6 +28,12 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 # any agent-specific class is reached.
 # ==================================================
  
+
+def _framework_version() -> str:
+    """v1.5.1: the installed E2A version (it said 'e2a-v1.0' for every release)."""
+    from . import __version__
+    return f'e2a-v{__version__}'
+
 class BaseObservability(ABC):
     """Template method abstract class for Enterprise Telemetry.
     record_telemetry() is the single public entry point (Section 2.10).
@@ -44,7 +50,7 @@ class BaseObservability(ABC):
                 'correlation_id': correlation_id,
                 'tenant_id': kwargs.get('tenant_id', 'UNKNOWN_TENANT'),
                 'host_epoch_ms': int(time.time() * 1000),
-                'framework_version': 'e2a-v1.0',
+                'framework_version': _framework_version(),
             })
         metrics = self.__extract_metrics(enriched_logs)
         try:

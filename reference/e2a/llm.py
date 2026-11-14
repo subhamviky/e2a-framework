@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
-from .core import AdmissionTimeout, Deadline, DeadlineExceeded, DehydrationInterrupt, NFRViolationError
+from .core import (AdmissionTimeout, Deadline, DeadlineExceeded, DehydrationInterrupt, ErrorClass,
+                   NFRViolationError, classify_error)
 from .config import resolve_config
 from .resilience import ResiliencePolicy
 from ._propagation import _PropagationMixin
@@ -206,13 +207,36 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                         raise NFRViolationError(
                             f'LLM inference latency SLO breached: > {up_timeout:.2f}s')
 
-                raw = await self._resilience.call(_upstream, deadline=deadline)
+                # v1.5.1: model calls are retried (they have no side effect) when the
+                # failure is transient, throttled or overloaded, honouring Retry-After
+                # within the deadline; throttling does not count toward the circuit.
+                retry_on = set(self._resolve_param('llm_retry_on', cfg, kwargs))
+                circuit_counts = set(self._resolve_param('circuit_counts', cfg, kwargs))
+                retry_after_cap = float(self._resolve_param('llm_retry_after_cap', cfg, kwargs))
+
+                def _retryable(e):
+                    c = self._classify_error(e)
+                    return c.kind in retry_on and (c.retry_after is None or c.retry_after <= retry_after_cap)
+
+                raw = await self._resilience.call(
+                    _upstream, deadline=deadline,
+                    max_retries=int(self._resolve_param('llm_max_retries', cfg, kwargs)),
+                    retryable=_retryable,
+                    counts_for_circuit=lambda e: self._classify_error(e).kind in circuit_counts,
+                    delay_for=lambda e: self._classify_error(e).retry_after)
 
             payload = self._format_and_validate_output(
                 raw, kwargs.get('response_schema'), model_id, cache_handle is not None,
                 correlation_id, tenant_id, cfg)
             payload['tokens_used'] = self.__track_usage(prepared, raw)
-            payload['metadata'] = {'model_id': model_id, 'tokens_used': payload['tokens_used']}
+            # v1.5.1: the provider's metadata is kept (stop reason, request id, token split);
+            # the base's own fields win on a clash.
+            provider_meta = dict(raw.get('metadata') or {}) if isinstance(raw, dict) else {}
+            payload['metadata'] = {**provider_meta, 'model_id': model_id, 'tokens_used': payload['tokens_used']}
+            for field in ('stop_reason', 'usage', 'provider_request_id'):
+                value = raw.get(field) if isinstance(raw, dict) and field in raw else provider_meta.get(field)
+                if value is not None:
+                    payload[field] = value
             if self._resolve_param('dlp_enabled', cfg, kwargs) and 'text' in payload:
                 payload['text'], payload['dlp_redactions'] = self._redact_sensitive(payload['text'])
             self.__settle_quota(quota, dispatched, used=payload['tokens_used'])
@@ -435,6 +459,14 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                 return DLP_MARKER
             text = pattern.sub(_sub, text)
         return text, count
+
+    def _classify_error(self, error: BaseException) -> ErrorClass:
+        """Hook (v1.5.1): what kind of failure the upstream call raised, which decides
+        whether it is retried (llm_retry_on) and whether it counts toward the circuit
+        (circuit_counts). The default (e2a.core.classify_error) reads HTTP statuses,
+        Retry-After and connection/timeout errors the way the common SDKs expose them;
+        override it only when a provider SDK signals failures differently."""
+        return classify_error(error)
 
     def _handle_error(self, error, messages, config=None, **kwargs) -> None:
         self._log(kwargs.get('message_log'), kwargs.get('correlation_id', 'UNKNOWN'),

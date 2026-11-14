@@ -76,7 +76,8 @@ class BaseRAGPipeline(ABC, _PropagationMixin):
         # and the vector (semantic leg) and fuses them itself.
         results = self._search_index(query_text=query, query_vector=vector,
                                      config=config, tenant_id=tenant_id, **kwargs)
-        reranked = self._rerank(results, config, **kwargs)
+        # v1.5.1: the reranker gets the query (kwargs['query']), so it can score pairs
+        reranked = self._rerank(results, config, query=query, **kwargs)
         return reranked
  
     def evaluate_answer(self, answer: str, retrieved: Optional[List[dict]] = None,
