@@ -1,0 +1,39 @@
+{
+  "name": "aws",
+  "provider": "cloud-infrastructure",
+  "cloud": "aws",
+  "description": "AWS infrastructure for E2A: DynamoDB claims, rows, leases and checkpoints; SQS/SNS messaging with dead letters; Secrets Manager for tool credentials; Cognito claims at ingress. A provider profile extends it.",
+  "bindings": {
+    "idempotency_store": "e2a_adapters.aws:DynamoDBIdempotencyStore",
+    "checkpoint_store": "e2a_adapters.aws:DynamoDBCheckpointStore",
+    "transactional_store": "e2a_adapters.aws:DynamoDBTransactionalStore",
+    "lease": "e2a_adapters.aws:DynamoDBLease",
+    "message_broker": "e2a_adapters.aws:SQSBroker",
+    "credential_provider": "e2a_adapters.aws:SecretsManagerCredentialProvider",
+    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver"
+  },
+  "config": {
+    "aws_region": "${AWS_REGION:-us-east-1}",
+    "aws_endpoint_url": "${AWS_ENDPOINT_URL}",
+    "dynamodb_idempotency_table": "${DYNAMODB_IDEMPOTENCY_TABLE:-e2a-idempotency}",
+    "dynamodb_checkpoint_table": "${DYNAMODB_CHECKPOINT_TABLE:-e2a-checkpoints}",
+    "dynamodb_state_table": "${DYNAMODB_STATE_TABLE:-e2a-state}",
+    "sqs_dead_letter_suffix": "-dlq",
+    "identity_claim_map": {
+      "tenant_id": "custom:tenant_id",
+      "subject": "sub",
+      "roles": "cognito:groups",
+      "issuer": "iss"
+    }
+  },
+  "features": [
+    "idempotency_store",
+    "checkpoint_store",
+    "transactional_store",
+    "lease",
+    "messaging",
+    "dead_letter",
+    "secret_store",
+    "identity"
+  ]
+}

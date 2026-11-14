@@ -549,32 +549,45 @@ class BaseReconciliationService(ABC, _PropagationMixin):
                     cr = store.claim(key, config, tenant_id=tenant, owner=correlation_id,
                                      fingerprint=entry.get('fingerprint'), lease_seconds=lease_s, recover=True)
                     if cr.status != ClaimStatus.CLAIMED:
-                        continue  # already reconciled, being worked, or finally failed
+                        # already reconciled, being worked, or finally failed
+                        self._settle_dlq_entry(entry, f'SKIPPED_{cr.status.value}', config, **kwargs)
+                        continue
                     owned = True
                     outcome = self._confirm_physical_outcome(entry, config, fencing_token=fencing, **kwargs)
                     if outcome == PhysicalOutcome.COMMITTED:
                         store.complete(key, entry.get('result') or {'outcome': 'COMMITTED'}, config,
                                        tenant_id=tenant, owner=correlation_id)
+                        self._settle_dlq_entry(entry, 'COMMITTED', config, **kwargs)
                         continue    # the effect already happened — nothing to replay
                     if outcome == PhysicalOutcome.UNKNOWN:
                         store.fail(key, retryable=False, config=config, tenant_id=tenant,
                                    owner=correlation_id, outcome=PhysicalOutcome.UNKNOWN)
                         unresolved.append(entry.get('id'))
+                        self._settle_dlq_entry(entry, 'UNRESOLVED', config, **kwargs)
                         continue
                 if self._replay_dlq_entry(entry, config, fencing_token=fencing, **kwargs):
                     replayed += 1
                     if owned:
                         store.complete(key, entry.get('result') or {'outcome': 'COMMITTED'}, config,
                                        tenant_id=tenant, owner=correlation_id)
+                    self._settle_dlq_entry(entry, 'REPLAYED', config, **kwargs)
                 else:
                     exhausted.append(entry.get('id'))
                     if owned:
                         store.fail(key, retryable=True, config=config, tenant_id=tenant, owner=correlation_id)
+                    self._settle_dlq_entry(entry, 'EXHAUSTED', config, **kwargs)
             return {'status': 'RECONCILED', 'correlation_id': correlation_id,
                     'replayed': replayed, 'failed_keys': exhausted, 'unresolved': unresolved}
         finally:
             if self.lock and handle:
                 self.lock.release(handle, config=config)
+
+    def _settle_dlq_entry(self, entry: Dict[str, Any], outcome: str, config: Dict[str, Any] = None,
+                          **kwargs) -> None:
+        """Hook (v1.7.0): one entry's decision, so the DLQ can be settled: COMMITTED (confirmed,
+        not replayed), REPLAYED, UNRESOLVED (outcome UNKNOWN), EXHAUSTED (replay failed), or
+        SKIPPED_<claim status> (REPLAY: reconciled before; IN_PROGRESS; FAILED_FINAL; ...).
+        Default: nothing (a DLQ that is not a broker settles itself in _replay_dlq_entry)."""
 
     def _confirm_physical_outcome(self, entry: Dict[str, Any], config: Dict[str, Any] = None,
                                   **kwargs) -> 'PhysicalOutcome':

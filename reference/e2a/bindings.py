@@ -59,11 +59,17 @@ SEAMS = (
     'idempotency_store',      # BaseIdempotencyStore           -> config['idempotency_store']
     'checkpoint_store',       # BaseCheckpointStore            -> config['checkpoint_store']
     'credential_provider',    # BaseCredentialProvider         -> config['credential_provider']
+    'message_broker',         # BaseMessageBroker (v1.7.0)     -> config['message_broker']
+    'outbox_store',           # BaseOutboxStore (v1.7.0)       -> config['outbox_store']
+    'identity_resolver',      # BaseIdentityResolver (v1.7.0)  -> config['identity_resolver']
+    'transactional_store',    # BaseTransactionalStore (v1.7.0)-> config['transactional_store']
+    'lease',                  # BaseDistributedLock (v1.7.0)   -> config['lease']
     'infra_provisioner',      # BaseInfraProvisioner (CI/CD time)
     'release_pipeline',       # BasePipeline (CI/CD time)
 )
 _CONFIG_SEAMS = ('llm_service', 'observability_engine', 'idempotency_store', 'checkpoint_store',
-                 'credential_provider')
+                 'credential_provider', 'message_broker', 'outbox_store', 'identity_resolver',
+                 'transactional_store', 'lease')
 _PROFILE_FIELDS = {'name', 'provider', 'cloud', 'description', 'features', 'recommends', 'bindings', 'config',
                    'extends'}
 _BUILTIN_PACKAGES = {'e2a', 'e2a_simulated_llm', 'e2a_inmemory_adapters', 'e2a_adapters'}
@@ -107,7 +113,7 @@ def _import(target: str) -> Callable[..., Any]:
 def _profile_dirs() -> List[Path]:
     dirs = [Path(__file__).parent / 'profiles']
     for name in _provider_packages():
-        if name in _BUILTIN_PACKAGES:
+        if name in _BUILTIN_PACKAGES and name != 'e2a_adapters':     # e2a-adapters ships the cloud profiles
             continue
         try:
             module = importlib.import_module(name)
@@ -189,17 +195,22 @@ class Profile:
     bindings: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
     source: Optional[str] = None
+    # v1.7.0 (N2): secret keys the profile file sets to a literal value instead of ${VAR}
+    literal_secrets: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], source: Optional[str] = None, _seen: tuple = ()) -> 'Profile':
         unknown = set(data) - _PROFILE_FIELDS
         if unknown:
             raise ValueError(f"profile {source or data.get('name')}: unknown fields {sorted(unknown)}")
+        raw_config = dict(data.get('config') or {})          # before placeholders are resolved (N2)
+        inherited_literals: List[str] = []
         if data.get('extends'):
             parent_name = data['extends']
             if parent_name in _seen:
                 raise ValueError(f'profile {data.get("name")}: circular extends ({" -> ".join(_seen + (parent_name,))})')
             parent = cls.load(parent_name, _seen=_seen + (data.get('name', '?'),))
+            inherited_literals = [k for k in parent.literal_secrets if k not in (data.get('config') or {})]
             base = {'name': parent.name, 'provider': parent.provider, 'cloud': parent.cloud,
                     'description': parent.description, 'features': parent.features,
                     'recommends': parent.recommends, 'bindings': parent.bindings, 'config': parent.config}
@@ -207,10 +218,15 @@ class Profile:
         unknown_seams = set(data.get('bindings') or {}) - set(SEAMS)
         if unknown_seams:
             raise ValueError(f"profile {data.get('name')}: unknown seams {sorted(unknown_seams)}")
+        literals = sorted(set(inherited_literals) | {
+            k for k, v in raw_config.items()
+            if k in E2A_CONFIG and E2A_CONFIG[k].secret and v not in (None, '') and not (
+                isinstance(v, str) and _PLACEHOLDER.fullmatch(v.strip()))})
         return cls(name=data['name'], provider=data['provider'], cloud=data.get('cloud', ''),
                    description=data.get('description', ''), features=list(data.get('features') or []),
                    recommends=list(data.get('recommends') or []), bindings=dict(data.get('bindings') or {}),
-                   config=_typed(_interpolate(dict(data.get('config') or {}))), source=source)
+                   config=_typed(_interpolate(dict(data.get('config') or {}))), source=source,
+                   literal_secrets=literals)
 
     @classmethod
     def load(cls, name_or_path: str, _seen: tuple = ()) -> 'Profile':
@@ -313,6 +329,8 @@ class Bindings:
         # v1.6.1: what the profile recommends but nothing provides is a warning, and the
         # embedding model and the vector index must agree on vector size
         self.warnings = [f'recommended capability {c!r} is not provided' for c in missing(self.profile.recommends, everything)]
+        self.warnings += [f'secret {k!r} is a literal value in the profile: use ${{VAR}} or a secret store'
+                          for k in self.profile.literal_secrets]
         for w in self.warnings:
             _log.warning('profile %s: %s', self.profile.name, w)
         if 'embedding_model' in self.bound() and 'vector_index' in self.bound():

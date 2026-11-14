@@ -1,0 +1,435 @@
+{
+ "UserConfig": {
+  "Namespaces": [
+   {
+    "Name": "sbemulatorns",
+    "Queues": [
+     {
+      "Name": "q0",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q1",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q2",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q3",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q4",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q5",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q6",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q7",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q8",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q9",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q10",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q11",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q12",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q13",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q14",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q15",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q16",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q17",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q18",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q19",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q20",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q21",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q22",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q23",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q24",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q25",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q26",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q27",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q28",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     },
+     {
+      "Name": "q29",
+      "Properties": {
+       "DeadLetteringOnMessageExpiration": false,
+       "DefaultMessageTimeToLive": "PT1H",
+       "DuplicateDetectionHistoryTimeWindow": "PT20S",
+       "ForwardDeadLetteredMessagesTo": "",
+       "ForwardTo": "",
+       "LockDuration": "PT1M",
+       "MaxDeliveryCount": 10,
+       "RequiresDuplicateDetection": false,
+       "RequiresSession": false
+      }
+     }
+    ],
+    "Topics": []
+   }
+  ],
+  "Logging": {
+   "Type": "File"
+  }
+ }
+}

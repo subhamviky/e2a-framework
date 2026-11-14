@@ -80,6 +80,10 @@ class BasePipeline(ABC, _PropagationMixin):
                 raise ValueError('Secret scan failed: ' + '; '.join(leaks[:5]))
             bindings = kwargs.get('bindings') or config.get('bindings')
             if bindings is not None:
+                literal = list(getattr(bindings.profile, 'literal_secrets', []))
+                if literal:                             # v1.7.0 (N2): secrets come from ${VAR} or a secret store
+                    raise ValueError(f"Secret scan failed: profile '{bindings.profile.name}' sets secret key(s) "
+                                     f"{literal} to a literal value")
                 report['bindings'] = bindings.verify()
                 report['binding_warnings'] = list(getattr(bindings, 'warnings', []))
                 report['stages']['binding_verification'] = 'PASSED'

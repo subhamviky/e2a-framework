@@ -85,6 +85,21 @@ class _DynamoDB:
         self.client, self.table_name, self.prefix = client, table_name, prefix
         self.pk, self.sk, self.ttl_attribute, self.clock = partition_key, sort_key, ttl_attribute, clock
 
+    _table_key = 'dynamodb_state_table'      # the config key naming this adapter's table (v1.7.0)
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], **kwargs):
+        """v1.7.0: the adapter from configuration (a cloud profile): region, endpoint and table
+        name are registered keys. The client is created on first use, so binding and verifying
+        a profile needs no credentials."""
+        import boto3
+        from e2a import resolve_config
+        from .. import config_keys  # noqa: F401
+        from .._lazy import Lazy
+        region, endpoint = resolve_config('aws_region', config), resolve_config('aws_endpoint_url', config)
+        client = Lazy(lambda: boto3.client('dynamodb', region_name=region, endpoint_url=endpoint))
+        return cls(client=client, table_name=resolve_config(cls._table_key, config), **kwargs)
+
     def _key(self, kind: str, *parts: str) -> Dict[str, Dict[str, str]]:
         return {self.pk: _s(self.prefix + kind + '#' + '#'.join(str(p) for p in parts)), self.sk: _s(kind.lower())}
 
@@ -107,6 +122,8 @@ class _DynamoDB:
 class DynamoDBIdempotencyStore(_DynamoDB, BaseIdempotencyStore):
     """The claim state machine of BaseIdempotencyStore on one item per (tenant, key):
     ABSENT -> IN_PROGRESS(owner, lease_until) -> SUCCEEDED | FAILED_RETRYABLE | FAILED_FINAL | UNKNOWN."""
+    capabilities = frozenset({'idempotency_store'})
+    _table_key = 'dynamodb_idempotency_table'
 
     def _k(self, idempotency_key: str, kw: Dict):
         return self._key('IDEM', kw.get('tenant_id') or '-', idempotency_key)
@@ -198,6 +215,7 @@ class DynamoDBIdempotencyStore(_DynamoDB, BaseIdempotencyStore):
 class DynamoDBTransactionalStore(_DynamoDB, BaseTransactionalStore):
     """Versioned JSON rows; put_if_version() is one conditional update. A fencing token is
     recorded per row and a write carrying an older one is FENCED."""
+    capabilities = frozenset({'transactional_store'})
 
     def _k(self, key: str, kw: Dict):
         return self._key('ROW', kw.get('table_or_collection_name') or 'default', key)
@@ -252,6 +270,7 @@ class DynamoDBTransactionalStore(_DynamoDB, BaseTransactionalStore):
 class DynamoDBLease(_DynamoDB, BaseDistributedLock):
     """One item per lock key. Release clears the owner but keeps the item, so the fencing token
     (ADD fence 1 on every acquire) is strictly increasing for the key's whole life."""
+    capabilities = frozenset({'lease'})
 
     def _k(self, lock_key: str):
         return self._key('LEASE', lock_key)
@@ -286,6 +305,8 @@ class DynamoDBLease(_DynamoDB, BaseDistributedLock):
 class DynamoDBCheckpointStore(_DynamoDB, BaseCheckpointStore):
     """A paused workflow's checkpoint as JSON, with its status as a separate attribute so that
     decide() is one conditional update (PENDING -> APPROVED | REJECTED)."""
+    capabilities = frozenset({'checkpoint_store'})
+    _table_key = 'dynamodb_checkpoint_table'
 
     def __init__(self, *args, ttl_seconds: Optional[int] = None, **kwargs):
         super().__init__(*args, **kwargs)

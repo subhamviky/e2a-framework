@@ -93,22 +93,40 @@ def _backend(client, collection, ttl_field):
     return FirestoreBackend(client, collection, ttl_field)
 
 
-class FirestoreIdempotencyStore(CasIdempotencyStore):
+def _client_from(config):
+    """v1.7.0: a Firestore client from configuration, created on first use. The emulator is
+    selected by FIRESTORE_EMULATOR_HOST, as the SDK does by itself."""
+    from e2a import resolve_config
+    from .. import config_keys  # noqa: F401
+    from .._lazy import Lazy
+    project, database = resolve_config('gcp_project', config), resolve_config('firestore_database', config)
+    return Lazy(lambda: firestore.Client(project=project, database=database)), \
+        resolve_config('firestore_collection', config)
+
+
+class _FromConfig:
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        client, collection = _client_from(config)
+        return cls(client, collection, **kwargs)
+
+
+class FirestoreIdempotencyStore(_FromConfig, CasIdempotencyStore):
     def __init__(self, client, collection: str = 'e2a', ttl_field: str = 'ttl', clock: Callable[[], float] = time.time):
         super().__init__(_backend(client, collection, ttl_field), clock)
 
 
-class FirestoreTransactionalStore(CasTransactionalStore):
+class FirestoreTransactionalStore(_FromConfig, CasTransactionalStore):
     def __init__(self, client, collection: str = 'e2a', ttl_field: str = 'ttl', clock: Callable[[], float] = time.time):
         super().__init__(_backend(client, collection, ttl_field), clock)
 
 
-class FirestoreLease(CasLease):
+class FirestoreLease(_FromConfig, CasLease):
     def __init__(self, client, collection: str = 'e2a', ttl_field: str = 'ttl', clock: Callable[[], float] = time.time):
         super().__init__(_backend(client, collection, ttl_field), clock)
 
 
-class FirestoreCheckpointStore(CasCheckpointStore):
+class FirestoreCheckpointStore(_FromConfig, CasCheckpointStore):
     def __init__(self, client, collection: str = 'e2a', ttl_field: str = 'ttl', clock: Callable[[], float] = time.time,
                  ttl_seconds: Optional[int] = None):
         super().__init__(_backend(client, collection, ttl_field), clock, ttl_seconds)
