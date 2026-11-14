@@ -46,22 +46,40 @@ jobs:
           python-version: "3.12"
       - name: Install the core, then the adapters with every backend and the test extras
         run: pip install . && pip install "./adapters[aws,gcp,azure,test]"
-      - name: Start the emulators (DynamoDB Local, Firestore, Cosmos DB)
-        # The contract kit's concurrent races need atomic backends: moto's in-process DynamoDB is not one
+      - name: Start the emulators (DynamoDB Local, Firestore, Cosmos DB, Pub/Sub, Service Bus)
+        # The contract kit's concurrent races need atomic backends: moto's in-process DynamoDB is not one.
+        # v1.7.0: the brokers' messaging suite runs on the Pub/Sub and Service Bus emulators (SQS on moto).
+        # The Service Bus emulator keeps its state in SQL Edge and declares its queues up front.
+        env:
+          SQL_PASSWORD: E2a-Emulator-Pass1!      # a throwaway password for the CI-only database
         run: |
           docker run -d --name ddb -p 8000:8000 amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -inMemory -port 8000
           docker run -d --name firestore -p 8085:8085 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
             gcloud emulators firestore start --host-port=0.0.0.0:8085
           docker run -d --name cosmos -p 8081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
-          for port in 8000 8085 8081; do
+          docker run -d --name pubsub -p 8086:8086 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+            gcloud beta emulators pubsub start --host-port=0.0.0.0:8086 --project=demo-e2a-adapters
+          docker run -d --name sqledge --network host -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD="$SQL_PASSWORD" \
+            mcr.microsoft.com/azure-sql-edge:latest
+          sleep 20
+          docker run -d --name servicebus --network host -e ACCEPT_EULA=Y -e SQL_SERVER=localhost \
+            -e MSSQL_SA_PASSWORD="$SQL_PASSWORD" -e SQL_WAIT_INTERVAL=5 \
+            -v "$PWD/adapters/tests/servicebus-emulator.json:/ServiceBus_Emulator/ConfigFiles/Config.json" \
+            mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+          for port in 8000 8085 8081 8086; do
             for _ in $(seq 90); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break; sleep 2; done
           done
           for _ in $(seq 60); do docker logs cosmos 2>&1 | grep -q "Gateway=OK" && break; sleep 2; done
-      - name: Adapter tests (the port contract kit on every backend)
+          for _ in $(seq 90); do docker logs servicebus 2>&1 | grep -q "Successfully Up" && break; sleep 2; done
+          docker logs servicebus 2>&1 | tail -2
+      - name: Adapter tests (the port contract kit and the messaging suite on every backend)
         env:
           DYNAMODB_LOCAL_ENDPOINT: http://127.0.0.1:8000
           FIRESTORE_EMULATOR_HOST: 127.0.0.1:8085
           COSMOS_EMULATOR_ENDPOINT: http://127.0.0.1:8081
+          PUBSUB_EMULATOR_HOST: 127.0.0.1:8086
+          # the emulator's documented, fixed connection string (not a secret)
+          SERVICEBUS_CONNECTION_STRING: "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
         # -rs lists skips: none is expected here, every emulator is running
         run: python -m pytest -q -rs adapters/tests
       - name: Governed Entry Point rules over the adapters

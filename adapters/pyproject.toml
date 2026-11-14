@@ -4,24 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "e2a-adapters"
-version = "1.6.1"
-description = "Production adapters for the E2A foundation ports: DynamoDB, Firestore, Cosmos DB"
+version = "1.7.0"
+description = "E2A ports on cloud infrastructure: stores, brokers, secrets and identity on AWS, Google Cloud and Azure"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Subham Gupta" }]
 requires-python = ">=3.11"
 # The E2A version this release is tested against. Install e2a-framework from its git tag first
 # (as every project already does); this requirement is then satisfied without an index lookup.
-dependencies = ["e2a-framework>=1.5,<2"]
+dependencies = ["e2a-framework>=1.7,<2"]
 
 [project.optional-dependencies]
 aws = ["boto3>=1.34"]
-gcp = ["google-cloud-firestore>=2.16"]
-azure = ["azure-cosmos>=4.7"]
-test = ["pytest>=8.2", "moto[dynamodb]>=5.0"]
+gcp = ["google-cloud-firestore>=2.16", "google-cloud-pubsub>=2.21", "google-cloud-secret-manager>=2.20"]
+azure = ["azure-cosmos>=4.7", "azure-servicebus>=7.12", "azure-keyvault-secrets>=4.8", "azure-identity>=1.17"]
+test = ["pytest>=8.2", "moto[dynamodb,sqs,sns,secretsmanager]>=5.0"]
 
 [project.urls]
 Repository = "https://github.com/subhamviky/e2a-framework"
 
 [tool.setuptools]
-packages = ["e2a_adapters", "e2a_adapters.aws", "e2a_adapters.gcp", "e2a_adapters.azure"]
+packages = ["e2a_adapters", "e2a_adapters.aws", "e2a_adapters.gcp", "e2a_adapters.azure", "e2a_adapters.profiles"]
+
+[tool.setuptools.package-data]
+"e2a_adapters.profiles" = ["*.json"]

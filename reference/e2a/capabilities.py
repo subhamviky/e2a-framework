@@ -26,6 +26,8 @@ CAPABILITIES = {
     # substrate
     'idempotency_store', 'checkpoint_store', 'transactional_store', 'lease', 'telemetry',
     'infra_as_code', 'release_pipeline',
+    # v1.7.0: cloud infrastructure
+    'messaging', 'dead_letter', 'outbox_store', 'identity', 'secret_store',
 }
 
 

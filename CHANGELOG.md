@@ -2,6 +2,61 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.7.0 — Messaging, identity, secrets and the cloud profiles (design note MP-05)
+
+Cloud infrastructure behind E2A's ports, selected by configuration. The contracts are vendor-neutral and
+live in `e2a`; the cloud adapters live in e2a-adapters 1.7.0 (no AI vendor SDK there, by test).
+Additive: no signature changes. e2a-adapters, e2a-java and the pins move to `1.7.0`.
+
+### Added (e2a)
+- **`e2a.messaging` (N1): exactly-once effects under at-least-once delivery.**
+  - `BaseMessageBroker` is the port: publish, receive, ack, nack, dead_letter, receive_dead_letters, ack_dead_letter. `BrokerMessage` is one shape for every broker; tenant and idempotency key travel as attributes.
+  - **`IdempotentConsumer`**: `consume()` claims every message in a `BaseIdempotencyStore`.
+    - A duplicate or a lost acknowledgement is acked without a second effect.
+    - A message another consumer holds is deferred.
+    - A deterministic error is dead-lettered (`FAILED_FINAL`).
+    - A transient error is retried.
+    - An `UNKNOWN` outcome is dead-lettered, never retried blindly.
+    - Too many deliveries (`consumer_max_deliveries`) dead-letters the message.
+  - **`reconcile()`** (inherited from `BaseReconciliationService`) works the dead letters. It confirms physical truth through `_confirm` before any replay, and settles a dead letter only when its effect is confirmed or replayed.
+  - **The outbox:** a `BaseOutboxStore` port with `InMemoryOutboxStore`, and `BrokerOutboxSweeper`. The sweeper publishes only records a consumer can deduplicate, and marks them published under the lease's fencing token.
+  - `InMemoryBroker` is the reference broker.
+- **`e2a.port_contract.check_message_broker`:** 25 scenarios every broker adapter passes, including:
+  - round trip, ack, nack and redelivery count, dead letters;
+  - a duplicate delivery, a lost acknowledgement, a poison message;
+  - an UNKNOWN outcome reconciled both ways;
+  - the outbox.
+- **`e2a.identity` (N3):** `BaseIdentityResolver` / `ClaimMapIdentityResolver.resolve(claims, verified, request_tenant)` gives the tenant, subject and roles from claims the gateway verified, through `identity_claim_map`.
+  - It raises `IdentityRefused` (a `GovernanceRefusal`) for: unverified claims, an untrusted issuer (`identity_trusted_issuers`), no tenant, or a request naming another tenant.
+  - `identity_tenant_map` maps an external directory id to a tenant.
+- **The literal-secret rule (N2):** a profile that sets a secret key to a literal value instead of `${VAR}` is recorded (`Profile.literal_secrets`, inherited through `extends`). `Bindings.verify()` warns, and `BasePipeline` fails the release.
+- **Seams:** `message_broker`, `outbox_store`, `identity_resolver`, `transactional_store`, `lease`. The ones E2A reads are carried in `Bindings.config()`.
+- **Capabilities:** `messaging`, `dead_letter`, `outbox_store`, `identity`, `secret_store`.
+- **`BaseReconciliationService._settle_dlq_entry(entry, outcome)`:** a hook with a no-op default, called with each entry's decision.
+- **Keys:** `consumer_batch_size`, `consumer_wait_seconds`, `consumer_max_deliveries`, `consumer_retry_delay_seconds`, `identity_claim_map`, `identity_trusted_issuers`, `identity_tenant_map`.
+
+### Added (e2a-adapters 1.7.0)
+- **Brokers:** `SQSBroker` (SQS queues, SNS topics, `<queue>-dlq`), `PubSubBroker` (topics and subscriptions, `<subscription>-dlq`) and `ServiceBusBroker` (queues and topic subscriptions, the native dead-letter subqueue).
+  - All three pass `check_message_broker`: SQS on moto, Pub/Sub and Service Bus on their emulators.
+- **Secret stores (N2):** `SecretsManagerCredentialProvider`, `SecretManagerCredentialProvider` and `KeyVaultCredentialProvider`. Each gives tool calls their auth headers from `secret_headers` (longest target prefix, optional `json_key`), cached for `secret_cache_seconds` so rotation needs no restart.
+- **`from_config(config)` on every store and broker,** from registered keys with environment variables. Clients are created on first use, so a profile binds and verifies offline.
+- **The cloud profiles** `aws`, `gcp` and `azure` (shipped in the package): stores, broker, secret store and the identity claim map of their cloud. Provider profiles extend them.
+- **`e2a_adapters.identity.PRESETS`:** Cognito, Entra ID and Identity Platform.
+- **Capabilities** declared on every store.
+- **Extras:** `[gcp]` adds Pub/Sub and Secret Manager; `[azure]` adds Service Bus, Key Vault and azure-identity.
+
+### Changed
+- **`e2a.bindings` finds profiles shipped in e2a-adapters** (`e2a_adapters/profiles/`). `available_profiles()` now lists `aws`, `gcp` and `azure` when it is installed.
+- **CI:** the adapters job also runs the Pub/Sub emulator, and the Service Bus emulator with SQL Edge.
+
+### Not in this release
+- **Durable outbox stores** (DynamoDB, Firestore, Cosmos DB) and **the projects on the brokers:**
+  - reconciliation's SQS consumer on `IdempotentConsumer`;
+  - O2C's outbox on Pub/Sub;
+  - audit-ai on Service Bus.
+
+  These are the next step.
+
 ## v1.6.1 — Vendor-neutral handling for managed providers (design note MP-04)
 
 What a managed deployment needs from E2A, selected by configuration, capabilities and the

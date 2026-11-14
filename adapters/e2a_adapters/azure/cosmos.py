@@ -85,22 +85,49 @@ class CosmosBackend(CasBackend):
             return False
 
 
-class CosmosIdempotencyStore(CasIdempotencyStore):
+def _container_from(config):
+    """v1.7.0: the Cosmos DB container from configuration, created on first use: an account key
+    when one is set (the emulator), else Entra ID through the platform identity."""
+    from e2a import resolve_config
+    from .. import config_keys  # noqa: F401
+    from .._lazy import Lazy
+    endpoint, key = resolve_config('cosmos_endpoint', config), resolve_config('cosmos_key', config)
+    database, container = resolve_config('cosmos_database', config), resolve_config('cosmos_container', config)
+
+    def build():
+        from azure.cosmos import CosmosClient
+        if key:
+            credential = key
+        else:
+            from azure.identity import DefaultAzureCredential
+            credential = DefaultAzureCredential()
+        return CosmosClient(endpoint, credential=credential).get_database_client(database) \
+            .get_container_client(container)
+    return Lazy(build)
+
+
+class _FromConfig:
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        return cls(_container_from(config), **kwargs)
+
+
+class CosmosIdempotencyStore(_FromConfig, CasIdempotencyStore):
     def __init__(self, container, partition_key_field: str = 'pk', clock: Callable[[], float] = time.time):
         super().__init__(CosmosBackend(container, partition_key_field), clock)
 
 
-class CosmosTransactionalStore(CasTransactionalStore):
+class CosmosTransactionalStore(_FromConfig, CasTransactionalStore):
     def __init__(self, container, partition_key_field: str = 'pk', clock: Callable[[], float] = time.time):
         super().__init__(CosmosBackend(container, partition_key_field), clock)
 
 
-class CosmosLease(CasLease):
+class CosmosLease(_FromConfig, CasLease):
     def __init__(self, container, partition_key_field: str = 'pk', clock: Callable[[], float] = time.time):
         super().__init__(CosmosBackend(container, partition_key_field), clock)
 
 
-class CosmosCheckpointStore(CasCheckpointStore):
+class CosmosCheckpointStore(_FromConfig, CasCheckpointStore):
     def __init__(self, container, partition_key_field: str = 'pk', clock: Callable[[], float] = time.time,
                  ttl_seconds: Optional[int] = None):
         super().__init__(CosmosBackend(container, partition_key_field), clock, ttl_seconds)

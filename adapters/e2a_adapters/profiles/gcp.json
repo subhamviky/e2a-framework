@@ -1,0 +1,37 @@
+{
+  "name": "gcp",
+  "provider": "cloud-infrastructure",
+  "cloud": "gcp",
+  "description": "Google Cloud infrastructure for E2A: Firestore claims, rows, leases and checkpoints; Pub/Sub messaging with dead letters; Secret Manager for tool credentials; Identity Platform claims at ingress. A provider profile extends it.",
+  "bindings": {
+    "idempotency_store": "e2a_adapters.gcp:FirestoreIdempotencyStore",
+    "checkpoint_store": "e2a_adapters.gcp:FirestoreCheckpointStore",
+    "transactional_store": "e2a_adapters.gcp:FirestoreTransactionalStore",
+    "lease": "e2a_adapters.gcp:FirestoreLease",
+    "message_broker": "e2a_adapters.gcp:PubSubBroker",
+    "credential_provider": "e2a_adapters.gcp:SecretManagerCredentialProvider",
+    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver"
+  },
+  "config": {
+    "gcp_project": "${GOOGLE_CLOUD_PROJECT}",
+    "firestore_database": "${FIRESTORE_DATABASE:-(default)}",
+    "firestore_collection": "${FIRESTORE_COLLECTION:-e2a}",
+    "pubsub_dead_letter_suffix": "-dlq",
+    "identity_claim_map": {
+      "tenant_id": "firebase.tenant",
+      "subject": "sub",
+      "roles": "roles",
+      "issuer": "iss"
+    }
+  },
+  "features": [
+    "idempotency_store",
+    "checkpoint_store",
+    "transactional_store",
+    "lease",
+    "messaging",
+    "dead_letter",
+    "secret_store",
+    "identity"
+  ]
+}

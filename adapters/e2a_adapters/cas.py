@@ -104,6 +104,7 @@ def _exhausted(what: str):
 # ------------------------------------------------------------ idempotency
 class CasIdempotencyStore(BaseIdempotencyStore):
     """BaseIdempotencyStore's state machine on one document per (tenant, key)."""
+    capabilities = frozenset({'idempotency_store'})
 
     def __init__(self, backend: CasBackend, clock: Callable[[], float] = time.time):
         self.backend, self.clock = backend, clock
@@ -182,6 +183,7 @@ class CasIdempotencyStore(BaseIdempotencyStore):
 class CasTransactionalStore(BaseTransactionalStore):
     """Versioned JSON rows; put_if_version() is a replace-if-unchanged after checking the
     version and the fence that were read."""
+    capabilities = frozenset({'transactional_store'})
 
     def __init__(self, backend: CasBackend, clock: Callable[[], float] = time.time):
         self.backend, self.clock = backend, clock
@@ -237,6 +239,7 @@ class CasTransactionalStore(BaseTransactionalStore):
 class CasLease(BaseDistributedLock):
     """One document per lock key. Release clears the owner and keeps the document, so the
     fencing token is strictly increasing for the key's whole life."""
+    capabilities = frozenset({'lease'})
 
     def __init__(self, backend: CasBackend, clock: Callable[[], float] = time.time):
         self.backend, self.clock = backend, clock
@@ -287,6 +290,7 @@ class CasLease(BaseDistributedLock):
 class CasCheckpointStore(BaseCheckpointStore):
     """A paused workflow's checkpoint as JSON, with its status beside it, so that decide() is
     one replace-if-unchanged (PENDING -> APPROVED | REJECTED)."""
+    capabilities = frozenset({'checkpoint_store'})
 
     def __init__(self, backend: CasBackend, clock: Callable[[], float] = time.time,
                  ttl_seconds: Optional[int] = None):

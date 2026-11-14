@@ -28,7 +28,7 @@ from typing import Callable, List
 from .core import ClaimStatus, PhysicalOutcome
 
 __all__ = ['FakeClock', 'check_idempotency_store', 'check_transactional_store', 'check_lease',
-           'check_checkpoint_store', 'check_llm_service', 'check_all']
+           'check_checkpoint_store', 'check_llm_service', 'check_message_broker', 'check_all']
 
 VALUE = {'amount': '100.25', 'count': 3, 'ratio': 0.5, 'ok': True, 'none': None,
          'nested': {'items': ['a', 'b'], 'unicode': 'Zürich €'}}
@@ -357,13 +357,207 @@ def check_llm_service(make: Callable[[Callable], object]) -> List[str]:
     return r.passed
 
 
-def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None, llm_service=None) -> dict:
+# ------------------------------------------------------------ messaging (v1.7.0)
+def _poll(fn, timeout: float, until=lambda got: bool(got), step: float = 0.2):
+    """Call fn() until until(result) or the timeout; a broker delivers asynchronously."""
+    import time as _t
+    end, got = _t.monotonic() + timeout, fn()
+    while not until(got) and _t.monotonic() < end:
+        _t.sleep(step)
+        got = fn()
+    return got
+
+
+def check_message_broker(make: Callable[[], tuple], timeout: float = 15.0, store_factory: Callable = None) -> List[str]:
+    """The behaviour every BaseMessageBroker adapter keeps, and the exactly-once guarantees
+    IdempotentConsumer builds on it. ``make()`` returns ``(broker, destination, source)`` for a
+    FRESH, EMPTY destination whose messages arrive at ``source`` (a queue: the same name; a
+    topic: its subscription). ``store_factory()`` returns an empty BaseIdempotencyStore
+    (default: the in-memory reference store). Waits are bounded by ``timeout`` seconds."""
+    from .messaging import BrokerOutboxSweeper, IdempotentConsumer, InMemoryOutboxStore
+    if store_factory is None:
+        from e2a_inmemory_adapters import InMemoryIdempotencyStore as store_factory
+    r = _Run('message broker')
+    quiet = min(timeout, 2.0)
+
+    def take(broker, source, n=1, dead=False):
+        def once():
+            got = (broker.receive_dead_letters(source, max_messages=n) if dead
+                   else broker.receive(source, max_messages=n, wait_seconds=1.0))
+            return got
+        return _poll(once, timeout)
+
+    # 1. a message arrives intact, and an acknowledged one never comes back
+    broker, dest, source = make()
+    attrs = {'tenant_id': 't1', 'idempotency_key': _key('k'), 'kind': 'order.created'}
+    mid = broker.publish(dest, VALUE, attrs)
+    got = take(broker, source)
+    r.check('a published message is received', len(got) == 1, str(got))
+    m = got[0]
+    r.check('the body round-trips exactly', m.body == VALUE, str(m.body))
+    r.check('the attributes round-trip', all(m.attributes.get(k) == v for k, v in attrs.items()), str(m.attributes))
+    r.check('the message has an id, and the publish returned one', bool(m.id) and bool(mid))
+    broker.ack(source, m)
+    r.check('an acknowledged message is not delivered again',
+            not _poll(lambda: broker.receive(source, max_messages=1, wait_seconds=0.5), quiet))
+
+    # 2. a nacked message is delivered again, with a higher count where the broker counts
+    broker, dest, source = make()
+    broker.publish(dest, {'n': 1}, {'tenant_id': 't1', 'idempotency_key': _key('k')})
+    first = take(broker, source)[0]
+    broker.nack(source, first, 0)
+    again = take(broker, source)
+    r.check('a nacked message is delivered again', len(again) == 1 and again[0].body == {'n': 1}, str(again))
+    if first.delivery_count is not None:
+        r.check('the delivery count grows', (again[0].delivery_count or 0) > first.delivery_count,
+                f'{first.delivery_count} -> {again[0].delivery_count}')
+    broker.ack(source, again[0])
+
+    # 3. dead letters: out of the source, into its dead letters with the reason, then settled
+    broker, dest, source = make()
+    broker.publish(dest, {'bad': True}, {'tenant_id': 't1', 'idempotency_key': _key('k')})
+    m = take(broker, source)[0]
+    broker.dead_letter(source, m, 'poison: schema')
+    r.check('a dead-lettered message leaves the source',
+            not _poll(lambda: broker.receive(source, max_messages=1, wait_seconds=0.5), quiet))
+    dl = take(broker, source, dead=True)
+    r.check('it is among the dead letters, with the reason',
+            len(dl) == 1 and dl[0].body == {'bad': True} and 'poison' in dl[0].attributes.get('dead_letter_reason', ''),
+            str(dl))
+    broker.ack_dead_letter(source, dl[0])
+    r.check('a settled dead letter is gone',
+            not _poll(lambda: broker.receive_dead_letters(source, max_messages=1), quiet))
+
+    # 4-7. the consumer's guarantees, on this broker
+    class Effects(IdempotentConsumer):
+        def __init__(self, broker, store, source, behaviour, truth=PhysicalOutcome.UNKNOWN):
+            super().__init__(broker, store, source)
+            self.behaviour, self.truth, self.effects = behaviour, truth, []
+
+        def _handle(self, message, config, tenant_id, idempotency_key):
+            return self.behaviour(self, message)
+
+        def _confirm(self, message, config):
+            return self.truth
+
+    def commit(c, message):
+        c.effects.append(message.body)
+        return {'physical_success': True}
+
+    def drain(consumer):
+        reports = []
+        for _ in range(4):
+            got = _poll(lambda: consumer.consume(config={'consumer_retry_delay_seconds': 0}), quiet,
+                        until=lambda rep: rep['received'] > 0)
+            reports.append(got)
+            if not got['received']:
+                break
+        return reports
+
+    broker, dest, source = make()
+    key = _key('dup')
+    for _ in range(2):                                        # the same message, delivered twice
+        broker.publish(dest, {'order': 'A'}, {'tenant_id': 't1', 'idempotency_key': key})
+    consumer = Effects(broker, store_factory(), source, commit)
+    reports = drain(consumer)
+    r.check('a duplicate delivery has its effect once', consumer.effects == [{'order': 'A'}], str(consumer.effects))
+    r.check('the duplicate is acknowledged as a duplicate', sum(x['duplicates'] for x in reports) == 1, str(reports))
+
+    class LostAck:                                             # the ack never reaches the broker
+        def __init__(self, inner):
+            self.inner, self.lost = inner, 0
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def ack(self, source, message, config=None):
+            if not self.lost:
+                self.lost += 1
+                return self.inner.nack(source, message, 0, config)
+            return self.inner.ack(source, message, config)
+
+    inner, dest, source = make()
+    inner.publish(dest, {'order': 'B'}, {'tenant_id': 't1', 'idempotency_key': _key('ack')})
+    consumer = Effects(LostAck(inner), store_factory(), source, commit)
+    reports = drain(consumer)
+    r.check('a lost acknowledgement does not repeat the effect', consumer.effects == [{'order': 'B'}],
+            f'{consumer.effects} {reports}')
+
+    def poison(c, message):
+        raise ValueError('amount is not a number')
+
+    class Settles:                                             # counts the dead letters settled
+        def __init__(self, inner):
+            self.inner, self.settled = inner, 0
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def ack_dead_letter(self, source, message, config=None):
+            self.settled += 1
+            return self.inner.ack_dead_letter(source, message, config)
+
+    inner, dest, source = make()
+    broker = Settles(inner)
+    broker.publish(dest, {'order': 'C'}, {'tenant_id': 't1', 'idempotency_key': _key('poison')})
+    consumer = Effects(broker, store_factory(), source, poison)
+    reports = drain(consumer)
+    r.check('a poison message is dead-lettered with its reason, not retried',
+            sum(x['dead_lettered'] for x in reports) == 1 and sum(x['retried'] for x in reports) == 0
+            and 'ValueError' in ' '.join(sum((x['dead_letter_reasons'] for x in reports), [])), str(reports))
+    rec = _poll(lambda: consumer.reconcile({}), timeout, until=lambda rep: bool(consumer.settlements))
+    r.check('reconcile sees the poison message and never replays it',
+            rec['replayed'] == 0 and consumer.settlements[-1][1] == 'SKIPPED_FAILED_FINAL', f'{rec} {consumer.settlements}')
+    r.check('the poison message is not settled: it stays among the dead letters for a person',
+            broker.settled == 0, str(rec))
+
+    def unknown(c, message):
+        if c.behaviour_state.get('first', True):
+            c.behaviour_state['first'] = False
+            return {'physical_success': False, 'outcome': PhysicalOutcome.UNKNOWN}
+        c.effects.append(message.body)
+        return {'physical_success': True}
+
+    for truth, expect_effects, label in ((PhysicalOutcome.NOT_COMMITTED, 1, 'replayed once'),
+                                         (PhysicalOutcome.COMMITTED, 0, 'settled without a replay')):
+        inner, dest, source = make()
+        broker = Settles(inner)
+        broker.publish(dest, {'order': 'D'}, {'tenant_id': 't1', 'idempotency_key': _key('unknown')})
+        consumer = Effects(broker, store_factory(), source, unknown, truth)
+        consumer.behaviour_state = {}
+        drain(consumer)
+        r.check('an UNKNOWN outcome is dead-lettered, never retried blindly', consumer.effects == [],
+                str(consumer.effects))
+        rec = _poll(lambda: consumer.reconcile({}), timeout, until=lambda rep: bool(consumer.settlements))
+        r.check(f'reconcile confirms first: {truth.value} is {label}', len(consumer.effects) == expect_effects,
+                f'{consumer.effects} {rec} {consumer.settlements}')
+        r.check(f'the dead letter is settled ({truth.value})', broker.settled == 1,
+                f'{consumer.settlements}')
+
+    # 8. the outbox: published once, with the attributes a consumer deduplicates on
+    broker, dest, source = make()
+    outbox = InMemoryOutboxStore()
+    outbox.add({'destination': dest, 'body': {'order': 'E'}, 'tenant_id': 't1', 'idempotency_key': _key('outbox')})
+    outbox.add({'destination': dest, 'body': {'order': 'F'}, 'tenant_id': None, 'idempotency_key': None})
+    sweep = BrokerOutboxSweeper(outbox, broker).sweep({})
+    r.check('the outbox publishes a record a consumer can deduplicate, and refuses one it could not',
+            sweep['published'] == 1 and len(sweep['failed_keys']) == 1, str(sweep))
+    r.check('a second sweep publishes nothing new', BrokerOutboxSweeper(outbox, broker).sweep({})['published'] == 0)
+    consumer = Effects(broker, store_factory(), source, commit)
+    drain(consumer)
+    r.check('the published record is consumed once', consumer.effects == [{'order': 'E'}], str(consumer.effects))
+    return r.passed
+
+
+def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None, llm_service=None,
+              message_broker=None) -> dict:
     """Run the suites for the factories given; returns {port: [passed scenario names]}."""
     out = {}
     for name, fn, make in (('idempotency', check_idempotency_store, idempotency),
                            ('transactional', check_transactional_store, transactional),
                            ('lease', check_lease, lease), ('checkpoint', check_checkpoint_store, checkpoint),
-                           ('llm_service', check_llm_service, llm_service)):
+                           ('llm_service', check_llm_service, llm_service),
+                           ('message_broker', check_message_broker, message_broker)):
         if make is not None:
             out[name] = fn(make)
     return out
