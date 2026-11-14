@@ -25,6 +25,13 @@ a separate distribution at this tag (`pip install "e2a-adapters[aws,gcp,azure] @
 pick the extras you need).
 Every adapter passes the port contract kit, `e2a.port_contract`.
 
+**Managed AI services (a separate repository):** models, embeddings, vector search, rerankers,
+guardrails and agent runtimes from Anthropic, OpenAI, Google and Meta, on AWS, Azure and Google
+Cloud, live in [e2a-managed-providers](https://github.com/subhamviky/e2a-managed-providers). Its
+profiles extend the cloud profiles above and pass E2A's model contract (`check_llm_service`).
+They are kept apart from E2A because they change at the providers' pace, while E2A stays
+vendor-neutral (`tests/test_neutrality.py`).
+
 **Java (e2a-java, since v1.2.2):** the same contracts for Java 21 in [`java/`](java/README.md) —
 `e2a-core`, `e2a-cqrs`, `e2a-spring-jpa`, `e2a-test`, at this tag's version. There is no package
 registry: a service's CI builds it from the tag (`mvn -f java/pom.xml install -DskipTests`).
