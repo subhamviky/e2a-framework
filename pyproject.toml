@@ -25,8 +25,8 @@ Repository = "https://github.com/subhamviky/e2a-framework"
 # import names (`from e2a_base import BaseAgent`), so A2C, G2C output and
 # existing code keep working unchanged.
 package-dir = { "" = "reference" }
-packages = ["e2a"]
-package-data = { e2a = ["profiles/*.json"] }
+packages = ["e2a", "e2a.profiles"]
+package-data = { "e2a.profiles" = ["*.json"] }
 py-modules = [
     "e2a_base",
     "e2a_cqrs_base",
