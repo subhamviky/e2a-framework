@@ -26,7 +26,7 @@ def test_each_cloud_profile_binds_and_verifies_offline(cloud):
     b = bindings_from_profile(cloud, verify=True)
     config = b.config()
     for seam in ('idempotency_store', 'checkpoint_store', 'transactional_store', 'lease', 'message_broker',
-                 'credential_provider', 'identity_resolver'):
+                 'outbox_store', 'credential_provider', 'identity_resolver'):
         assert config.get(seam) is not None, seam
     assert config['profile_settings']['identity_claim_map'] == PRESETS[CLOUDS[cloud]]
     assert b.warnings == [] and b.profile.literal_secrets == []

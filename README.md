@@ -12,16 +12,16 @@ It focuses on the boundary where probabilistic reasoning meets deterministic ent
 
 ## Install
 
-    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.0"
+    pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.1"
 
-Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.7.0" }`.
+Poetry: `e2a-framework = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.7.1" }`.
 The framework is the `e2a` package (`from e2a import BaseAgent, BaseWorkflow, Steps, Step`); the release
 gate is `from e2a.release import ProjectReleaseGate`; the `e2a_base` module re-exports the same names. Since v1.3 hooks use the v1.2 signature (`state, ctx, …`).
 
 **Production adapters (e2a-adapters, since v1.4.0):** DynamoDB (v1.4.0), Firestore and Cosmos DB (v1.5.0)
 implementations of the idempotency, transactional, lease and checkpoint ports; since v1.7.0 also the brokers
 (SQS/SNS, Pub/Sub, Service Bus), the secret stores and the cloud profiles `aws`, `gcp`, `azure`, in [`adapters/`](adapters/README.md),
-a separate distribution at this tag (`pip install "e2a-adapters[aws,gcp,azure] @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.0#subdirectory=adapters"`;
+a separate distribution at this tag (`pip install "e2a-adapters[aws,gcp,azure] @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.1#subdirectory=adapters"`;
 pick the extras you need).
 Every adapter passes the port contract kit, `e2a.port_contract`.
 
@@ -33,6 +33,7 @@ registry: a service's CI builds it from the tag (`mvn -f java/pom.xml install -D
 
 | e2a-framework | a2c-framework | capability-oriented-dsa |
 |---|---|---|
+| `v1.7.1` (durable outbox stores on DynamoDB, Firestore and Cosmos DB, with an outbox contract; Pub/Sub SDK imported on first use; the default temperature no longer warns) | `v1.4.0` | `v0.2.x`, `v0.3.x` |
 | `v1.7.0` (messaging with exactly-once effects, identity at ingress, the literal-secret rule; e2a-adapters `1.7.0`: brokers, secret stores, cloud profiles; e2a-java `1.7.0`) | `v1.4.0` | `v0.2.x`, `v0.3.x` |
 | `v1.6.1` (vendor-neutral handling for managed providers: model routes, structured-output checks, scopes, telemetry and cost, adaptive admission, delegated runtimes, reranker port, classifier guardrails, pipeline and MCP checks; the neutrality test) | `v1.3.0` | `v0.2.x`, `v0.3.x` |
 | `v1.6.0` (contracts for managed providers: canonical types, typed refusals, bindings and profiles, capabilities, credentials, `check_llm_service`) | `v1.3.0` | `v0.2.x`, `v0.3.x` |

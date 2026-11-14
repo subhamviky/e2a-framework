@@ -50,6 +50,8 @@ KEYS = [
     ConfigKey('servicebus_namespace', 'SERVICEBUS_NAMESPACE', None, str, _GROUP, 'ServiceBusBroker — <namespace>.servicebus.windows.net, with Entra ID'),
     ConfigKey('servicebus_connection_string', 'SERVICEBUS_CONNECTION_STRING', None, str, _GROUP, 'ServiceBusBroker — a connection string (the emulator); unset in the cloud', secret=True),
     ConfigKey('keyvault_url', 'KEYVAULT_URL', None, str, _GROUP, 'KeyVaultCredentialProvider — https://<vault>.vault.azure.net'),
+    # the outbox (v1.7.1), every cloud
+    ConfigKey('outbox_name', 'E2A_OUTBOX_NAME', 'default', str, _GROUP, 'the outbox stores — one service\'s outbox; several names spread the load'),
     # secrets as tool credentials (N2), every cloud
     ConfigKey('secret_headers', 'E2A_SECRET_HEADERS', [], _list, _GROUP, '[{target, secret, header, prefix, json_key}] — the header a tool call to <target> carries, read from a secret store'),
     ConfigKey('secret_cache_seconds', 'E2A_SECRET_CACHE_SECONDS', 300, int, _GROUP, 'secret-backed credential providers — how long a secret value is reused'),

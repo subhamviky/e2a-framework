@@ -24,7 +24,7 @@ from .core import (AdmissionTimeout, Deadline, DeadlineExceeded, DehydrationInte
 from .llm_types import ModelResult
 from .capabilities import capabilities_of
 from .schema_check import schema_errors
-from .config import resolve_config
+from .config import is_set, resolve_config
 from .resilience import ResiliencePolicy
 from ._propagation import _PropagationMixin
  
@@ -340,7 +340,9 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                     f'{type(self).__name__} declares no structured output: bind a service that does, '
                     f'or list "structured_output" in the profile features so verify() refuses it at startup')
             if temperature is not None and features.get('sampling') == 'unsupported':
-                note('param_dropped', param='temperature', reason='sampling unsupported by the bound model')
+                # v1.7.1: warn only when someone set a temperature; the registry default is not a choice
+                if is_set('temperature', cfg, kwargs):
+                    note('param_dropped', param='temperature', reason='sampling unsupported by the bound model')
                 temperature = None
             effort = self._resolve_param('reasoning_effort', cfg, kwargs)
             if effort is not None:

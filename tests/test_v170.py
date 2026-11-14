@@ -162,3 +162,9 @@ def test_the_infrastructure_seams_reach_the_config():
     broker = InMemoryBroker()
     b = bindings_from_profile(Profile(name='p', provider='x'), overrides={'message_broker': broker})
     assert b.config()['message_broker'] is broker
+
+
+def test_the_reference_outbox_meets_the_outbox_contract():
+    from e2a import InMemoryOutboxStore
+    from e2a.port_contract import check_outbox_store
+    assert len(check_outbox_store(InMemoryOutboxStore)) == 11

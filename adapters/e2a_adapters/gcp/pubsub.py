@@ -24,10 +24,10 @@ class PubSubBroker(BaseMessageBroker):
     capabilities = frozenset({'messaging', 'dead_letter'})
 
     def __init__(self, project: str, publisher=None, subscriber=None, dead_letter_suffix: str = '-dlq') -> None:
-        from google.cloud import pubsub_v1
+        # v1.7.1: the SDK is imported on first use, so a profile binds without it installed
         self.project, self.suffix = project, dead_letter_suffix
-        self.publisher = publisher or Lazy(pubsub_v1.PublisherClient)
-        self.subscriber = subscriber or Lazy(pubsub_v1.SubscriberClient)
+        self.publisher = publisher or Lazy(lambda: __import__('google.cloud.pubsub_v1', fromlist=['x']).PublisherClient())
+        self.subscriber = subscriber or Lazy(lambda: __import__('google.cloud.pubsub_v1', fromlist=['x']).SubscriberClient())
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'PubSubBroker':

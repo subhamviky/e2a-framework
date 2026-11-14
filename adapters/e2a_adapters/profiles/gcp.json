@@ -2,7 +2,7 @@
   "name": "gcp",
   "provider": "cloud-infrastructure",
   "cloud": "gcp",
-  "description": "Google Cloud infrastructure for E2A: Firestore claims, rows, leases and checkpoints; Pub/Sub messaging with dead letters; Secret Manager for tool credentials; Identity Platform claims at ingress. A provider profile extends it.",
+  "description": "Google Cloud infrastructure for E2A: Firestore claims, rows, leases and checkpoints; Pub/Sub messaging with dead letters and a transactional outbox; Secret Manager for tool credentials; Identity Platform claims at ingress. A provider profile extends it.",
   "bindings": {
     "idempotency_store": "e2a_adapters.gcp:FirestoreIdempotencyStore",
     "checkpoint_store": "e2a_adapters.gcp:FirestoreCheckpointStore",
@@ -10,7 +10,8 @@
     "lease": "e2a_adapters.gcp:FirestoreLease",
     "message_broker": "e2a_adapters.gcp:PubSubBroker",
     "credential_provider": "e2a_adapters.gcp:SecretManagerCredentialProvider",
-    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver"
+    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver",
+    "outbox_store": "e2a_adapters.gcp:FirestoreOutboxStore"
   },
   "config": {
     "gcp_project": "${GOOGLE_CLOUD_PROJECT}",
@@ -22,7 +23,8 @@
       "subject": "sub",
       "roles": "roles",
       "issuer": "iss"
-    }
+    },
+    "outbox_name": "${E2A_OUTBOX_NAME:-default}"
   },
   "features": [
     "idempotency_store",
@@ -32,6 +34,7 @@
     "messaging",
     "dead_letter",
     "secret_store",
-    "identity"
+    "identity",
+    "outbox_store"
   ]
 }

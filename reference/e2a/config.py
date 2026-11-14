@@ -350,6 +350,17 @@ def scoped_config(config: Optional[Dict[str, Any]], agent_name: Optional[str] = 
     return out
 
 
+def is_set(key: str, config: Optional[Dict[str, Any]] = None, kwargs: Optional[Dict[str, Any]] = None) -> bool:
+    """v1.7.1: whether a key has a value from a keyword, the config, the environment or the
+    profile, rather than only its registered default. E.g. warn about dropping a parameter only
+    when someone chose it."""
+    spec = E2A_CONFIG[key]
+    profile = (config or {}).get('profile_settings') or {}
+    return ((kwargs or {}).get(key) is not None or (config or {}).get(key) is not None
+            or bool(spec.env and os.getenv(spec.env) is not None)
+            or (isinstance(profile, dict) and profile.get(key) is not None))
+
+
 def unknown_config_keys(config: Optional[Dict[str, Any]]) -> List[str]:
     """Keys in a config dict that are neither registered nor io_ prefixed —
     a typo guard to call at start-up."""

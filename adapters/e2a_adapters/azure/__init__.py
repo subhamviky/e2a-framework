@@ -2,12 +2,14 @@
 
     Cosmos*                      claims, rows, leases, checkpoints
     ServiceBusBroker             messaging, with native dead letters
+    CosmosOutboxStore            the transactional outbox (v1.7.1)
     KeyVaultCredentialProvider   tool credentials from Key Vault
 """
 from .cosmos import (CosmosBackend, CosmosCheckpointStore, CosmosIdempotencyStore, CosmosLease,
                      CosmosTransactionalStore)
 from .keyvault import KeyVaultCredentialProvider
+from .outbox import CosmosOutboxStore
 from .servicebus import ServiceBusBroker
 
 __all__ = ['CosmosBackend', 'CosmosIdempotencyStore', 'CosmosTransactionalStore', 'CosmosLease',
-           'CosmosCheckpointStore', 'ServiceBusBroker', 'KeyVaultCredentialProvider']
+           'CosmosCheckpointStore', 'ServiceBusBroker', 'KeyVaultCredentialProvider', 'CosmosOutboxStore']

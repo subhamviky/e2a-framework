@@ -2,12 +2,14 @@
 
     DynamoDB*            claims, rows, leases, checkpoints
     SQSBroker            messaging (SQS queues, SNS topics), with dead letters
+    DynamoDBOutboxStore  the transactional outbox (v1.7.1)
     SecretsManagerCredentialProvider   tool credentials from Secrets Manager
 """
 from .dynamodb import (MAX_VALUE_BYTES, DynamoDBCheckpointStore, DynamoDBIdempotencyStore, DynamoDBLease,
                        DynamoDBTransactionalStore, is_condition_failure)
+from .outbox import DynamoDBOutboxStore
 from .secrets import SecretsManagerCredentialProvider
 from .sqs import SQSBroker
 
 __all__ = ['DynamoDBIdempotencyStore', 'DynamoDBTransactionalStore', 'DynamoDBLease', 'DynamoDBCheckpointStore',
-           'MAX_VALUE_BYTES', 'is_condition_failure', 'SQSBroker', 'SecretsManagerCredentialProvider']
+           'MAX_VALUE_BYTES', 'is_condition_failure', 'SQSBroker', 'SecretsManagerCredentialProvider', 'DynamoDBOutboxStore']

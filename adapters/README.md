@@ -14,7 +14,7 @@ An application chooses its cloud by naming a profile; every adapter is built fro
 from e2a import bindings_from_profile
 bindings = bindings_from_profile("aws", verify=True)      # or "gcp", "azure"; or E2A_PROVIDER_PROFILE
 config = bindings.config()     # idempotency_store, checkpoint_store, transactional_store, lease,
-                               # message_broker, credential_provider, identity_resolver
+                               # message_broker, outbox_store (1.7.1), credential_provider, identity_resolver
 ```
 
 | Profile | Stores | Messaging | Tool credentials | Identity claims |
@@ -42,6 +42,7 @@ Clients are created on first use, so a profile binds and verifies without creden
 | Google Pub/Sub (since 1.7.0) | `e2a-adapters[gcp]` | `PubSubBroker`: topics and subscriptions, a `<subscription>-dlq` topic and subscription |
 | Azure Service Bus (since 1.7.0) | `e2a-adapters[azure]` | `ServiceBusBroker`: queues, topic subscriptions, the native dead-letter subqueue |
 | Secret stores (since 1.7.0) | per cloud | `SecretsManagerCredentialProvider`, `SecretManagerCredentialProvider`, `KeyVaultCredentialProvider`: tool auth headers from `secret_headers` |
+| Outbox stores (since 1.7.1) | per cloud | `DynamoDBOutboxStore` (`transact_item` for your TransactWriteItems), `FirestoreOutboxStore` (`add(..., transaction=)`), `CosmosOutboxStore` (`batch_operation` for your transactional batch, in the business document's partition) |
 | Identity presets (since 1.7.0) | – | `e2a_adapters.identity.PRESETS`: the claim maps of Cognito, Entra ID and Identity Platform |
 
 Firestore and Cosmos DB share one implementation of the ports, `e2a_adapters.cas`. It works over any document store that can create-if-absent and replace-if-unchanged (an update time, an ETag), and each database supplies only a small `CasBackend`. PostgreSQL would be a third backend.
@@ -51,15 +52,15 @@ Firestore and Cosmos DB share one implementation of the ports, `e2a_adapters.cas
 The version follows E2A. Install e2a-framework from its tag first, as every project already does:
 
 ```bash
-pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.0" \
-            "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.0#subdirectory=adapters"
+pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.1" \
+            "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.1#subdirectory=adapters"
 ```
 
 Poetry:
 
 ```toml
-"e2a-framework" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.7.0" }
-"e2a-adapters" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.7.0", subdirectory = "adapters", extras = ["aws"] }
+"e2a-framework" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.7.1" }
+"e2a-adapters" = { git = "https://github.com/subhamviky/e2a-framework.git", tag = "v1.7.1", subdirectory = "adapters", extras = ["aws"] }
 ```
 
 ## DynamoDB

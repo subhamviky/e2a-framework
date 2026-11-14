@@ -2,7 +2,7 @@
   "name": "azure",
   "provider": "cloud-infrastructure",
   "cloud": "azure",
-  "description": "Azure infrastructure for E2A: Cosmos DB claims, rows, leases and checkpoints; Service Bus messaging with native dead letters; Key Vault for tool credentials; Entra ID claims at ingress. A provider profile extends it.",
+  "description": "Azure infrastructure for E2A: Cosmos DB claims, rows, leases and checkpoints; Service Bus messaging with native dead letters and a transactional outbox; Key Vault for tool credentials; Entra ID claims at ingress. A provider profile extends it.",
   "bindings": {
     "idempotency_store": "e2a_adapters.azure:CosmosIdempotencyStore",
     "checkpoint_store": "e2a_adapters.azure:CosmosCheckpointStore",
@@ -10,7 +10,8 @@
     "lease": "e2a_adapters.azure:CosmosLease",
     "message_broker": "e2a_adapters.azure:ServiceBusBroker",
     "credential_provider": "e2a_adapters.azure:KeyVaultCredentialProvider",
-    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver"
+    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver",
+    "outbox_store": "e2a_adapters.azure:CosmosOutboxStore"
   },
   "config": {
     "cosmos_endpoint": "${COSMOS_ENDPOINT}",
@@ -25,7 +26,8 @@
       "subject": "oid",
       "roles": "roles",
       "issuer": "iss"
-    }
+    },
+    "outbox_name": "${E2A_OUTBOX_NAME:-default}"
   },
   "features": [
     "idempotency_store",
@@ -35,6 +37,7 @@
     "messaging",
     "dead_letter",
     "secret_store",
-    "identity"
+    "identity",
+    "outbox_store"
   ]
 }

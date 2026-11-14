@@ -2,7 +2,7 @@
   "name": "aws",
   "provider": "cloud-infrastructure",
   "cloud": "aws",
-  "description": "AWS infrastructure for E2A: DynamoDB claims, rows, leases and checkpoints; SQS/SNS messaging with dead letters; Secrets Manager for tool credentials; Cognito claims at ingress. A provider profile extends it.",
+  "description": "AWS infrastructure for E2A: DynamoDB claims, rows, leases and checkpoints; SQS/SNS messaging with dead letters and a transactional outbox; Secrets Manager for tool credentials; Cognito claims at ingress. A provider profile extends it.",
   "bindings": {
     "idempotency_store": "e2a_adapters.aws:DynamoDBIdempotencyStore",
     "checkpoint_store": "e2a_adapters.aws:DynamoDBCheckpointStore",
@@ -10,7 +10,8 @@
     "lease": "e2a_adapters.aws:DynamoDBLease",
     "message_broker": "e2a_adapters.aws:SQSBroker",
     "credential_provider": "e2a_adapters.aws:SecretsManagerCredentialProvider",
-    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver"
+    "identity_resolver": "e2a.identity:ClaimMapIdentityResolver",
+    "outbox_store": "e2a_adapters.aws:DynamoDBOutboxStore"
   },
   "config": {
     "aws_region": "${AWS_REGION:-us-east-1}",
@@ -24,7 +25,8 @@
       "subject": "sub",
       "roles": "cognito:groups",
       "issuer": "iss"
-    }
+    },
+    "outbox_name": "${E2A_OUTBOX_NAME:-default}"
   },
   "features": [
     "idempotency_store",
@@ -34,6 +36,7 @@
     "messaging",
     "dead_letter",
     "secret_store",
-    "identity"
+    "identity",
+    "outbox_store"
   ]
 }

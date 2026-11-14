@@ -28,7 +28,7 @@ from typing import Callable, List
 from .core import ClaimStatus, PhysicalOutcome
 
 __all__ = ['FakeClock', 'check_idempotency_store', 'check_transactional_store', 'check_lease',
-           'check_checkpoint_store', 'check_llm_service', 'check_message_broker', 'check_all']
+           'check_checkpoint_store', 'check_llm_service', 'check_message_broker', 'check_outbox_store', 'check_all']
 
 VALUE = {'amount': '100.25', 'count': 3, 'ratio': 0.5, 'ok': True, 'none': None,
          'nested': {'items': ['a', 'b'], 'unicode': 'Zürich €'}}
@@ -549,15 +549,55 @@ def check_message_broker(make: Callable[[], tuple], timeout: float = 15.0, store
     return r.passed
 
 
+# ------------------------------------------------------------ outbox (v1.7.1)
+def check_outbox_store(make: Callable[[], object], race: int = 8) -> List[str]:
+    """The behaviour every BaseOutboxStore adapter keeps. ``make()`` returns a FRESH, EMPTY
+    outbox. ``race`` threads mark one record published at once; exactly one may win."""
+    r = _Run('outbox store')
+    outbox = make()
+    rid = outbox.add({'destination': 'orders', 'body': VALUE, 'attributes': {'kind': 'order.created'},
+                      'tenant_id': 't1', 'idempotency_key': 'k-1'})
+    [rec] = outbox.pending(10)
+    r.check('a record is pending once added, under the id add() returned', bool(rid) and rec['id'] == rid, str(rec))
+    r.check('the record round-trips exactly',
+            (rec['destination'], rec['body'], rec['attributes'], rec['tenant_id'], rec['idempotency_key'])
+            == ('orders', VALUE, {'kind': 'order.created'}, 't1', 'k-1'), str(rec))
+    r.check('mark_published removes it from pending', outbox.mark_published(rid) is True and outbox.pending(10) == [])
+    r.check('marking it again is refused', outbox.mark_published(rid) is False)
+    r.check('an unknown id is refused', outbox.mark_published('no-such-record') is False)
+
+    outbox = make()
+    ids = [outbox.add({'destination': 'd', 'body': {'n': n}, 'tenant_id': 't1', 'idempotency_key': f'k{n}'})
+           for n in range(3)]
+    r.check('pending is oldest first', [x['id'] for x in outbox.pending(10)] == ids, str(outbox.pending(10)))
+    r.check('pending honours the limit', [x['id'] for x in outbox.pending(2)] == ids[:2])
+
+    outbox = make()
+    a, b, c = (outbox.add({'destination': 'd', 'body': {'n': n}, 'tenant_id': 't1', 'idempotency_key': f'f{n}'})
+               for n in range(3))
+    r.check('a sweeper with a fencing token may mark', outbox.mark_published(a, fencing_token=5) is True)
+    r.check('a stale sweeper (older token) may not',
+            outbox.mark_published(b, fencing_token=3) is False and b in [x['id'] for x in outbox.pending(10)])
+    r.check('a newer token may', outbox.mark_published(c, fencing_token=6) is True)
+
+    if race >= 2:
+        outbox = make()
+        rid = outbox.add({'destination': 'd', 'body': {}, 'tenant_id': 't1', 'idempotency_key': 'race'})
+        wins = _race(race, lambda i: outbox.mark_published(rid))
+        r.check(f'{race} sweepers marking one record: exactly one wins', wins.count(True) == 1, str(wins))
+    return r.passed
+
+
 def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None, llm_service=None,
-              message_broker=None) -> dict:
+              message_broker=None, outbox=None) -> dict:
     """Run the suites for the factories given; returns {port: [passed scenario names]}."""
     out = {}
     for name, fn, make in (('idempotency', check_idempotency_store, idempotency),
                            ('transactional', check_transactional_store, transactional),
                            ('lease', check_lease, lease), ('checkpoint', check_checkpoint_store, checkpoint),
                            ('llm_service', check_llm_service, llm_service),
-                           ('message_broker', check_message_broker, message_broker)):
+                           ('message_broker', check_message_broker, message_broker),
+                           ('outbox', check_outbox_store, outbox)):
         if make is not None:
             out[name] = fn(make)
     return out
