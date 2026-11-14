@@ -63,6 +63,25 @@ class BaseObservability(ABC):
             for log in enriched_logs:
                 logging.info(log)
  
+    def record_inference(self, attributes: Dict[str, Any], config: Dict[str, Any] = None, **kwargs) -> None:
+        """Public (v1.6.1, P12): one model call, as BaseLLMAgentService describes it (tenant,
+        agent, step, status, model, tokens, cost_usd, fallback, refusal). Emits
+        e2a.llm.inference_total, e2a.llm.tokens and e2a.llm.cost_usd through the metric hooks;
+        never raises into the request path."""
+        try:
+            dims = {k: attributes.get(a) for k, a in (('tenant_id', 'e2a.tenant_id'), ('agent', 'e2a.agent'),
+                                                      ('status', 'e2a.status'), ('model', 'gen_ai.request.model'))
+                    if attributes.get(a) is not None}
+            self._emit_counter('e2a.llm.inference_total', 1, dims, config, **kwargs)
+            for direction in ('input', 'output'):
+                tokens = attributes.get(f'gen_ai.usage.{direction}_tokens')
+                if tokens is not None:
+                    self._emit_histogram('e2a.llm.tokens', float(tokens), {**dims, 'direction': direction}, config, **kwargs)
+            if attributes.get('e2a.cost_usd') is not None:
+                self._emit_counter('e2a.llm.cost_usd', float(attributes['e2a.cost_usd']), dims, config, **kwargs)
+        except Exception as e:
+            logging.error(f'record_inference failed: {e}')
+
     def __extract_metrics(self, enriched_logs: List[dict]) -> Dict[str, float]:
         # Base-owned, never overridden. Single pass: counts ERROR-level
         # entries into error_count, sums any tokens_used field into

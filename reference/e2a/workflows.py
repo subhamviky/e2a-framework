@@ -27,7 +27,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from typing import Mapping, Sequence
 
 from .core import ClaimStatus, Deadline, DehydrationInterrupt, PhysicalOutcome, _DETERMINISTIC_ERRORS
-from .config import resolve_config
+from .config import resolve_config, scoped_config
 from ._propagation import _PropagationMixin
 from ._contract import call_hook, declares_ctx
 from .context import MessageLog, RequestContext
@@ -143,6 +143,7 @@ class BaseWorkflow(ABC, _PropagationMixin):
         tenant_id = given_ctx.tenant_id if given_ctx else state.get('tenant_id')
         if not tenant_id:
             raise ValueError('state["tenant_id"] is required')
+        config = scoped_config(config, tenant_id=tenant_id)     # v1.6.1 (P3): the tenant's overlay
         if given_ctx:
             kwargs.setdefault('correlation_id', given_ctx.correlation_id)
             if given_ctx.idempotency_key:

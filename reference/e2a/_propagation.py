@@ -99,6 +99,7 @@ class _PropagationMixin:
         """Awaitable bridge for async callers (orchestrators, tests)."""
         svc = self._resolve_llm_service(config, **kwargs)
         kwargs.pop('llm_service', None)
+        kwargs.setdefault('agent_name', getattr(self, 'agent_name', type(self).__name__))   # v1.6.1: telemetry
         result = await svc.process_inference(messages, config, **kwargs)
         if result.get('status') == 'FAILED':
             raise RuntimeError(f"LLM inference failed: {result.get('error')}")

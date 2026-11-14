@@ -2,6 +2,49 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.6.1 — Vendor-neutral handling for managed providers (design note MP-04)
+
+What a managed deployment needs from E2A, selected by configuration, capabilities and the
+`features` map — never by a provider name. A test now enforces it (`tests/test_neutrality.py`):
+`e2a` imports no vendor SDK and compares nothing with a vendor name. Vendor handling stays in
+the provider layer (e2a-managed-providers); e2a-adapters gets the matching boundary test (no
+model-provider SDK). Additive: no signature changes, and with the new keys at their defaults a
+v1.6.0 deployment behaves as before (one exception, the secret scan, is under **Changed**).
+
+### Added
+- **Model routes (P8):** `model_routes = [{on: [error kinds | "refusal"], to: model_id, llm_service, max_attempts}]`.
+  - A `FAILED` call whose `error_kind` (new on the payload) matches, or a `REFUSED` one, is answered once by the route's model or bound service; the result carries `fallback_from` and leaves no failed key.
+  - A route never routes again. A service that declares `refusal_fallback_server` (new capability) falls back on its own side, so E2A takes no refusal route for it.
+  - In a profile, `"@<seam>"` names a bound object (`"@delegated_runtime"`); `Bindings.config()` resolves it.
+- **Features and structured output (P9):** a bound service declares `features` (or `_features_for(config)`): `structured_output: none` refuses a response schema (`StructuredOutputUnsupported`); `sampling: unsupported` drops temperature; `reasoning: none` drops `reasoning_effort` (each logged `param_dropped`).
+  - `reasoning_effort` is one vocabulary: `minimal | low | medium | high | max`.
+  - **Every structured result is checked** against the schema it was asked for (`e2a.schema_check`, no new dependency): `structured_output_valid`, `schema_errors`. `structured_output_strict` turns a mismatch into `FAILED` (`StructuredOutputInvalid`).
+- **Telemetry and cost (P12):** each result is described once (tenant, correlation, agent, workflow step, status, refusal, fallback, GenAI model and token attributes) through the hook `_record_telemetry`.
+  - The default sets them on the active OpenTelemetry span when the API is installed, and passes them to a bound `observability_engine.record_inference` (new on `BaseObservability`: `e2a.llm.inference_total`, `e2a.llm.tokens`, `e2a.llm.cost_usd` through the metric hooks).
+  - `model_price_table` adds `cost_usd`. Agents name themselves to the service.
+- **Adaptive admission and the quota authority (P7 b, N10):** a provider throttle lowers the pod's admission share (`admission_throttle_decay`, down to `admission_throttle_floor`) and it recovers over `admission_recovery_seconds`, so callers get E2A's typed `AdmissionTimeout` instead of more 429s.
+  - `quota_authority: gateway` skips E2A's token bucket when a gateway enforces quota (concurrency permits stay).
+- **Scopes (P3):** `scopes = {"tenant:<id>": {...}, "agent:<name>": {...}}` overlays config per call: tenant first, then agent. `scoped_config()` is applied by `BaseAgent.run` and `BaseWorkflow.execute`.
+  - An agent scope may bind its own `llm_service`, which replaces the prototype's `DelegatedAgent`.
+  - Unregistered keys and keys that identify the request (`tenant_id`, `idempotency_*`, ...) are refused.
+- **`DelegatedRuntime` (P15, `e2a.delegated`):** the base for managed agent runtimes, bound as one agent's model step.
+  - Read tools only (`MaterialToolRefused`); host-side tool calls go through the tool's own `execute()` for the request's tenant.
+  - Sessions are bounded by `delegated_max_turns` (`DelegatedTurnLimit`).
+- **`BaseReranker` port (P17):** `BaseRAGPipeline.reranker`. `_rerank` is no longer abstract: its default uses the reranker, else keeps index order, cut to `rerank_top_n`.
+  - Embedding models and vector indexes may declare `dimensions`; `check_dimensions` refuses a mismatch (in `RAGPipeline` and `Bindings.verify()`).
+  - Profiles take `recommends`: a missing recommended capability is a warning (`Bindings.warnings`), not a failure.
+- **Classifier guardrails (P21):** `ManagedGuardrailStage` (ingress) and `ManagedGuardrailEgressStage`, with `GuardrailVerdict`. A subclass implements `_screen`.
+  - E2A owns the rules: the fields screened are `guardrail_fields`; a block is `FirewallRefusal`; an unavailable classifier fails closed unless `guardrail_fail_open`.
+- **Pipeline checks (P24):** `BasePipeline` verifies the deployment's bindings first (`bindings=`), and builds `artifact_matrix` when it is set.
+- **MCP (P19):** `MCPToolService(server_url, credential_provider)` gives one instance per server, each with its own identity. `BaseToolService._auth_headers` is the hook. `BaseMCPServer.export_tool_manifest(fmt='mcp' | 'declarations')` is the same list as `tools/list`.
+- **Keys:** `model_routes`, `structured_output_strict`, `reasoning_effort`, `model_price_table`, `quota_authority`, `admission_throttle_decay`, `admission_throttle_floor`, `admission_recovery_seconds`, `guardrail_fields`, `guardrail_fail_open`, `delegated_max_turns`, `artifact_matrix`, `secret_scan_paths`, `scopes`.
+
+### Changed
+- **`BasePipeline` runs a built-in secret scan** before the project's own scans, over `secret_scan_paths` (default `src`).
+  - It matches only high-confidence credential shapes: cloud access keys, model-provider and GitHub tokens, private keys.
+  - A line can opt out with `e2a: allow-secret`, and `secret_scan_paths: []` turns the scan off.
+- **`register_config_key`:** two casts are the same meaning when they read the default's environment spelling alike. A provider package's earlier registration of a key E2A now owns (`guardrail_fields`) keeps importing.
+
 ## v1.6.0 — Contracts for managed providers (design note MP-02)
 
 The vendor-neutral contracts lifted from the managed-providers prototype (assessment MP-00).

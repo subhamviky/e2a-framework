@@ -23,7 +23,7 @@ from .core import DehydrationInterrupt, PhysicalOutcome
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext
 from ._contract import call_hook, declares_ctx, refuse_v11_hooks
 from .stages import GovernanceRefusal
-from .config import resolve_config
+from .config import resolve_config, scoped_config
 from ._propagation import _PropagationMixin
 from .governance import BaseGovernanceFramework
 # ==================================================
@@ -62,7 +62,8 @@ class BaseAgent(ABC, _PropagationMixin):
         -> build -> infer -> evaluate/fallback -> act (only after an accepted evaluation,
         and not after the deadline) -> confirm -> redaction. A v1.1 agent (hooks without
         `ctx`) runs exactly as in v1.1."""
-        config = config or {}
+        config = scoped_config(config, getattr(self, 'agent_name', type(self).__name__),
+                               (ctx.tenant_id if ctx is not None else None) or tenant_id or state.get('tenant_id'))
         given = {'tenant_id': tenant_id, 'correlation_id': correlation_id, 'idempotency_key': idempotency_key}
         if ctx is None:
             ctx = RequestContext.begin(

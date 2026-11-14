@@ -22,6 +22,8 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from .core import (AdmissionTimeout, Deadline, DeadlineExceeded, DehydrationInterrupt, ErrorClass,
                    ModelRefusal, NFRViolationError, classify_error)
 from .llm_types import ModelResult
+from .capabilities import capabilities_of
+from .schema_check import schema_errors
 from .config import resolve_config
 from .resilience import ResiliencePolicy
 from ._propagation import _PropagationMixin
@@ -85,6 +87,17 @@ def _compile_patterns(entries, kind: str, with_validator: bool):
                              f"(available: {', '.join(sorted(DLP_VALIDATORS))})")
         out.append((entry['name'], pattern, DLP_VALIDATORS.get(name)))
     return out
+
+
+REASONING_EFFORTS = ('minimal', 'low', 'medium', 'high', 'max')
+
+
+class StructuredOutputUnsupported(ValueError):
+    """A response schema was requested from a model that declares no structured output."""
+
+
+class StructuredOutputInvalid(ValueError):
+    """structured_output_strict: the model's structured result does not match the schema."""
 
 
 class _TenantPermit:
@@ -152,12 +165,110 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         self._rpm_tokens = self._max_rpm
         self._tpm_tokens = self._max_tpm
         self._last_bucket_update = time.monotonic()
+        self._throttle_factor = 1.0                     # v1.6.1: < 1 for a while after a throttle
         self._bucket_lock = asyncio.Lock()
 
     # ----------------------------------------------------------------
     # PUBLIC 1 — unary
     # ----------------------------------------------------------------
     async def process_inference(
+            self, messages: List[Dict[str, Any]], config: Dict[str, Any] = None,
+            correlation_id: str = None, io_config: Dict[str, Any] = None,
+            idempotency_key: str = None, tenant_id: str = None,
+            message_log: List[dict] = None, failed_keys: List[str] = None,
+            deadline: Any = None, **kwargs) -> Dict[str, Any]:
+        """The one unary entry point. Runs the governed call (__infer, below), then, v1.6.1:
+        * a failure or refusal whose kind matches a `model_routes` entry is answered by the
+          route's model (`to`) or bound service (`llm_service`), once per route, recorded as
+          `fallback_from`; a service that declares `refusal_fallback_server` falls back on its
+          own side, so E2A takes no refusal route for it;
+        * the result is enriched for telemetry (`_record_telemetry`), with `cost_usd` from
+          `model_price_table` when the model is priced."""
+        route_depth = kwargs.pop('_e2a_route_depth', 0)
+        telemetry_ctx = {'agent': kwargs.pop('agent_name', None), 'step': kwargs.pop('workflow_step', None)}
+        cfg = {**self._config, **(config or {})}
+        failed_keys = failed_keys if failed_keys is not None else []
+        failed_before = len(failed_keys)
+        payload = await self.__infer(messages, config, correlation_id, io_config, idempotency_key, tenant_id,
+                                     message_log, failed_keys, deadline, **kwargs)
+        if route_depth == 0 and payload.get('status') in ('FAILED', 'REFUSED'):
+            routed = await self.__route(payload, messages, config, cfg, correlation_id, io_config, idempotency_key,
+                                        tenant_id, message_log, failed_keys, deadline, kwargs)
+            if routed is not None:
+                del failed_keys[failed_before:]          # the routed answer stands: no failed key
+                payload = routed
+        self.__telemetry(payload, cfg, kwargs, tenant_id, telemetry_ctx)
+        return payload
+
+    async def __route(self, payload, messages, config, cfg, correlation_id, io_config, idempotency_key,
+                      tenant_id, message_log, failed_keys, deadline, kwargs):
+        kind = 'refusal' if payload.get('status') == 'REFUSED' else payload.get('error_kind')
+        if kind == 'refusal' and 'refusal_fallback_server' in capabilities_of(self, cfg):
+            return None                                     # the provider already fell back
+        for route in self._resolve_param('model_routes', cfg, kwargs) or []:
+            if kind not in (route.get('on') or []):
+                continue
+            target = route.get('llm_service') or self
+            if not isinstance(target, BaseLLMAgentService):
+                raise ValueError(f"model_routes: llm_service {target!r} is not a bound BaseLLMAgentService "
+                                 f"(name a seam in the profile; e2a.bindings resolves it)")
+            call = {k: v for k, v in kwargs.items() if k != 'model_id'}
+            if route.get('to'):
+                call['model_id'] = route['to']
+            for _ in range(max(1, int(route.get('max_attempts', 1)))):
+                routed = await target.process_inference(
+                    messages, config, correlation_id, io_config, idempotency_key, tenant_id, message_log,
+                    failed_keys, deadline, _e2a_route_depth=1, **call)
+                if routed.get('status') == 'SUCCESS':
+                    routed['fallback_from'] = {'model_id': self._resolve_param('model_id', cfg, kwargs),
+                                               'reason': kind, 'service': type(self).__name__}
+                    self._log(message_log, correlation_id, 'WARN', 'llm_fallback_route', reason=kind,
+                              to=route.get('to') or type(target).__name__)
+                    return routed
+            return None                                     # first matching route only
+        return None
+
+    def __telemetry(self, payload, cfg, kwargs, tenant_id, telemetry_ctx):
+        usage = payload.get('usage') or {}
+        model = self._resolve_param('model_id', cfg, kwargs)
+        attributes = {
+            'e2a.tenant_id': tenant_id, 'e2a.correlation_id': payload.get('correlation_id'),
+            'e2a.agent': telemetry_ctx.get('agent'), 'e2a.workflow_step': telemetry_ctx.get('step'),
+            'e2a.status': payload.get('status'), 'e2a.fallback_from': (payload.get('fallback_from') or {}).get('model_id'),
+            'e2a.refusal_category': (payload.get('refusal') or {}).get('category') or None,
+            'gen_ai.request.model': (payload.get('fallback_from') and kwargs.get('model_id')) or model,
+            'gen_ai.response.finish_reasons': payload.get('stop_reason'),
+            'gen_ai.usage.input_tokens': usage.get('input_tokens'),
+            'gen_ai.usage.output_tokens': usage.get('output_tokens'),
+        }
+        prices = (self._resolve_param('model_price_table', cfg, kwargs) or {}).get(model)
+        if prices and payload.get('status') == 'SUCCESS':
+            inp = usage.get('input_tokens') if usage else payload.get('tokens_used', 0)
+            out = usage.get('output_tokens', 0) if usage else 0
+            cost = (float(inp or 0) * float(prices.get('input_per_mtok', 0))
+                    + float(out or 0) * float(prices.get('output_per_mtok', 0))
+                    + float(usage.get('cache_read_tokens', 0) or 0) * float(prices.get('cache_read_per_mtok', 0))) / 1e6
+            payload['cost_usd'] = round(cost, 8)
+            attributes['e2a.cost_usd'] = payload['cost_usd']
+        self._record_telemetry({k: v for k, v in attributes.items() if v is not None}, cfg)
+
+    def _record_telemetry(self, attributes: Dict[str, Any], config: Dict[str, Any]) -> None:
+        """Hook (v1.6.1): enrich the active OpenTelemetry span (when the OpenTelemetry API is
+        installed and a span is recording; the vendors' SDK instrumentation creates it) and
+        pass the attributes to a bound observability engine's record_inference(). E2A adds
+        tenant, correlation, agent, step, refusal or fallback and cost; it emits no spans."""
+        engine = (config or {}).get('observability_engine')
+        if engine is not None and callable(getattr(engine, 'record_inference', None)):
+            engine.record_inference(dict(attributes))
+        try:
+            from opentelemetry import trace
+        except ImportError:
+            return
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.set_attributes(attributes)
+
+    async def __infer(
             self, messages: List[Dict[str, Any]], config: Dict[str, Any] = None,
             correlation_id: str = None, io_config: Dict[str, Any] = None,
             idempotency_key: str = None, tenant_id: str = None,
@@ -222,10 +333,27 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             max_out = int(self._resolve_param('max_output_tokens', cfg, kwargs))
             model_id = self._resolve_param('model_id', cfg, kwargs)
             temperature = self._resolve_param('temperature', cfg, kwargs)
+            # v1.6.1 (P9): the bound service's declared features decide, not its vendor
+            features = self._features_for(cfg)
+            if kwargs.get('response_schema') is not None and features.get('structured_output') == 'none':
+                raise StructuredOutputUnsupported(
+                    f'{type(self).__name__} declares no structured output: bind a service that does, '
+                    f'or list "structured_output" in the profile features so verify() refuses it at startup')
+            if temperature is not None and features.get('sampling') == 'unsupported':
+                note('param_dropped', param='temperature', reason='sampling unsupported by the bound model')
+                temperature = None
+            effort = self._resolve_param('reasoning_effort', cfg, kwargs)
+            if effort is not None:
+                if effort not in REASONING_EFFORTS:
+                    raise ValueError(f'reasoning_effort {effort!r}: use one of {", ".join(REASONING_EFFORTS)}')
+                if features.get('reasoning') == 'none':
+                    note('param_dropped', param='reasoning_effort', reason='reasoning unsupported by the bound model')
+                    kwargs = {k: v for k, v in kwargs.items() if k != 'reasoning_effort'}
 
             estimate = sum(self._estimate_tokens(m) for m in prepared) + max_out
             async with self.__concurrency_permit(tenant_id, cfg, kwargs, deadline, note):
-                quota = await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline)
+                quota = (None if self._resolve_param('quota_authority', cfg, kwargs) == 'gateway'
+                         else await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline))
                 up_timeout = float(self._resolve_param('llm_max_latency', cfg, kwargs))
                 if deadline:
                     up_timeout = deadline.bound(up_timeout)
@@ -260,11 +388,17 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                     c = self._classify_error(e)
                     return c.kind in retry_on and (c.retry_after is None or c.retry_after <= retry_after_cap)
 
+                def _counts(e):
+                    kind = self._classify_error(e).kind
+                    if kind == 'throttled':
+                        self.__throttled(cfg)              # v1.6.1 (P7 b): admit less, for a while
+                    return kind in circuit_counts
+
                 raw = await self._resilience.call(
                     _upstream, deadline=deadline,
                     max_retries=int(self._resolve_param('llm_max_retries', cfg, kwargs)),
                     retryable=_retryable,
-                    counts_for_circuit=lambda e: self._classify_error(e).kind in circuit_counts,
+                    counts_for_circuit=_counts,
                     delay_for=lambda e: self._classify_error(e).retry_after)
                 if isinstance(raw, ModelResult):          # v1.6.0: canonical result or legacy dict
                     raw = raw.to_raw()
@@ -286,10 +420,13 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                     payload[field] = value
             if payload.get('stop_reason') == 'max_tokens':
                 payload['truncated'] = True          # v1.6.0: the answer was cut by the token limit
+            problems = self.__check_structured(payload, kwargs.get('response_schema'))
             if self._resolve_param('dlp_enabled', cfg, kwargs) and 'text' in payload:
                 payload['text'], payload['dlp_redactions'] = self._redact_sensitive(payload['text'])
             self.__settle_quota(quota, dispatched, used=payload['tokens_used'])
             quota = None
+            if problems and self._resolve_param('structured_output_strict', cfg, kwargs):
+                raise StructuredOutputInvalid('structured output does not match the schema: ' + '; '.join(problems[:3]))
             if use_cache and payload.get('physical_success') and 'tool_calls' not in payload:
                 await self._store_semantic_cache(
                     messages, payload, cfg, tenant_id=tenant_id, **self.__extras(kwargs))
@@ -316,8 +453,8 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             self._handle_error(e, messages, cfg, **common, failed_keys=failed_keys)
             payload = {'status': 'FAILED', 'correlation_id': correlation_id,
                        'tenant_id': tenant_id, 'error': str(e),
-                       'error_type': type(e).__name__, 'physical_success': False,
-                       'tokens_used': 0}
+                       'error_type': type(e).__name__, 'error_kind': self._classify_error(e).kind,
+                       'physical_success': False, 'tokens_used': 0}
         self._log(message_log, correlation_id, 'INFO', 'llm_inference_complete',
                   latency=round(time.time() - start, 3),
                   llm_tokens_used=payload.get('tokens_used', 0),
@@ -369,7 +506,8 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
             holdback = int(self._resolve_param('dlp_holdback_chars', cfg, kwargs))
             dlp_on = self._resolve_param('dlp_enabled', cfg, kwargs)
             async with self.__concurrency_permit(tenant_id, cfg, kwargs, deadline, note):
-                quota = await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline)
+                quota = (None if self._resolve_param('quota_authority', cfg, kwargs) == 'gateway'
+                         else await self.__admit_quota(estimate, tenant_id, cfg, kwargs, deadline))
                 dispatched = True
                 raw_stream = self._dispatch_upstream_stream(
                     messages=prepared,
@@ -678,14 +816,18 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
                 async with self._bucket_lock:
                     now = time.monotonic()
                     elapsed, self._last_bucket_update = now - self._last_bucket_update, now
-                    self._rpm_tokens = min(self._max_rpm, self._rpm_tokens + elapsed * self._max_rpm / 60.0)
-                    self._tpm_tokens = min(self._max_tpm, self._tpm_tokens + elapsed * self._max_tpm / 60.0)
+                    if self._throttle_factor < 1.0:      # v1.6.1: recover linearly after a throttle
+                        recovery = max(1e-6, float(self._resolve_param('admission_recovery_seconds', config, kwargs)))
+                        self._throttle_factor = min(1.0, self._throttle_factor + elapsed / recovery)
+                    rpm_cap, tpm_cap = self._max_rpm * self._throttle_factor, self._max_tpm * self._throttle_factor
+                    self._rpm_tokens = min(rpm_cap, self._rpm_tokens + elapsed * rpm_cap / 60.0)
+                    self._tpm_tokens = min(tpm_cap, self._tpm_tokens + elapsed * tpm_cap / 60.0)
                     if self._rpm_tokens >= 1.0 and self._tpm_tokens >= need_tpm:
                         self._rpm_tokens -= 1.0
                         self._tpm_tokens -= need_tpm
                         self.__observe_wait('quota', time.monotonic() - start, tenant_id)
                         return (1.0, need_tpm)
-                    rpm_rate, tpm_rate = self._max_rpm / 60.0, self._max_tpm / 60.0
+                    rpm_rate, tpm_rate = rpm_cap / 60.0, tpm_cap / 60.0
                     wait = max((1.0 - self._rpm_tokens) / rpm_rate if (self._rpm_tokens < 1.0 and rpm_rate > 0) else 0.0,
                                (need_tpm - self._tpm_tokens) / tpm_rate if (self._tpm_tokens < need_tpm and tpm_rate > 0) else 0.0)
                 remaining = budget - (time.monotonic() - start)
@@ -699,6 +841,43 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
         except BaseException:
             await self._release_shared_quota(tokens, tenant_id, config)   # local admission failed: give the fleet quota back
             raise
+
+    @staticmethod
+    def __check_structured(payload, schema) -> List[str]:
+        """v1.6.1 (P9): every structured result is checked against the schema that was asked
+        for, whichever model produced it; marks structured_output_valid and schema_errors."""
+        if schema is None or 'structured_output' not in payload:
+            return []
+        value = payload['structured_output']
+        if isinstance(value, dict) and 'parse_error' in value and 'raw' in value:
+            problems = [f'$: not valid JSON ({value["parse_error"]})']
+        else:
+            problems = schema_errors(schema, value)
+        payload['structured_output_valid'] = not problems
+        if problems:
+            payload['schema_errors'] = problems
+            payload['physical_success'] = False
+        return problems
+
+    def __throttled(self, config) -> None:
+        """v1.6.1 (P7 b): the provider throttled us. Lower this pod's admission share by
+        admission_throttle_decay (down to admission_throttle_floor) and cap what is available
+        now, so callers get E2A's typed AdmissionTimeout instead of more provider 429s; the
+        share recovers linearly over admission_recovery_seconds."""
+        decay = float(self._resolve_param('admission_throttle_decay', config, {}))
+        floor = float(self._resolve_param('admission_throttle_floor', config, {}))
+        self._throttle_factor = max(floor, self._throttle_factor * decay)
+        self._rpm_tokens = min(self._rpm_tokens, self._max_rpm * self._throttle_factor)
+        self._tpm_tokens = min(self._tpm_tokens, self._max_tpm * self._throttle_factor)
+        self.stats['throttled'] = self.stats.get('throttled', 0) + 1
+        self._emit_metric('counter', 'e2a.llm.throttled_total', 1, {'factor': round(self._throttle_factor, 3)})
+
+    def _features_for(self, config: Dict[str, Any]) -> Dict[str, str]:
+        """Hook (v1.6.1): what the bound model supports, as a map the base reads: e.g.
+        {'structured_output': 'native' | 'none', 'sampling': 'supported' | 'unsupported',
+        'reasoning': '<style>' | 'none'}. Default: the class attribute `features` (empty: the
+        base changes nothing, as before). A provider overrides it when it depends on config."""
+        return dict(getattr(self, 'features', None) or {})
 
     def __settle_quota(self, quota, dispatched, used) -> None:
         """Return admitted-but-unused quota. Synchronous on purpose: it must

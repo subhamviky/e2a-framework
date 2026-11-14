@@ -10,8 +10,10 @@ import contextlib
 import re
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
+from .config import resolve_config
 from .core import DehydrationInterrupt, NFRViolationError
 
 
@@ -219,3 +221,108 @@ class RedactionStage(EgressStage):
         elif isinstance(response, str):
             response, _ = redact_text(response, self.redactions)
         return response
+
+
+# --------------------------------------------------------------------- v1.6.1 classifier stages
+@dataclass
+class GuardrailVerdict:
+    """What a classifier (a managed guardrail service, a local safety model) says about a text."""
+    allowed: bool
+    categories: List[str] = field(default_factory=list)
+    sanitized: Optional[str] = None          # masked text, when the classifier returns one
+    detail: str = ''
+
+
+class ManagedGuardrailStage(IngressStage):
+    """v1.6.1 (design note MP-04, P21): screening by a classifier, as one more ingress stage
+    next to the pattern FirewallStage (cheap first screen, then the model-based one).
+
+    A subclass implements only _screen(text, ctx) -> GuardrailVerdict; which service it asks
+    is the provider layer's business. E2A owns the rules, the same for every classifier:
+    * the fields screened are `guardrail_fields`;
+    * a block is FirewallRefusal (callers and tests see one type, whoever screened);
+    * a classifier error fails CLOSED (FirewallRefusal) unless `guardrail_fail_open`;
+    * a sanitized text replaces the field, and is logged as guardrail_masked."""
+    name = 'managed_guardrail'
+    phase = 'screen'
+    capabilities = frozenset({'guardrails'})
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None, client: Any = None,
+                 fail_open: Optional[bool] = None) -> None:
+        self.config = dict(config or {})
+        self.fields = list(resolve_config('guardrail_fields', self.config))
+        self.fail_open = bool(resolve_config('guardrail_fail_open', self.config)) if fail_open is None else fail_open
+        self._client = client
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = self._build_client(self.config)
+        return self._client
+
+    def _build_client(self, config: Dict[str, Any]) -> Any:
+        """Hook: the classifier's client, built on first use. Default: none."""
+        return None
+
+    @abstractmethod
+    def _screen(self, text: str, ctx) -> GuardrailVerdict:
+        """Ask the classifier about one text."""
+
+    def _verdict(self, text, ctx, messages) -> Optional[GuardrailVerdict]:
+        try:
+            return self._screen(text, ctx)
+        except Exception as e:                       # classifier down or throttled
+            messages.warn('guardrail_unavailable', stage=self.name, error=type(e).__name__)
+            if self.fail_open:
+                return None
+            raise FirewallRefusal(f'{self.name} unavailable; not screened', self.name) from e
+
+    def _refuse(self, verdict, messages):
+        messages.warn('guardrail_blocked', stage=self.name, categories=verdict.categories)
+        cats = f" ({', '.join(verdict.categories)})" if verdict.categories else ''
+        raise FirewallRefusal(f'refused by {self.name}{cats}', self.name)
+
+    def screen_text(self, text: str, ctx, messages) -> str:
+        """Public (v1.6.1): screen one text under this stage's rules; returns the text to use
+        (sanitized when the classifier masked it) or raises FirewallRefusal. The egress
+        variant and a project's own checks call it."""
+        verdict = self._verdict(text, ctx, messages)
+        if verdict is None:
+            return text
+        if not verdict.allowed:
+            self._refuse(verdict, messages)
+        return verdict.sanitized if verdict.sanitized is not None else text
+
+    def check(self, state, ctx, messages):
+        for name in self.fields:
+            value = state.get(name)
+            if not isinstance(value, str) or not value:
+                continue
+            screened = self.screen_text(value, ctx, messages)
+            if screened != value:
+                state[name] = screened
+                messages.info('guardrail_masked', stage=self.name, field=name)
+        return state
+
+
+class ManagedGuardrailEgressStage(EgressStage):
+    """v1.6.1: the same classifier on the way out (the response text). A blocked response is
+    FirewallRefusal; a sanitized one replaces the text. Shares the subclass's _screen by
+    composition: pass the ingress stage; its public screen_text() is used."""
+    name = 'managed_guardrail_egress'
+    capabilities = frozenset({'guardrails'})
+
+    def __init__(self, screen: ManagedGuardrailStage, fields: Sequence[str] = ('text',)) -> None:
+        self.screen, self.fields = screen, tuple(fields)
+
+    def redact(self, response, state, ctx, messages):
+        def one(text):
+            return self.screen.screen_text(text, ctx, messages)
+        if isinstance(response, str):
+            return one(response)
+        if isinstance(response, dict):
+            for f in self.fields:
+                if isinstance(response.get(f), str) and response[f]:
+                    response[f] = one(response[f])
+        return response
+

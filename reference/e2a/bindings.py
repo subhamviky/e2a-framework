@@ -29,6 +29,7 @@ Rules
 * **Unknown seams and unknown profile fields are errors.**
 """
 import importlib
+import logging
 import json
 import os
 import re
@@ -38,6 +39,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Union
 
 from .capabilities import CapabilityError, capabilities_of, missing
 from .config import E2A_CONFIG, resolve_config
+
+_log = logging.getLogger('e2a.bindings')
 
 __all__ = ['SEAMS', 'Profile', 'Bindings', 'bindings_from_profile', 'register_provider_package',
            'available_profiles']
@@ -61,7 +64,8 @@ SEAMS = (
 )
 _CONFIG_SEAMS = ('llm_service', 'observability_engine', 'idempotency_store', 'checkpoint_store',
                  'credential_provider')
-_PROFILE_FIELDS = {'name', 'provider', 'cloud', 'description', 'features', 'bindings', 'config', 'extends'}
+_PROFILE_FIELDS = {'name', 'provider', 'cloud', 'description', 'features', 'recommends', 'bindings', 'config',
+                   'extends'}
 _BUILTIN_PACKAGES = {'e2a', 'e2a_simulated_llm', 'e2a_inmemory_adapters', 'e2a_adapters'}
 _REGISTERED: set = set()
 _PLACEHOLDER = re.compile(r'\$\{([A-Z0-9_]+)(?::-(.*?))?\}')
@@ -181,6 +185,7 @@ class Profile:
     cloud: str = ''
     description: str = ''
     features: List[str] = field(default_factory=list)
+    recommends: List[str] = field(default_factory=list)     # v1.6.1: missing ones warn, not fail
     bindings: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
     source: Optional[str] = None
@@ -197,14 +202,14 @@ class Profile:
             parent = cls.load(parent_name, _seen=_seen + (data.get('name', '?'),))
             base = {'name': parent.name, 'provider': parent.provider, 'cloud': parent.cloud,
                     'description': parent.description, 'features': parent.features,
-                    'bindings': parent.bindings, 'config': parent.config}
+                    'recommends': parent.recommends, 'bindings': parent.bindings, 'config': parent.config}
             data = _merge(base, {k: v for k, v in data.items() if k != 'extends'})
         unknown_seams = set(data.get('bindings') or {}) - set(SEAMS)
         if unknown_seams:
             raise ValueError(f"profile {data.get('name')}: unknown seams {sorted(unknown_seams)}")
         return cls(name=data['name'], provider=data['provider'], cloud=data.get('cloud', ''),
                    description=data.get('description', ''), features=list(data.get('features') or []),
-                   bindings=dict(data.get('bindings') or {}),
+                   recommends=list(data.get('recommends') or []), bindings=dict(data.get('bindings') or {}),
                    config=_typed(_interpolate(dict(data.get('config') or {}))), source=source)
 
     @classmethod
@@ -228,6 +233,7 @@ class Bindings:
         self.profile, self._factories = profile, factories
         overrides = dict(overrides or {})
         self._built: Dict[str, Any] = {k: v for k, v in overrides.items() if k in SEAMS}
+        self.warnings: List[str] = []
         self._overrides = {k: v for k, v in overrides.items() if k not in SEAMS}
 
     def _layers(self) -> Dict[str, Any]:
@@ -268,8 +274,26 @@ class Bindings:
             obj = self.get(seam) if seam in self.bound() else None
             if obj is not None:
                 cfg[seam] = obj
+        # v1.6.1: "@<seam>" in model_routes and scopes names a bound object (a route to the
+        # delegated runtime, an agent scope that uses another llm service)
+        if cfg.get('model_routes'):
+            cfg['model_routes'] = [{k: self.__ref(v) for k, v in dict(r).items()} for r in cfg['model_routes']]
+        if cfg.get('scopes'):
+            cfg['scopes'] = {label: {k: self.__ref(v) for k, v in dict(o).items()}
+                             for label, o in cfg['scopes'].items()}
         cfg.update(extra)
         return cfg
+
+    def __ref(self, value: Any) -> Any:
+        if isinstance(value, str) and value.startswith('@'):
+            seam = value[1:]
+            if seam not in SEAMS:
+                raise ValueError(f'{value!r}: unknown seam (one of {", ".join(SEAMS)})')
+            obj = self.get(seam)
+            if obj is None:
+                raise ValueError(f'{value!r}: the profile binds nothing to {seam}')
+            return obj
+        return value
 
     def verify(self, required: Optional[Iterable[str]] = None) -> Dict[str, List[str]]:
         """Build every bound seam and check the required capabilities (the argument, else the
@@ -281,10 +305,19 @@ class Bindings:
             caps = capabilities_of(self.get(seam), self._layers())
             if caps:
                 provided[seam] = sorted(caps)
-        gaps = missing(required, [c for caps in provided.values() for c in caps])
+        everything = [c for caps in provided.values() for c in caps]
+        gaps = missing(required, everything)
         if gaps:
             raise CapabilityError(f"profile '{self.profile.name}' requires {gaps}, which none of its bindings "
                                   f"provides ({self.profile.provider}/{self.profile.cloud or '-'})")
+        # v1.6.1: what the profile recommends but nothing provides is a warning, and the
+        # embedding model and the vector index must agree on vector size
+        self.warnings = [f'recommended capability {c!r} is not provided' for c in missing(self.profile.recommends, everything)]
+        for w in self.warnings:
+            _log.warning('profile %s: %s', self.profile.name, w)
+        if 'embedding_model' in self.bound() and 'vector_index' in self.bound():
+            from .rag import check_dimensions
+            check_dimensions(self.get('embedding_model'), self.get('vector_index'))
         return provided
 
 
