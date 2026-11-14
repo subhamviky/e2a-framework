@@ -2,6 +2,25 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.7.1 — Durable outbox stores (design note MP-05)
+
+### Added
+- **`e2a.port_contract.check_outbox_store`:** 11 scenarios every `BaseOutboxStore` adapter passes:
+  - round trip; oldest first; the limit;
+  - mark once; an unknown id;
+  - fencing (a stale sweeper cannot mark);
+  - a race in which exactly one sweeper wins.
+- **e2a-adapters 1.7.1, the transactional outbox in each database's own transaction.** A record commits with the business change or not at all:
+  - **`DynamoDBOutboxStore`** puts `transact_item(record)` in your `TransactWriteItems`. Pending records are one Query in id order (ids sort by time). `mark_published` deletes the record and advances the fence in one transaction.
+  - **`FirestoreOutboxStore`** takes `add(record, transaction=tx)` (or `batch=`). Pending is ordered by `created_at` with no composite index; `mark_published` is one transaction.
+  - **`CosmosOutboxStore`** keeps the record in the business document's partition: `batch_operation(record, partition_key)` goes into your transactional batch. Pending is one cross-partition query. The fence and the delete are two conditional writes, because they are in different partitions; a stale double-mark is harmless because consumers deduplicate.
+  - All three pass the contract on DynamoDB Local and the Firestore and Cosmos DB emulators.
+- **The cloud profiles bind `outbox_store`** (key `outbox_name`, default `default`).
+
+### Changed
+- **`PubSubBroker` imports its SDK on first use** (MP-05 follow-up): a profile binds and verifies without google-cloud-pubsub installed.
+- **`param_dropped` is logged only for a temperature someone set** (keyword, config, profile or environment), not for the registry default (MP-04 follow-up). A model declaring `sampling: unsupported` no longer warns on every call.
+
 ## v1.7.0 — Messaging, identity, secrets and the cloud profiles (design note MP-05)
 
 Cloud infrastructure behind E2A's ports, selected by configuration. The contracts are vendor-neutral and

@@ -152,6 +152,9 @@ def test_features_decide_what_is_sent_not_the_vendor():
     assert [e.get('param') for e in log if e.get('event') == 'param_dropped'] == ['temperature', 'reasoning_effort']
     out = infer(Adapter(lambda m: 'ok'), NO_RETRY, reasoning_effort='extreme')
     assert out['status'] == 'FAILED' and 'reasoning_effort' in out['error']
+    quiet, log = Adapter(lambda m: 'ok', features={'sampling': 'unsupported'}), []
+    infer(quiet, NO_RETRY, message_log=log)                       # v1.7.1: the default temperature is no choice
+    assert quiet.seen[0]['temperature'] is None and not [e for e in log if e.get('event') == 'param_dropped']
     plain = Adapter(lambda m: 'ok')
     infer(plain, {**NO_RETRY, 'temperature': 0.7}, reasoning_effort='low')
     assert plain.seen[0]['temperature'] == 0.7 and plain.seen[0]['reasoning_effort'] == 'low'
