@@ -119,6 +119,7 @@ E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
     _k('consumer_batch_size', 'E2A_CONSUMER_BATCH_SIZE', 10, int, 'Messaging', 'v1.7.0: IdempotentConsumer / BrokerOutboxSweeper — messages or records per batch'),
     _k('consumer_wait_seconds', 'E2A_CONSUMER_WAIT_SECONDS', 0.0, float, 'Messaging', 'v1.7.0: IdempotentConsumer.consume() — long-poll wait for a batch'),
     _k('consumer_max_deliveries', 'E2A_CONSUMER_MAX_DELIVERIES', 5, int, 'Messaging', 'v1.7.0: a message delivered more often is dead-lettered (0 = no limit; brokers without a count are not limited)'),
+    _k('consumer_resume_expired', 'E2A_CONSUMER_RESUME_EXPIRED', False, _to_bool, 'Messaging', 'v1.7.2: true when the handler confirms what is already done itself (resumable): a redelivery may take over a claim whose owner stopped, instead of dead-lettering it for reconcile()'),
     _k('consumer_retry_delay_seconds', 'E2A_CONSUMER_RETRY_DELAY_SECONDS', 5.0, float, 'Messaging', 'v1.7.0: a retried or deferred message becomes visible again after this'),
     _k('identity_claim_map', 'E2A_IDENTITY_CLAIM_MAP', {}, _to_json_map, 'Identity', 'v1.7.0: {tenant_id, subject, roles, issuer: claim name or dotted path} — the identity provider\'s claim names'),
     _k('identity_trusted_issuers', 'E2A_IDENTITY_TRUSTED_ISSUERS', [], _to_json_list, 'Identity', 'v1.7.0: issuers accepted by BaseIdentityResolver (empty: any issuer the gateway verified)'),

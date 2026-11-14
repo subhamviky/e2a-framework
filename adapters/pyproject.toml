@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "e2a-adapters"
-version = "1.7.1"
+version = "1.7.2"
 description = "E2A ports on cloud infrastructure: stores, brokers, secrets and identity on AWS, Google Cloud and Azure"
 readme = "README.md"
 license = "Apache-2.0"

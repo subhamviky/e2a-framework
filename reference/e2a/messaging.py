@@ -205,7 +205,8 @@ class IdempotentConsumer(BaseReconciliationService):
     def consume(self, source: Optional[str] = None, config: Dict[str, Any] = None,
                 correlation_id: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Receive one batch from `source` and settle every message. Never raises for one
-        message: each is acked, nacked or dead-lettered, and counted in the report."""
+        message: each is acked, nacked or dead-lettered, counted in the report and listed in
+        report['messages'] (v1.7.2) with its decision."""
         config = config or {}
         source = source or self.source
         if not source:
@@ -214,19 +215,43 @@ class IdempotentConsumer(BaseReconciliationService):
         batch = int(resolve_config('consumer_batch_size', config, kwargs))
         wait = float(resolve_config('consumer_wait_seconds', config, kwargs))
         report = {'correlation_id': correlation_id, 'received': 0, 'processed': 0, 'duplicates': 0,
-                  'deferred': 0, 'retried': 0, 'dead_lettered': 0, 'dead_letter_reasons': []}
+                  'deferred': 0, 'retried': 0, 'dead_lettered': 0, 'dead_letter_reasons': [], 'messages': []}
+        counter = {'processed': 'processed', 'duplicate': 'duplicates', 'deferred': 'deferred',
+                   'retried': 'retried', 'dead_lettered': 'dead_lettered'}
         for message in self.broker.receive(source, max_messages=batch, wait_seconds=wait, config=config):
             report['received'] += 1
-            self.__settle(source, message, config, correlation_id, report, kwargs)
+            settled = self.settle(message, source, config, correlation_id, **kwargs)
+            report[counter[settled['decision']]] += 1
+            if settled['decision'] == 'dead_lettered':
+                report['dead_letter_reasons'].append(settled['reason'])
+            report['messages'].append({k: v for k, v in settled.items() if k != 'error'})
         return report
 
-    def __settle(self, source, message, config, owner, report, kwargs):
-        def dead(reason):
+    def settle(self, message: BrokerMessage, source: Optional[str] = None, config: Dict[str, Any] = None,
+               correlation_id: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+        """Public (v1.7.2): settle ONE received message under its claim, through the broker, and
+        say what happened: {message_id, idempotency_key, decision, reason, result, error}.
+        decision: processed (result: the handler's), duplicate (result: the stored one),
+        deferred, retried (error: the exception, if one), dead_lettered (reason; error, if one).
+        consume() calls it for each message of a batch; a synchronous entry point can call it
+        for one message it publishes and receives itself, so both paths share one claim."""
+        config = config or {}
+        source = source or self.source
+        owner = correlation_id or str(uuid.uuid4())
+        out: Dict[str, Any] = {'message_id': message.id, 'idempotency_key': None, 'decision': None,
+                               'reason': None, 'result': None, 'error': None}
+        delay = float(resolve_config('consumer_retry_delay_seconds', config, kwargs))
+
+        def decided(decision, **fields):
+            out.update(decision=decision, **fields)
+            return out
+
+        def dead(reason, error=None):
             self.broker.dead_letter(source, message, reason, config)
-            report['dead_lettered'] += 1
-            report['dead_letter_reasons'].append(reason)
+            return decided('dead_lettered', reason=reason, error=error)
 
         tenant, key = self._tenant_of(message), self._idempotency_key(message)
+        out['idempotency_key'] = key
         if not tenant or not key:
             return dead('missing tenant_id or idempotency_key')
         limit = int(resolve_config('consumer_max_deliveries', config, kwargs))
@@ -234,45 +259,40 @@ class IdempotentConsumer(BaseReconciliationService):
             return dead(f'delivered {message.delivery_count} times (consumer_max_deliveries={limit})')
         claim = self.idempotency_store.claim(
             key, config, tenant_id=tenant, owner=owner, fingerprint=body_fingerprint(message.body),
-            lease_seconds=int(resolve_config('idempotency_lease_seconds', config, kwargs)))
+            lease_seconds=int(resolve_config('idempotency_lease_seconds', config, kwargs)),
+            # v1.7.2: a resumable handler may take over a claim whose owner stopped (expired lease)
+            recover=bool(resolve_config('consumer_resume_expired', config, kwargs)))
         if claim.status == ClaimStatus.REPLAY:
             self.broker.ack(source, message, config)            # a duplicate, or a lost acknowledgement
-            report['duplicates'] += 1
-            return None
+            return decided('duplicate', result=claim.result)
         if claim.status == ClaimStatus.IN_PROGRESS:
-            self.broker.nack(source, message, float(resolve_config('consumer_retry_delay_seconds', config, kwargs)),
-                             config)
-            report['deferred'] += 1
-            return None
+            self.broker.nack(source, message, delay, config)
+            return decided('deferred', reason='another consumer holds the claim')
         if claim.status != ClaimStatus.CLAIMED:                 # CONFLICT, FAILED_FINAL, RECOVERY_REQUIRED
             return dead(f'claim {claim.status.value}')
         try:
             result = self._handle(message, config, tenant_id=tenant, idempotency_key=key)
         except _DETERMINISTIC_ERRORS as e:
             self.idempotency_store.fail(key, retryable=False, config=config, tenant_id=tenant, owner=owner)
-            return dead(f'{type(e).__name__}: {e}')
-        except Exception:
+            return dead(f'{type(e).__name__}: {e}', error=e)
+        except Exception as e:
             self.idempotency_store.fail(key, retryable=True, config=config, tenant_id=tenant, owner=owner)
-            self.broker.nack(source, message, float(resolve_config('consumer_retry_delay_seconds', config, kwargs)),
-                             config)
-            report['retried'] += 1
-            return None
+            self.broker.nack(source, message, delay, config)
+            return decided('retried', reason=f'{type(e).__name__}: {e}', error=e)
         outcome = outcome_of(result)
         if outcome == PhysicalOutcome.COMMITTED:
             self.idempotency_store.complete(key, dict(result or {}), config, tenant_id=tenant, owner=owner)
             self.broker.ack(source, message, config)
-            report['processed'] += 1
-        elif outcome == PhysicalOutcome.UNKNOWN:
+            return decided('processed', result=result)
+        if outcome == PhysicalOutcome.UNKNOWN:
             # the effect may have happened: never retried blindly; reconcile() confirms it first
             self.idempotency_store.fail(key, retryable=False, config=config, tenant_id=tenant, owner=owner,
                                         outcome=PhysicalOutcome.UNKNOWN)
-            dead('outcome UNKNOWN')
-        else:
-            self.idempotency_store.fail(key, retryable=True, config=config, tenant_id=tenant, owner=owner)
-            self.broker.nack(source, message, float(resolve_config('consumer_retry_delay_seconds', config, kwargs)),
-                             config)
-            report['retried'] += 1
-        return None
+            out['result'] = result
+            return dead('outcome UNKNOWN')
+        self.idempotency_store.fail(key, retryable=True, config=config, tenant_id=tenant, owner=owner)
+        self.broker.nack(source, message, delay, config)
+        return decided('retried', reason='not committed', result=result)
 
     # ------------------------------------------------------------ hooks
     @abstractmethod
