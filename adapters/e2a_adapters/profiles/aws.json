@@ -26,6 +26,7 @@
       "roles": "cognito:groups",
       "issuer": "iss"
     },
+    "identity_source": "${E2A_IDENTITY_SOURCE:-aws_http_api}",
     "outbox_name": "${E2A_OUTBOX_NAME:-default}"
   },
   "features": [

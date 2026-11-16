@@ -27,6 +27,7 @@
       "roles": "roles",
       "issuer": "iss"
     },
+    "identity_source": "${E2A_IDENTITY_SOURCE:-azure_container_apps}",
     "outbox_name": "${E2A_OUTBOX_NAME:-default}"
   },
   "features": [
