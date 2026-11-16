@@ -214,8 +214,24 @@ class DynamoDBIdempotencyStore(_DynamoDB, BaseIdempotencyStore):
 # ----------------------------------------------------------- transactional
 class DynamoDBTransactionalStore(_DynamoDB, BaseTransactionalStore):
     """Versioned JSON rows; put_if_version() is one conditional update. A fencing token is
-    recorded per row and a write carrying an older one is FENCED."""
-    capabilities = frozenset({'transactional_store'})
+    recorded per row and a write carrying an older one is FENCED.
+
+    v1.7.3: put_if_version(..., outbox=[records]) is one TransactWriteItems: the conditional
+    update and a Put per record (``outbox`` is a DynamoDBOutboxStore in the same region; a
+    transaction holds at most 100 items). from_config builds the outbox from the same
+    configuration (``dynamodb_state_table``, ``outbox_name``)."""
+    capabilities = frozenset({'transactional_store', 'transactional_outbox'})
+
+    def __init__(self, table=None, *, outbox=None, **kwargs):
+        super().__init__(table, **kwargs)
+        self.outbox = outbox
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        if 'outbox' not in kwargs:
+            from .outbox import DynamoDBOutboxStore
+            kwargs['outbox'] = DynamoDBOutboxStore.from_config(config)
+        return super().from_config(config, **kwargs)
 
     def _k(self, key: str, kw: Dict):
         return self._key('ROW', kw.get('table_or_collection_name') or 'default', key)
@@ -243,7 +259,9 @@ class DynamoDBTransactionalStore(_DynamoDB, BaseTransactionalStore):
         return bool(old.get('Attributes'))
 
     def put_if_version(self, key, value, expected_version, config=None, **kw) -> CommitResult:
-        token = kw.get('fencing_token')
+        token, records = kw.get('fencing_token'), list(kw.get('outbox') or ())
+        if records and self.outbox is None:
+            raise ValueError('outbox records given, but this store has no outbox (construct it with outbox=)')
         new_version = (expected_version or 0) + 1
         sets, values = ['#v = :v', 'version = :new'], {':v': _s(_dump(value)), ':new': _n(new_version)}
         names = {'#v': 'value'}
@@ -256,7 +274,10 @@ class DynamoDBTransactionalStore(_DynamoDB, BaseTransactionalStore):
             sets.append('fence = :tok')
             values[':tok'] = _n(int(token))
         k = self._k(key, kw)
-        if self._update(k, 'SET ' + ', '.join(sets), condition, names, values) is not None:
+        if records:
+            if self._transact(k, 'SET ' + ', '.join(sets), condition, names, values, records):
+                return CommitResult('COMMITTED', version=new_version)
+        elif self._update(k, 'SET ' + ', '.join(sets), condition, names, values) is not None:
             return CommitResult('COMMITTED', version=new_version)
         item = self._read(k) or {}
         current = int(_num(item, 'version')) if 'version' in item else None
@@ -264,6 +285,31 @@ class DynamoDBTransactionalStore(_DynamoDB, BaseTransactionalStore):
         if token is not None and fence is not None and int(token) < fence:
             return CommitResult('FENCED', current_version=current)
         return CommitResult('CONFLICT', current_version=current)
+
+    def _transact(self, key, update, condition, names, values, records) -> bool:
+        """The row's conditional update and the records' Puts in one transaction. False when
+        the row's condition was lost; a transaction conflict (another transaction on the row)
+        is retried, since the condition may still hold."""
+        row = {'Update': {'TableName': self.table_name, 'Key': key, 'UpdateExpression': update,
+                          'ConditionExpression': condition, 'ExpressionAttributeNames': names,
+                          'ExpressionAttributeValues': values}}
+        for attempt in range(8):
+            items = [row] + [self.outbox.transact_item(dict(record)) for record in records]
+            try:
+                self.client.transact_write_items(TransactItems=items)
+                return True
+            except ClientError as e:
+                if e.response.get('Error', {}).get('Code') != 'TransactionCanceledException':
+                    raise
+                reasons = [r.get('Code') for r in e.response.get('CancellationReasons') or []]
+                if reasons and reasons[0] == 'ConditionalCheckFailed':
+                    return False
+                if 'TransactionConflict' in reasons and all(
+                        r in (None, 'None', 'TransactionConflict') for r in reasons):
+                    time.sleep(0.02 * (attempt + 1))
+                    continue
+                raise
+        return False
 
 
 # ------------------------------------------------------------------- lease

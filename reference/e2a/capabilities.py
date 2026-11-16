@@ -28,6 +28,8 @@ CAPABILITIES = {
     'infra_as_code', 'release_pipeline',
     # v1.7.0: cloud infrastructure
     'messaging', 'dead_letter', 'outbox_store', 'identity', 'secret_store',
+    # v1.7.3: put_if_version(..., outbox=[records]) commits the row and its records together
+    'transactional_outbox',
 }
 
 

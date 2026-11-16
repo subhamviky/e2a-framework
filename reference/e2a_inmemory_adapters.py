@@ -90,9 +90,14 @@ class InMemoryTransactionalStore(BaseTransactionalStore):
     """Versioned rows; put_if_version() is an atomic compare-and-set and
     rejects fenced (stale-lease) writes."""
 
-    def __init__(self):
+    capabilities = frozenset({'transactional_store', 'transactional_outbox'})
+
+    def __init__(self, outbox=None):
+        """outbox (v1.7.3): the BaseOutboxStore that put_if_version(..., outbox=[records])
+        writes to, under the same lock as the row."""
         self._lock, self._rows, self._fence = threading.Lock(), {}, {}
         self.conflicts = self.fenced = 0
+        self.outbox = outbox
 
     def get(self, key, config=None, **kw):
         r = self._rows.get(key)
@@ -112,7 +117,9 @@ class InMemoryTransactionalStore(BaseTransactionalStore):
             return self._rows.pop(key, None) is not None
 
     def put_if_version(self, key, value, expected_version, config=None, **kw) -> CommitResult:
-        token = kw.get('fencing_token')
+        token, records = kw.get('fencing_token'), list(kw.get('outbox') or ())
+        if records and self.outbox is None:
+            raise ValueError('outbox records given, but this store has no outbox (construct it with outbox=)')
         with self._lock:
             if token is not None:
                 if token < self._fence.get(key, 0):
@@ -126,6 +133,8 @@ class InMemoryTransactionalStore(BaseTransactionalStore):
                 return CommitResult('CONFLICT', current_version=cur_ver)
             ver = (cur_ver or 0) + 1
             self._rows[key] = (value, ver)
+            for record in records:
+                self.outbox.add(dict(record))
             return CommitResult('COMMITTED', version=ver)
 
 

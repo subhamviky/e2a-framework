@@ -76,6 +76,24 @@ class CosmosBackend(CasBackend):
         except (cx.CosmosAccessConditionFailedError, cx.CosmosResourceNotFoundError):
             return False
 
+    def commit(self, key, doc, token, outbox, records):
+        """v1.7.3: the row and the records in one transactional batch on the row's partition
+        (the records take the row's partition key, so they can share its batch)."""
+        item_id, body = self._body(key, doc, None)
+        if token is None:
+            ops = [('create', (body,))]
+        else:
+            ops = [('replace', (item_id, body), {'if_match_etag': token})]
+        ops += [outbox.batch_operation(dict(record), partition_key=item_id) for record in records]
+        try:
+            self.container.execute_item_batch(batch_operations=ops, partition_key=item_id)
+            return True
+        except cx.CosmosBatchOperationError as e:
+            # the row's own operation lost its condition (409 exists, 412 changed, 404 deleted)
+            if e.error_index == 0 and e.status_code in (404, 409, 412):
+                return False
+            raise
+
     def delete(self, key):
         item_id = _item_id(key)
         try:
@@ -118,8 +136,20 @@ class CosmosIdempotencyStore(_FromConfig, CasIdempotencyStore):
 
 
 class CosmosTransactionalStore(_FromConfig, CasTransactionalStore):
-    def __init__(self, container, partition_key_field: str = 'pk', clock: Callable[[], float] = time.time):
-        super().__init__(CosmosBackend(container, partition_key_field), clock)
+    """v1.7.3: ``outbox`` is a CosmosOutboxStore on the same container; from_config builds one
+    from the same configuration (``outbox_name``)."""
+    capabilities = frozenset({'transactional_store', 'transactional_outbox'})
+
+    def __init__(self, container, partition_key_field: str = 'pk', clock: Callable[[], float] = time.time,
+                 outbox=None):
+        super().__init__(CosmosBackend(container, partition_key_field), clock, outbox)
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        if 'outbox' not in kwargs:
+            from .outbox import CosmosOutboxStore
+            kwargs['outbox'] = CosmosOutboxStore.from_config(config)
+        return super().from_config(config, **kwargs)
 
 
 class CosmosLease(_FromConfig, CasLease):

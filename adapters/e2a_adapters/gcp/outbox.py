@@ -2,8 +2,8 @@
 
 A record is written in the SAME transaction as the business change: add(record,
 transaction=tx) inside the application's Firestore transaction (or a WriteBatch, batch=b).
-mark_published() deletes the record and advances the fence in one transaction, so a stale
-sweeper cannot mark.
+mark_published() deletes the record and advances the fence in one atomic write with
+preconditions (v1.7.3: not a lock-based transaction), so a stale sweeper cannot mark.
 
 Layout:
     <firestore_collection>-outbox-<outbox_name>/<record id>    a pending record
@@ -13,16 +13,21 @@ pending() orders by `created_at` (a single-field index Firestore keeps by itself
 document id, so no composite index is needed.
 """
 import json
+import random
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from e2a import resolve_config
 from e2a.messaging import BaseOutboxStore
+from google.api_core import exceptions as gx
 from google.cloud import firestore
 
 from .. import config_keys  # noqa: F401
 from .._lazy import Lazy
+
+
+_CONTENTION_ROUNDS = 32
 
 
 class FirestoreOutboxStore(BaseOutboxStore):
@@ -66,21 +71,30 @@ class FirestoreOutboxStore(BaseOutboxStore):
         return out
 
     def mark_published(self, record_id, config=None, **kwargs):
+        """Delete the record, and with a fencing token advance the fence, in ONE atomic write
+        with preconditions (no lock-based transaction: under many concurrent sweepers those
+        abort each other). The record's delete requires it to exist, so exactly one sweeper
+        wins; the fence's write requires the fence to be unchanged since it was read."""
         token: Optional[int] = kwargs.get('fencing_token')
         ref = self.client.collection(self.records).document(record_id)
         fence_ref = self.client.collection(self.fences).document(self.name)
-
-        @firestore.transactional
-        def mark(tx) -> bool:
-            # every read of a transaction comes before its writes
-            fence = fence_ref.get(transaction=tx) if token is not None else None
-            snap = ref.get(transaction=tx)
-            if not snap.exists:
-                return False
+        for _ in range(_CONTENTION_ROUNDS):
+            batch = self.client.batch()
             if token is not None:
+                fence = fence_ref.get()
                 if fence.exists and int(fence.get('fence')) > int(token):
-                    return False
-                tx.set(fence_ref, {'fence': int(token)})
-            tx.delete(ref)
-            return True
-        return mark(self.client.transaction())
+                    return False                         # a newer sweeper exists: this one is stale
+                if fence.exists:
+                    batch.update(fence_ref, {'fence': int(token)},
+                                 option=self.client.write_option(last_update_time=fence.update_time))
+                else:
+                    batch.create(fence_ref, {'fence': int(token)})
+            batch.delete(ref, option=self.client.write_option(exists=True))
+            try:
+                batch.commit()
+                return True
+            except gx.NotFound:
+                return False                             # already published (the fence is never deleted)
+            except (gx.FailedPrecondition, gx.AlreadyExists, gx.Aborted):
+                time.sleep(0.01 * (1 + random.random()))  # the fence moved, or contention: read again
+        raise RuntimeError(f'mark_published({record_id!r}) kept losing to concurrent sweepers')

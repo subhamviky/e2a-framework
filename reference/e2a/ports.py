@@ -116,7 +116,15 @@ class BaseTransactionalStore(ABC):
         given, a token older than the highest one the store has accepted
         for this key must return status FENCED). On CONFLICT the caller
         reloads and RE-EVALUATES its preconditions; it never blindly
-        retries the same decision against new state."""
+        retries the same decision against new state.
+
+        v1.7.3, kwarg outbox: a list of outbox records ({destination,
+        body, attributes, tenant_id, idempotency_key}) committed in the
+        SAME atomic write as the row: they are pending in the store's
+        outbox if and only if the result is COMMITTED. A store that
+        cannot do this (no 'transactional_outbox' capability, or built
+        without an outbox) raises ValueError rather than write the row
+        alone."""
 
 
 class BaseCacheStore(ABC):

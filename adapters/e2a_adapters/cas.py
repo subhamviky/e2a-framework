@@ -53,6 +53,12 @@ class CasBackend(ABC):
     def delete(self, key: str) -> bool:
         """Delete; False if there was nothing to delete."""
 
+    def commit(self, key: str, doc: Dict[str, Any], token: Any, outbox, records) -> bool:
+        """v1.7.3: write the document (create when ``token`` is None, else replace at ``token``)
+        AND add each outbox record through ``outbox``, in ONE atomic write: all of it or none.
+        False on a lost race. A backend that cannot do this does not override it."""
+        raise NotImplementedError(f'{type(self).__name__} cannot commit outbox records with a row')
+
     def dump(self, value: Any) -> str:
         text = json.dumps(value, separators=(',', ':'), ensure_ascii=False)
         size = len(text.encode('utf-8'))
@@ -90,6 +96,15 @@ class InMemoryCasBackend(CasBackend):
     def delete(self, key):
         with self._lock:
             return self._docs.pop(key, None) is not None
+
+    def commit(self, key, doc, token, outbox, records):
+        with self._lock:                                   # the outbox writes under the row's lock
+            if (key in self._docs) if token is None else (key not in self._docs or self._docs[key][1] != token):
+                return False
+            self._docs[key] = (dict(doc), uuid.uuid4().hex)
+            for record in records:
+                outbox.add(dict(record))
+            return True
 
 
 def _write(backend: CasBackend, key: str, current, doc: Dict, ttl_at: Optional[float] = None) -> bool:
@@ -182,11 +197,15 @@ class CasIdempotencyStore(BaseIdempotencyStore):
 # ----------------------------------------------------------- transactional
 class CasTransactionalStore(BaseTransactionalStore):
     """Versioned JSON rows; put_if_version() is a replace-if-unchanged after checking the
-    version and the fence that were read."""
+    version and the fence that were read.
+
+    v1.7.3: put_if_version(..., outbox=[records]) commits the records with the row through
+    ``backend.commit`` (a Firestore batch, a Cosmos DB transactional batch). The store must be
+    built with ``outbox=``, an outbox store in the SAME database."""
     capabilities = frozenset({'transactional_store'})
 
-    def __init__(self, backend: CasBackend, clock: Callable[[], float] = time.time):
-        self.backend, self.clock = backend, clock
+    def __init__(self, backend: CasBackend, clock: Callable[[], float] = time.time, outbox=None):
+        self.backend, self.clock, self.outbox = backend, clock, outbox
 
     @staticmethod
     def _k(key: str, kw: Dict) -> str:
@@ -217,7 +236,9 @@ class CasTransactionalStore(BaseTransactionalStore):
 
     def put_if_version(self, key, value, expected_version, config=None, **kw) -> CommitResult:
         k, b, text = self._k(key, kw), self.backend, self.backend.dump(value)
-        token = kw.get('fencing_token')
+        token, records = kw.get('fencing_token'), list(kw.get('outbox') or ())
+        if records and self.outbox is None:
+            raise ValueError('outbox records given, but this store has no outbox (construct it with outbox=)')
         for _ in range(_MAX_ATTEMPTS):
             current = b.get(k)
             r = current[0] if current else None
@@ -230,7 +251,11 @@ class CasTransactionalStore(BaseTransactionalStore):
             doc = {'value': text, 'version': (expected_version or 0) + 1}
             if token is not None or fence is not None:
                 doc['fence'] = int(token) if token is not None else int(fence)
-            if _write(b, k, current, doc):
+            if records:
+                written = b.commit(k, doc, current[1] if current else None, self.outbox, records)
+            else:
+                written = _write(b, k, current, doc)
+            if written:
                 return CommitResult('COMMITTED', version=doc['version'])
         raise _exhausted(f'commit of {key!r}')
 

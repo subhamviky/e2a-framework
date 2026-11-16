@@ -28,7 +28,8 @@ from typing import Callable, List
 from .core import ClaimStatus, PhysicalOutcome
 
 __all__ = ['FakeClock', 'check_idempotency_store', 'check_transactional_store', 'check_lease',
-           'check_checkpoint_store', 'check_llm_service', 'check_message_broker', 'check_outbox_store', 'check_all']
+           'check_checkpoint_store', 'check_llm_service', 'check_message_broker', 'check_outbox_store',
+           'check_transactional_outbox', 'check_all']
 
 VALUE = {'amount': '100.25', 'count': 3, 'ratio': 0.5, 'ok': True, 'none': None,
          'nested': {'items': ['a', 'b'], 'unicode': 'Zürich €'}}
@@ -588,8 +589,63 @@ def check_outbox_store(make: Callable[[], object], race: int = 8) -> List[str]:
     return r.passed
 
 
+def check_transactional_outbox(make: Callable[[], tuple], race: int = 8) -> List[str]:
+    """v1.7.3: put_if_version(key, value, version, outbox=[records]) commits the row and its
+    records together. ``make()`` returns (store, outbox): a FRESH transactional store and the
+    EMPTY outbox store it writes to. Records are pending if and only if the write COMMITTED."""
+    r = _Run('transactional outbox')
+
+    def event(kind, n=0):
+        return {'destination': 'orders', 'body': {'kind': kind, 'n': n, 'value': VALUE},
+                'attributes': {'kind': kind}, 'tenant_id': 't1', 'idempotency_key': f'{kind}-{n}'}
+
+    def kinds(outbox):
+        return sorted(x['body']['kind'] for x in outbox.pending(100))
+
+    s, outbox = make()
+    k = _key('row')
+    c = s.put_if_version(k, VALUE, None, outbox=[event('placed'), event('audit')])
+    r.check('a committed create leaves its records pending', c.status == 'COMMITTED' and c.version == 1
+            and kinds(outbox) == ['audit', 'placed'], str(c))
+    [rec] = [x for x in outbox.pending(100) if x['body']['kind'] == 'placed']
+    r.check('a record round-trips exactly',
+            (rec['destination'], rec['body'], rec['attributes'], rec['tenant_id'], rec['idempotency_key'])
+            == ('orders', event('placed')['body'], {'kind': 'placed'}, 't1', 'placed-0'), str(rec))
+    c = s.put_if_version(k, {'other': 1}, None, outbox=[event('duplicate')])
+    r.check('a create that is a CONFLICT adds no record', c.status == 'CONFLICT' and 'duplicate' not in kinds(outbox))
+    c = s.put_if_version(k, {'v': 2}, 1, outbox=[event('paid')])
+    r.check('a committed update carries its record', c.status == 'COMMITTED' and c.version == 2
+            and 'paid' in kinds(outbox) and s.get(k) == {'v': 2}, str(c))
+    c = s.put_if_version(k, {'v': 'stale'}, 1, outbox=[event('stale')])
+    r.check('a stale version adds no record and keeps the row',
+            c.status == 'CONFLICT' and 'stale' not in kinds(outbox) and s.get(k) == {'v': 2}, str(c))
+    c = s.put_if_version(k, {'v': 3}, 2, outbox=[])
+    r.check('an empty record list is an ordinary commit', c.status == 'COMMITTED' and len(outbox.pending(100)) == 3)
+
+    k = _key('fence')
+    s.put_if_version(k, {'v': 1}, None, fencing_token=5, outbox=[event('fenced-create')])
+    c = s.put_if_version(k, {'v': 'late'}, 1, fencing_token=4, outbox=[event('late')])
+    r.check('a FENCED write adds no record', c.status == 'FENCED' and 'late' not in kinds(outbox), str(c))
+
+    for x in outbox.pending(100):
+        outbox.mark_published(x['id'])
+    r.check('the records are ordinary outbox records: published, they leave pending', outbox.pending(100) == [])
+
+    if race >= 2:
+        s, outbox = make()
+        k = _key('race')
+        s.put_if_version(k, {'n': 0}, None)
+        results = _race(race, lambda i: s.put_if_version(k, {'n': i}, 1, outbox=[event('race', i)]))
+        won = [i for i, x in enumerate(results) if x.status == 'COMMITTED']
+        pending = outbox.pending(100)
+        r.check(f'{race} concurrent writes with records: exactly one commits, with exactly its record',
+                len(won) == 1 and [x['body']['n'] for x in pending] == won and s.get(k) == {'n': won[0]},
+                f'{[x.status for x in results]} {pending}')
+    return r.passed
+
+
 def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None, llm_service=None,
-              message_broker=None, outbox=None) -> dict:
+              message_broker=None, outbox=None, transactional_outbox=None) -> dict:
     """Run the suites for the factories given; returns {port: [passed scenario names]}."""
     out = {}
     for name, fn, make in (('idempotency', check_idempotency_store, idempotency),
@@ -597,7 +653,8 @@ def check_all(idempotency=None, transactional=None, lease=None, checkpoint=None,
                            ('lease', check_lease, lease), ('checkpoint', check_checkpoint_store, checkpoint),
                            ('llm_service', check_llm_service, llm_service),
                            ('message_broker', check_message_broker, message_broker),
-                           ('outbox', check_outbox_store, outbox)):
+                           ('outbox', check_outbox_store, outbox),
+                           ('transactional_outbox', check_transactional_outbox, transactional_outbox)):
         if make is not None:
             out[name] = fn(make)
     return out
