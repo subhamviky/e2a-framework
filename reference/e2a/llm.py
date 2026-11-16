@@ -133,7 +133,9 @@ class BaseLLMAgentService(ABC, _PropagationMixin):
     # (name, pattern, optional validator). Card numbers must pass Luhn.
     _DLP_PATTERNS = [
         ('ssn', re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), None),
-        ('card', re.compile(r'\b(?:\d[ -]?){13,19}\b'), _luhn_valid),
+        # v1.7.5: 13-19 digits (single spaces or hyphens between), never digits joined to a
+        # word or hyphen on either side: the all-digit tail of a UUID is not a card number
+        ('card', re.compile(r'(?<![\w-])\d(?:[ -]?\d){12,18}(?![\w-])'), _luhn_valid),
         ('bearer', re.compile(r'Bearer\s+[A-Za-z0-9\-_\.=]{16,}'), None),
     ]
 
