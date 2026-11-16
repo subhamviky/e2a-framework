@@ -19,6 +19,11 @@ record in a transaction of its own: the transactional store writes both.
   - **`CosmosTransactionalStore(outbox=CosmosOutboxStore)`:** one transactional batch on the row's partition; the records take the row's partition key. The outbox's pending query already spans partitions.
   - `from_config` on each of these builds the matching outbox store from the same configuration (`outbox_name`), so a profile needs no new keys.
   - The CAS engine (`e2a_adapters.cas`) gains `CasBackend.commit(key, doc, token, outbox, records)`, which a backend overrides when it can write a row and records atomically.
+### Fixed
+- **`FirestoreOutboxStore.mark_published`** could raise `ValueError` ("Failed to commit transaction in 5 attempts") when several sweepers marked the same record: lock-based Firestore transactions aborted each other.
+  - It now deletes the record, and advances the fence, in one atomic write with preconditions: the record must exist; the fence must be unchanged since it was read. Exactly one sweeper wins; the others get `False`.
+  - Verified on the emulator: the contract 20 times, a race of 32 sweepers 5 times, and a race of 16 fenced sweepers 5 times.
+
 - Tested: the contract on the CAS engine in memory, DynamoDB on moto, and the race on DynamoDB Local and the Firestore and Cosmos DB emulators.
 
 ## v1.7.2 — Consumers for pushed deliveries (design note MP-05)
