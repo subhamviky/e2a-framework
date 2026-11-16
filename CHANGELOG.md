@@ -2,6 +2,18 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.7.5 — Card numbers, not identifiers (egress DLP)
+
+A fix. No API change.
+
+### Fixed
+- **Egress DLP's card pattern matched the all-digit tail of a UUID.**
+  - The old pattern was `\b(?:\d[ -]?){13,19}\b`. A hyphen is a word boundary, so in `5ede915b-5993-44e2-8a31-4111111111111111` the last group was a candidate. When it passed the Luhn check, it was replaced with `[REDACTED_BY_E2A_DLP]`.
+  - The pattern is now `(?<![\w-])\d(?:[ -]?\d){12,18}(?![\w-])`: 13 to 19 digits, single spaces or hyphens between them, and never joined to a letter, digit, underscore or hyphen on either side. The Luhn check is unchanged.
+  - Card numbers written with spaces or hyphens, alone, or after a colon or bracket are still masked.
+  - The same weakness in a project's own pattern (order-to-cash `governance.yaml`) caused an intermittent CI failure, fixed there on 16 Nov 2026.
+- `tests/test_v175.py`: UUIDs (including 2,000 random ones), digits joined to words, and five card formats in four contexts.
+
 ## v1.7.4 — Identity at ingress, per cloud (design note MP-05)
 
 Additive. E2A's `ClaimMapIdentityResolver` (v1.7.0) resolves claims a gateway verified. This release adds what reads those claims where each cloud's platform puts them.
