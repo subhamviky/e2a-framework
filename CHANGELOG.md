@@ -2,6 +2,20 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.7.4 — Identity at ingress, per cloud (design note MP-05)
+
+Additive. E2A's `ClaimMapIdentityResolver` (v1.7.0) resolves claims a gateway verified. This release adds what reads those claims where each cloud's platform puts them.
+
+### Added
+- **e2a-adapters `e2a_adapters.ingress.verified_claims(source, event=, headers=)`** returns `(claims, verified)`:
+  - **`aws_http_api`:** API Gateway HTTP API with a JWT authorizer, from the Lambda event's `requestContext.authorizer.jwt.claims`. A list claim that arrives as one string, `"[a b]"`, becomes a list.
+  - **`gcp_api_gateway`:** Google Cloud API Gateway's `X-Apigateway-Api-Userinfo` header (the base64url JWT payload).
+  - **`azure_container_apps`:** Container Apps / App Service authentication's `X-MS-CLIENT-PRINCIPAL` header (base64 JSON). The platform's mapped claim names are aliased back to `tid`, `oid`, `sub` and `roles`, so the `entra_id` preset reads them.
+  - Without the platform's carrier, `verified` is False and the resolver refuses. A malformed carrier raises `ValueError`.
+- **`identity_at_ingress(config, headers=, event=, request_tenant=)`:** the request's E2A `Identity`. It is off (`None`) without an `identity_source`, so local runs take headers as given. With a source configured it fails closed: no carrier, an untrusted issuer, no tenant, or another tenant named by the request raise `IdentityRefused`.
+- **The config key `identity_source`** (`E2A_IDENTITY_SOURCE`). The `aws`, `gcp` and `azure` profiles set their cloud's source.
+- **The trust note in the module:** a carrier is trustworthy only where the platform guarantees it. On Google Cloud, the backend must accept calls only from the gateway.
+
 ## v1.7.3 — A row and its events in one commit (design note MP-05)
 
 Additive. A service that changes a row and announces the change no longer writes the outbox

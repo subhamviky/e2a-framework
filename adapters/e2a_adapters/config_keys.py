@@ -47,6 +47,7 @@ KEYS = [
     ConfigKey('cosmos_database', 'COSMOS_DATABASE', 'e2a', str, _GROUP, 'Cosmos*.from_config'),
     ConfigKey('cosmos_container', 'COSMOS_CONTAINER', 'e2a', str, _GROUP, 'Cosmos*.from_config — the container of E2A records'),
     ConfigKey('cosmos_key', 'COSMOS_KEY', None, str, _GROUP, 'Cosmos*.from_config — an account key (the emulator); unset in the cloud: Entra ID', secret=True),
+    ConfigKey('identity_source', 'E2A_IDENTITY_SOURCE', None, str, _GROUP, 'v1.7.4: where the platform hands over verified claims (e2a_adapters.ingress): aws_http_api, gcp_api_gateway or azure_container_apps; unset = no ingress identity'),
     ConfigKey('servicebus_namespace', 'SERVICEBUS_NAMESPACE', None, str, _GROUP, 'ServiceBusBroker — <namespace>.servicebus.windows.net, with Entra ID'),
     ConfigKey('servicebus_connection_string', 'SERVICEBUS_CONNECTION_STRING', None, str, _GROUP, 'ServiceBusBroker — a connection string (the emulator); unset in the cloud', secret=True),
     ConfigKey('keyvault_url', 'KEYVAULT_URL', None, str, _GROUP, 'KeyVaultCredentialProvider — https://<vault>.vault.azure.net'),
