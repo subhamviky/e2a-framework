@@ -77,6 +77,29 @@ class FirestoreBackend(CasBackend):
         except (gx.FailedPrecondition, gx.NotFound, gx.Aborted):
             return False
 
+    def commit(self, key, doc, token, outbox, records):
+        """v1.7.3: the row and the records in one WriteBatch (atomic); the row write carries
+        the precondition (create, or update at ``token``)."""
+        ref, batch = self._ref(key), self.client.batch()
+        data = dict(doc)
+        if token is None:
+            batch.create(ref, data)
+        else:
+            snap = ref.get()
+            if not snap.exists or snap.update_time != token:
+                return False
+            for field in snap.to_dict():                 # whole-document replace, as in replace()
+                if field not in data:
+                    data[field] = firestore.DELETE_FIELD
+            batch.update(ref, data, option=self.client.write_option(last_update_time=token))
+        for record in records:
+            outbox.add(dict(record), batch=batch)
+        try:
+            batch.commit()
+            return True
+        except (gx.AlreadyExists, gx.FailedPrecondition, gx.NotFound, gx.Aborted):
+            return False
+
     def delete(self, key):
         for _ in range(8):
             try:
@@ -117,8 +140,20 @@ class FirestoreIdempotencyStore(_FromConfig, CasIdempotencyStore):
 
 
 class FirestoreTransactionalStore(_FromConfig, CasTransactionalStore):
-    def __init__(self, client, collection: str = 'e2a', ttl_field: str = 'ttl', clock: Callable[[], float] = time.time):
-        super().__init__(_backend(client, collection, ttl_field), clock)
+    """v1.7.3: ``outbox`` is a FirestoreOutboxStore on the same database; from_config builds
+    one from the same configuration (``outbox_name``)."""
+    capabilities = frozenset({'transactional_store', 'transactional_outbox'})
+
+    def __init__(self, client, collection: str = 'e2a', ttl_field: str = 'ttl', clock: Callable[[], float] = time.time,
+                 outbox=None):
+        super().__init__(_backend(client, collection, ttl_field), clock, outbox)
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        if 'outbox' not in kwargs:
+            from .outbox import FirestoreOutboxStore
+            kwargs['outbox'] = FirestoreOutboxStore.from_config(config)
+        return super().from_config(config, **kwargs)
 
 
 class FirestoreLease(_FromConfig, CasLease):

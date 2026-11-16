@@ -44,6 +44,7 @@ Clients are created on first use, so a profile binds and verifies without creden
 | Secret stores (since 1.7.0) | per cloud | `SecretsManagerCredentialProvider`, `SecretManagerCredentialProvider`, `KeyVaultCredentialProvider`: tool auth headers from `secret_headers` |
 | Lambda SQS batches (since 1.7.2) | `e2a-adapters[aws]` | `SQSLambdaBatch`: one Lambda-pushed SQS batch as a broker; `batch_item_failures()` is the Lambda response |
 | Outbox stores (since 1.7.1) | per cloud | `DynamoDBOutboxStore` (`transact_item` for your TransactWriteItems), `FirestoreOutboxStore` (`add(..., transaction=)`), `CosmosOutboxStore` (`batch_operation` for your transactional batch, in the business document's partition) |
+| A row and its events in one commit (since 1.7.3) | per cloud | `DynamoDBTransactionalStore`, `FirestoreTransactionalStore`, `CosmosTransactionalStore`: `put_if_version(key, value, version, outbox=[records])` writes the row and the outbox records in one TransactWriteItems, WriteBatch or transactional batch; `from_config` builds the matching outbox store |
 | Identity presets (since 1.7.0) | – | `e2a_adapters.identity.PRESETS`: the claim maps of Cognito, Entra ID and Identity Platform |
 
 Firestore and Cosmos DB share one implementation of the ports, `e2a_adapters.cas`. It works over any document store that can create-if-absent and replace-if-unchanged (an update time, an ETag), and each database supplies only a small `CasBackend`. PostgreSQL would be a third backend.
@@ -53,8 +54,8 @@ Firestore and Cosmos DB share one implementation of the ports, `e2a_adapters.cas
 The version follows E2A. Install e2a-framework from its tag first, as every project already does:
 
 ```bash
-pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.2" \
-            "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.2#subdirectory=adapters"
+pip install "e2a-framework @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.3" \
+            "e2a-adapters[aws] @ git+https://github.com/subhamviky/e2a-framework.git@v1.7.3#subdirectory=adapters"
 ```
 
 Poetry:

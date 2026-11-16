@@ -2,6 +2,25 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.7.3 — A row and its events in one commit (design note MP-05)
+
+Additive. A service that changes a row and announces the change no longer writes the outbox
+record in a transaction of its own: the transactional store writes both.
+
+### Added
+- **`put_if_version(key, value, version, outbox=[records])`:** the records are committed in the SAME atomic write as the row. They are pending in the store's outbox if and only if the result is `COMMITTED`; a `CONFLICT` or `FENCED` write adds none.
+  - A store built without an outbox raises `ValueError` before it writes anything, so the row is never written alone.
+  - Stores that can do this declare the capability **`transactional_outbox`**.
+- **`e2a.port_contract.check_transactional_outbox`:** 9 scenarios: a committed create and update carry their records; a conflict, a stale version and a fenced write add none; records round-trip and publish as ordinary outbox records; under a race exactly one write commits, with exactly its record.
+- **The reference `InMemoryTransactionalStore(outbox=...)`** writes the records under the row's lock.
+- **e2a-adapters 1.7.3:**
+  - **`DynamoDBTransactionalStore(outbox=DynamoDBOutboxStore)`:** one `TransactWriteItems` with the conditional update and a Put per record (at most 99 records). A transaction conflict is retried; a lost condition is a `CONFLICT`.
+  - **`FirestoreTransactionalStore(outbox=FirestoreOutboxStore)`:** one `WriteBatch`; the row write carries its precondition (create, or the update time that was read).
+  - **`CosmosTransactionalStore(outbox=CosmosOutboxStore)`:** one transactional batch on the row's partition; the records take the row's partition key. The outbox's pending query already spans partitions.
+  - `from_config` on each of these builds the matching outbox store from the same configuration (`outbox_name`), so a profile needs no new keys.
+  - The CAS engine (`e2a_adapters.cas`) gains `CasBackend.commit(key, doc, token, outbox, records)`, which a backend overrides when it can write a row and records atomically.
+- Tested: the contract on the CAS engine in memory, DynamoDB on moto, and the race on DynamoDB Local and the Firestore and Cosmos DB emulators.
+
 ## v1.7.2 — Consumers for pushed deliveries (design note MP-05)
 
 Additive. What a project needs when its broker pushes messages to it (Lambda with SQS, and
