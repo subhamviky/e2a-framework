@@ -2,6 +2,43 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.8.0 — Service-to-service identity (hub design note SI-01)
+
+Additive, plus one fix. Services in the landscape prove who they are to each other with their own cloud's workload identity, exchanged for one issuer (Entra ID); receivers grant each caller tenants and actions as roles. No secrets.
+
+### Added
+- **Service callers** in `BaseIdentityResolver` / `ClaimMapIdentityResolver`. With `identity_tenants_from_roles` (`E2A_IDENTITY_TENANTS_FROM_ROLES`, e.g. `"tenant:"`), the tenant is the one the request names (`X-Tenant-Id`), and only when a role `tenant:<id>` grants it. A missing tenant, or one not granted, is `IdentityRefused`. The tenant claim is not used for such callers. Without the setting, users resolve exactly as before.
+- **`require_roles(identity, *roles)`**: `IdentityRefused` unless the identity holds every role, for the action a route performs.
+- **e2a-adapters `e2a_adapters.workload`**: outbound workload identity as E2A `BaseCredentialProvider`s, which tools already use.
+  - Native token sources:
+    - `GoogleIdTokenSource`: the metadata server's ID token.
+    - `AwsWebIdentityTokenSource`: STS `GetWebIdentityToken`, IAM outbound identity federation, regional endpoint.
+    - `AzureManagedIdentitySource`.
+  - `EntraFederatedTokenSource` exchanges a Google or AWS token for an Entra access token (client credentials with the native token as `client_assertion`, audience `api://AzureADTokenExchange`).
+  - `WorkloadCredentialProvider` picks the scope by target URL prefix (`workload_token_scopes`) and caches each token until `workload_token_refresh_seconds` (300) before expiry.
+  - `workload_credentials(config)` builds it from `workload_identity` (gcp, aws or azure). Unset means no token, as before.
+  - Failures raise `WorkloadTokenError`.
+- **The preset `entra_service`**: the subject is the calling app (`azp`), with app roles.
+- **e2a-java `e2a-identity`** (new module). It implements the same rules in Java:
+  - `VerifiedClaims` (Container Apps' principal header);
+  - `ClaimMapIdentityResolver` and `requireRoles`;
+  - `IdentityAtIngress`, configured by the same `E2A_IDENTITY_*` variables;
+  - `IdentityRefused` knows whether it is a `401` or a `403`.
+- Configuration keys:
+  - core: `identity_tenants_from_roles`;
+  - e2a-adapters: `workload_identity`, `workload_entra_tenant`, `workload_entra_client_id`, `workload_azure_client_id`, `workload_aws_region`, `workload_token_scopes`, `workload_token_refresh_seconds`.
+
+### Fixed
+- **A `BaseException` inside a workflow step completed the idempotency claim.**
+  - `BaseWorkflow` settled the claim in `finally`. A step interrupted by `asyncio.CancelledError`, `SystemExit` or `KeyboardInterrupt` therefore had its claim completed as SUCCEEDED, with partial state as the replayable result. A retry was then REPLAYED with that wrong result.
+  - Now the claim is left IN_PROGRESS, as a hard kill would leave it. Once its lease expires, a repeat gets RECOVERY_REQUIRED and a `BaseReconciliationService` takes it over.
+  - Found while testing order-to-cash crash recovery (E2A backlog, 17 Nov 2026).
+
+### Tests
+- `tests/test_v180.py`: service callers, `require_roles`, a `BaseException` in a step.
+- `adapters/tests/test_workload.py`: each token source against fakes, the Entra exchange form, caching and refresh, scope by prefix, a refused exchange, and a service caller at Container Apps ingress.
+- `java/e2a-identity`: 8 tests.
+
 ## v1.7.5 — Card numbers, not identifiers (egress DLP)
 
 A fix. No API change.

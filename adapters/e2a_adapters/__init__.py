@@ -6,7 +6,8 @@ Each cloud is an optional extra and a subpackage, so a project installs only wha
     e2a_adapters.gcp     Firestore, Pub/Sub, Secret Manager   (pip install "e2a-adapters[gcp]")
     e2a_adapters.azure   Cosmos DB, Service Bus, Key Vault    (pip install "e2a-adapters[azure]")
     e2a_adapters.cas     the ports over any document store with optimistic concurrency
-    e2a_adapters.identity  claim maps of Cognito, Entra ID and Identity Platform
+    e2a_adapters.identity  claim maps of Cognito, Entra ID, Identity Platform, and Entra service callers
+    e2a_adapters.workload  outbound workload identity: Google, AWS and Azure tokens, exchanged for Entra (v1.8.0)
 
 v1.7.0: every adapter has from_config(config), and the cloud profiles `aws`, `gcp` and `azure`
 bind them (bindings_from_profile("aws")); a provider profile extends one. Every adapter passes
@@ -15,4 +16,4 @@ No AI vendor SDK is imported here (tests/test_boundary.py).
 """
 from . import config_keys  # noqa: F401  (registers the cloud keys)
 
-__version__ = '1.7.5'
+__version__ = '1.8.0'

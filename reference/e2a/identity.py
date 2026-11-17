@@ -14,6 +14,12 @@ in e2a-adapters' cloud profiles. E2A refuses, with IdentityRefused (a Governance
   * an issuer outside `identity_trusted_issuers` (when the list is set);
   * claims without a tenant;
   * a tenant in the request that differs from the tenant in the claims.
+
+Service callers (v1.8.0, hub design note SI-01). A service acts for several tenants, so its token
+carries no tenant: the tenants it may act for are roles, "tenant:<id>", granted to it (Entra app
+roles, for example). With `identity_tenants_from_roles` set to that prefix, the tenant is the one
+the request names (X-Tenant-Id), and only when a role grants it. require_roles() then checks the
+action roles a route needs.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -21,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from .config import resolve_config
 from .stages import GovernanceRefusal
 
-__all__ = ['Identity', 'IdentityRefused', 'BaseIdentityResolver', 'ClaimMapIdentityResolver']
+__all__ = ['Identity', 'IdentityRefused', 'BaseIdentityResolver', 'ClaimMapIdentityResolver', 'require_roles']
 
 
 class IdentityRefused(GovernanceRefusal, PermissionError):
@@ -76,17 +82,26 @@ class BaseIdentityResolver:
         trusted = resolve_config('identity_trusted_issuers', cfg) or []
         if trusted and issuer not in trusted:
             raise IdentityRefused(f'issuer {issuer!r} is not trusted', 'identity')
-        tenant = self._tenant_from(claims, mapping, cfg)
-        if not tenant:
-            raise IdentityRefused(f"no tenant in the claims (claim {mapping.get('tenant_id')!r})", 'identity')
-        if request_tenant is not None and str(request_tenant) != str(tenant):
-            raise IdentityRefused('the request names another tenant than its credentials', 'identity')
         roles = _claim(claims, mapping.get('roles'))
         if isinstance(roles, str):
             roles = [r for r in roles.replace(',', ' ').split() if r]
+        roles = [str(r) for r in (roles or [])]
+        prefix = resolve_config('identity_tenants_from_roles', cfg)
+        if prefix:                                   # a service caller: tenants are granted roles
+            if request_tenant is None or str(request_tenant) == '':
+                raise IdentityRefused('a service call must name its tenant (X-Tenant-Id)', 'identity')
+            if f'{prefix}{request_tenant}' not in roles:
+                raise IdentityRefused(f'the caller is not granted tenant {str(request_tenant)!r}', 'identity')
+            tenant = str(request_tenant)
+        else:
+            tenant = self._tenant_from(claims, mapping, cfg)
+            if not tenant:
+                raise IdentityRefused(f"no tenant in the claims (claim {mapping.get('tenant_id')!r})", 'identity')
+            if request_tenant is not None and str(request_tenant) != str(tenant):
+                raise IdentityRefused('the request names another tenant than its credentials', 'identity')
         subject = _claim(claims, mapping.get('subject'))
         return Identity(tenant_id=str(tenant), subject=None if subject is None else str(subject),
-                        roles=[str(r) for r in (roles or [])], issuer=issuer)
+                        roles=roles, issuer=issuer)
 
     def _tenant_from(self, claims: Dict[str, Any], mapping: Dict[str, str], config: Dict[str, Any]) -> Optional[str]:
         """Hook: the tenant from the claims. Default: the mapped claim, through
@@ -101,3 +116,12 @@ class BaseIdentityResolver:
 class ClaimMapIdentityResolver(BaseIdentityResolver):
     """The resolver as configured: everything comes from identity_claim_map,
     identity_trusted_issuers and identity_tenant_map."""
+
+
+def require_roles(identity: Identity, *roles: str) -> Identity:
+    """v1.8.0: refuse (IdentityRefused) unless the identity holds every one of `roles`, e.g. the
+    action a route performs ("settlement.submit"). Returns the identity, so it can wrap a resolve()."""
+    missing = [r for r in roles if r not in (identity.roles or [])]
+    if missing:
+        raise IdentityRefused(f"the caller lacks the role(s) {', '.join(missing)}", 'identity')
+    return identity

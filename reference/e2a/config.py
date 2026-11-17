@@ -124,6 +124,7 @@ E2A_CONFIG: Dict[str, ConfigKey] = {c.key: c for c in [
     _k('identity_claim_map', 'E2A_IDENTITY_CLAIM_MAP', {}, _to_json_map, 'Identity', 'v1.7.0: {tenant_id, subject, roles, issuer: claim name or dotted path} — the identity provider\'s claim names'),
     _k('identity_trusted_issuers', 'E2A_IDENTITY_TRUSTED_ISSUERS', [], _to_json_list, 'Identity', 'v1.7.0: issuers accepted by BaseIdentityResolver (empty: any issuer the gateway verified)'),
     _k('identity_tenant_map', 'E2A_IDENTITY_TENANT_MAP', {}, _to_json_map, 'Identity', 'v1.7.0: external tenant id (an Entra directory id) -> E2A tenant_id'),
+    _k('identity_tenants_from_roles', 'E2A_IDENTITY_TENANTS_FROM_ROLES', '', str, 'Identity', 'v1.8.0 (SI-01): for service callers, a role prefix such as "tenant:". The tenant is the one the request names, and only if a role "<prefix><tenant>" grants it; the tenant claim is not used'),
     _k('scopes', 'E2A_SCOPES', {}, _to_json_map, 'Bindings', 'v1.6.1: {"tenant:<id>": {key: value}, "agent:<name>": {...}} — overlays applied per call (tenant, then agent)'),
     _k('log_sink', 'LOG_SINK', 'stdout', str, 'Common', 'BaseObservability._ship_logs() / _flush_logs()'),
     _k('dlq_queue_url', 'DLQ_QUEUE_URL', None, str, 'Common', '_send_to_dlq()'),

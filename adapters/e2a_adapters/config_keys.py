@@ -56,6 +56,14 @@ KEYS = [
     # secrets as tool credentials (N2), every cloud
     ConfigKey('secret_headers', 'E2A_SECRET_HEADERS', [], _list, _GROUP, '[{target, secret, header, prefix, json_key}] — the header a tool call to <target> carries, read from a secret store'),
     ConfigKey('secret_cache_seconds', 'E2A_SECRET_CACHE_SECONDS', 300, int, _GROUP, 'secret-backed credential providers — how long a secret value is reused'),
+    # v1.8.0 (hub design note SI-01): outbound workload identity (e2a_adapters.workload)
+    ConfigKey('workload_identity', 'E2A_WORKLOAD_IDENTITY', None, str, _GROUP, 'v1.8.0: the cloud identity this service presents to other services: gcp, aws or azure; unset = no token (local runs)'),
+    ConfigKey('workload_entra_tenant', 'E2A_WORKLOAD_ENTRA_TENANT', None, str, _GROUP, 'v1.8.0: the Entra directory that issues the landscape\'s workload tokens (gcp and aws)'),
+    ConfigKey('workload_entra_client_id', 'E2A_WORKLOAD_ENTRA_CLIENT_ID', None, str, _GROUP, 'v1.8.0: this caller\'s Entra app, whose federated credential trusts its native identity (gcp and aws)'),
+    ConfigKey('workload_azure_client_id', 'E2A_WORKLOAD_AZURE_CLIENT_ID', None, str, _GROUP, 'v1.8.0: a user-assigned managed identity\'s client id (azure); unset = the system-assigned one'),
+    ConfigKey('workload_aws_region', 'E2A_WORKLOAD_AWS_REGION', None, str, _GROUP, 'v1.8.0: the STS region for GetWebIdentityToken (not the global endpoint); unset = the SDK default'),
+    ConfigKey('workload_token_scopes', 'E2A_WORKLOAD_TOKEN_SCOPES', {}, _map, _GROUP, 'v1.8.0: {target URL prefix: scope}, e.g. {"https://settlement.example": "api://settlement/.default"}; the longest prefix wins'),
+    ConfigKey('workload_token_refresh_seconds', 'E2A_WORKLOAD_TOKEN_REFRESH_SECONDS', 300.0, float, _GROUP, 'v1.8.0: a cached workload token is renewed this long before it expires'),
 ]
 
 for _spec in KEYS:

@@ -14,6 +14,10 @@ PRESETS: Dict[str, Dict[str, str]] = {
     'entra_id': {'tenant_id': 'tid', 'subject': 'oid', 'roles': 'roles', 'issuer': 'iss'},
     # Google Identity Platform with multi-tenancy: firebase.tenant; roles from a custom claim
     'identity_platform': {'tenant_id': 'firebase.tenant', 'subject': 'sub', 'roles': 'roles', 'issuer': 'iss'},
+    # v1.8.0 (SI-01): another SERVICE calling with an Entra access token. The subject is the calling
+    # app (azp, or appid in v1 tokens); app roles carry actions and granted tenants ("tenant:<id>"),
+    # so use it with identity_tenants_from_roles = "tenant:". No tenant claim is read.
+    'entra_service': {'tenant_id': 'tid', 'subject': 'azp', 'roles': 'roles', 'issuer': 'iss'},
 }
 
 
