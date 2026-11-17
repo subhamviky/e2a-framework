@@ -5,7 +5,7 @@
     <!-- e2a-java: the E2A runtime for Java (design note D-01). Released with E2A's tag, at E2A's version. -->
     <groupId>com.subhamviky.e2a</groupId>
     <artifactId>e2a-java</artifactId>
-    <version>1.7.4</version>
+    <version>1.8.0</version>
     <packaging>pom</packaging>
     <name>e2a-java</name>
     <description>E2A runtime contracts for Java: the v1.2 agent lifecycle, declared workflows, governance stages,
@@ -18,6 +18,7 @@
     <modules>
         <module>e2a-core</module>
         <module>e2a-cqrs</module>
+        <module>e2a-identity</module>
         <module>e2a-spring-jpa</module>
         <module>e2a-test</module>
     </modules>
@@ -40,6 +41,11 @@
             <dependency>
                 <groupId>com.subhamviky.e2a</groupId>
                 <artifactId>e2a-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.subhamviky.e2a</groupId>
+                <artifactId>e2a-identity</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

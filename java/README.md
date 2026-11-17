@@ -6,6 +6,7 @@ Design: design note D-01 (o2c-platform-hub, `roadmap/design/`). Released with E2
 |---|---|
 | `e2a-core` | `RequestContext`, `Deadline`, `PhysicalOutcome`; `IdempotencyStore` (+ `InMemoryIdempotencyStore`); `ToolService` with `ReadAccess` / `ModifyAccess`; governance `Stage`s (`CapacityStage`, `FirewallStage`, `ApprovalStage`) and `Governance`; `LlmService` (+ `SimulatedLlmService`); `BaseAgent` with the v1.2 lifecycle; `BaseWorkflow` with `Steps` / `Step` / `Route` and one claim per request |
 | `e2a-cqrs` | The Deterministic CQRS profile: `BaseOrchestrator`, `BaseCommandService`, `BaseQueryService` |
+| `e2a-identity` | Identity at ingress (v1.8.0): `VerifiedClaims` (Container Apps' `X-MS-CLIENT-PRINCIPAL`), `ClaimMapIdentityResolver` with the Python rules (trusted issuers, tenant map, service callers granted tenants as `tenant:<id>` roles), `requireRoles`, `IdentityAtIngress` configured by the same `E2A_IDENTITY_*` variables |
 | `e2a-spring-jpa` | `JpaIdempotencyStore` on the `idempotency_record` table (`com/subhamviky/e2a/jpa/schema.sql`), auto-configured for Spring Boot 3.5 |
 | `e2a-test` | `AgentContract`, a JUnit 5 kit for the guarantees every agent keeps |
 
@@ -39,7 +40,7 @@ There is no package registry: build it from E2A's tag in your CI, before your ow
 ```xml
 <dependency>
     <groupId>com.subhamviky.e2a</groupId>
-    <artifactId>e2a-core</artifactId>   <!-- or e2a-cqrs, e2a-spring-jpa; e2a-test with <scope>test</scope> -->
+    <artifactId>e2a-core</artifactId>   <!-- or e2a-cqrs, e2a-identity, e2a-spring-jpa; e2a-test with <scope>test</scope> -->
     <version>1.2.2</version>
 </dependency>
 ```

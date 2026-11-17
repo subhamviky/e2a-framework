@@ -174,7 +174,7 @@ class BaseWorkflow(ABC, _PropagationMixin):
         # duplicate gets a typed outcome (REPLAYED / IN_PROGRESS / CONFLICT /
         # RECOVERY_REQUIRED / FAILED_FINAL), never a second execution.
         store = config.get('idempotency_store')
-        owned, dehydrated, last_error = False, False, None
+        owned, dehydrated, last_error, interrupted = False, False, None, False
         if isinstance(store, BaseIdempotencyStore) and self._requires_idempotency_claim(state, config, **kwargs):
             claim = store.claim(
                 idempotency_key, config, tenant_id=tenant_id, owner=correlation_id,
@@ -217,13 +217,16 @@ class BaseWorkflow(ABC, _PropagationMixin):
             self._handle_error(e, state, config, correlation_id=correlation_id,
                                 message_log=message_log,
                                 failed_keys=failed_keys, **kwargs)
+        except BaseException:
+            interrupted = True      # v1.8.0: cancelled or exiting mid-step: leave the claim as it is
+            raise
         finally:
             obs_engine = config.get('observability_engine')
             if obs_engine and isinstance(obs_engine, BaseObservability):
                 obs_engine.record_telemetry(message_log, correlation_id, config, tenant_id=tenant_id)
             else:
                 self._flush_logs(message_log, config)  # fallback when no engine configured
-            if owned:
+            if owned and not interrupted:
                 self.__settle_claim(store, idempotency_key, tenant_id, correlation_id, state,
                                     failed_keys, dehydrated, last_error, config)
             if failed_keys:
@@ -405,7 +408,7 @@ class BaseWorkflow(ABC, _PropagationMixin):
         run = {'ctx': ctx, 'decided': False, 'owned': False, 'short': None, 'fingerprint': fingerprint}
         legacy = dict(correlation_id=correlation_id, io_config=io_config, tenant_id=tenant_id,
                       message_log=message_log, **kwargs)
-        dehydrated, last_error = False, None
+        dehydrated, last_error, interrupted = False, None, False
         try:
             workflow = call_hook(self._build_workflow, 'build_workflow', dict(ctx=ctx, config=config, state=state))
             if not self.__hook('_validate_workflow', 'validate_workflow', (workflow, config), legacy,
@@ -457,13 +460,20 @@ class BaseWorkflow(ABC, _PropagationMixin):
             self.__hook('_handle_error', 'handle_error', (e, state, config),
                         dict(legacy, failed_keys=failed_keys), error=e, state=state, ctx=run['ctx'],
                         messages=messages, failed_keys=failed_keys)
+        except BaseException:
+            # v1.8.0: a BaseException (task cancellation, SystemExit, KeyboardInterrupt) means the
+            # step did not finish and its effects are unknown. Settling here would complete the claim
+            # as SUCCEEDED with partial state; instead it stays IN_PROGRESS until its lease expires,
+            # then answers RECOVERY_REQUIRED, and a BaseReconciliationService takes it over.
+            interrupted = True
+            raise
         finally:
             obs_engine = config.get('observability_engine')
             if obs_engine and isinstance(obs_engine, BaseObservability):
                 obs_engine.record_telemetry(message_log, correlation_id, config, tenant_id=tenant_id)
             else:
                 self._flush_logs(message_log, config)
-            if run['owned']:
+            if run['owned'] and not interrupted:
                 self.__settle_claim(store, run['ctx'].idempotency_key, tenant_id, correlation_id, state,
                                     failed_keys, dehydrated, last_error, config)
             if failed_keys:

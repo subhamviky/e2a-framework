@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.subhamviky.e2a</groupId>
+        <artifactId>e2a-java</artifactId>
+        <version>1.8.0</version>
+    </parent>
+    <artifactId>e2a-identity</artifactId>
+    <name>e2a-identity</name>
+    <description>Identity at ingress (E2A v1.8.0, hub design note SI-01): verified claims from the platform, the claim-map resolver, service callers granted tenants as roles.</description>
+    <dependencies>
+        <dependency><groupId>com.subhamviky.e2a</groupId><artifactId>e2a-core</artifactId></dependency>
+        <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
+    </dependencies>
+</project>
