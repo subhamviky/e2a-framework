@@ -4,7 +4,7 @@ These are test doubles / reference implementations of the port contracts
 (atomic claim, conditional commit, fenced writes, leases, cache). They are
 single-process and NOT for production: a real adapter binds the same
 contracts to a managed store whose conditional-write / lease primitive
-provides the atomicity (see the Multi-Cloud Reference).
+provides the atomicity (see docs/CLOUD_LANDING_ZONE.md §8.1.6).
 """
 import threading
 import time

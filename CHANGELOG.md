@@ -2,7 +2,16 @@
 
 All notable changes to the E2A framework documents and reference code.
 
-## v1.8.0 — Service-to-service identity (hub design note SI-01)
+## Unreleased — documents
+
+### Removed
+- **E2A Multi-Cloud Reference (PDF).** It had grown out of date: it showed the v1.1 API and the retired `BedrockLLMService`-style classes, used LangGraph as the reference, named retired models, and treated Meta Llama as if it were a cloud. Its parts now live where they are maintained:
+  - concurrency, admission and capacity per cloud: [Cloud Landing Zone](docs/CLOUD_LANDING_ZONE.md) §8.1.5–8.1.6;
+  - ports and capability packs: the e2a-managed-providers core design;
+  - which model family runs on which cloud, and what each cloud adds: the [models × clouds matrix](https://github.com/subhamviky/e2a-managed-providers/blob/main/docs/design/matrix/MODEL_CLOUD_MATRIX.md), whose section 7 maps each former section to its new home.
+- The Strategic Overview, README §16 and the in-memory adapters now point there.
+
+ Service-to-service identity (hub design note SI-01)
 
 Additive, plus one fix. Services in the landscape prove who they are to each other with their own cloud's workload identity, exchanged for one issuer (Entra ID); receivers grant each caller tenants and actions as roles. No secrets.
 
