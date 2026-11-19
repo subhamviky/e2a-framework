@@ -1,6 +1,6 @@
 # Design documents
 
-Detailed HLD and LLD documents for the E2A profiles and the family as a whole. Each folder holds the document as Markdown, its diagrams (PNG images plus PlantUML and Graphviz sources) and a Word copy.
+Detailed HLD and LLD documents for the E2A profiles and the family as a whole. Each folder holds the document as Markdown, its diagrams (PNG images plus PlantUML and Graphviz sources) and a PDF copy.
 
 | Folder | Document | Read it for |
 |---|---|---|
