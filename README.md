@@ -591,6 +591,8 @@ E2A separates stable architecture contracts from provider-specific realizations.
 
 These are **reference mappings**, not claims of semantic equivalence between provider services.
 
+Which model family runs on which cloud, through which hosting pattern, and what each cloud adds around the model (guardrails, retrieval, runtimes, gateways) is mapped in the [models × clouds matrix](https://github.com/subhamviky/e2a-managed-providers/blob/main/docs/design/matrix/MODEL_CLOUD_MATRIX.md) of e2a-managed-providers. The concurrency primitives per cloud are in [Cloud Landing Zone §8.1.6](docs/CLOUD_LANDING_ZONE.md).
+
 ### Portability claim
 
 Agent implementations that depend exclusively on supported E2A contracts can remain largely unchanged across provider adapters. Deployment configuration, infrastructure, provider capabilities, and adapter implementations can still differ.
