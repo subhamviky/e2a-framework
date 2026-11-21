@@ -2,6 +2,31 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.9.0 — Evaluation across the framework (hub design note EV-01)
+
+Additive, plus two fixes. Existing agents, workflows and gates run unchanged.
+
+### Added
+- **`e2a.evals`**, one module for evaluation:
+  - **`EvalOutcome`** (`score`, `passed`, `threshold`, `reason`, `grader`, `evidence`). `_evaluate_output` may return one instead of a float. Every evaluation is recorded in `state['eval_outcome']` and as an `evaluation` event in the message log (`eval.score`, `eval.threshold`, `eval.grader`, `eval.fallback`). `state['evaluation']` keeps its meaning (`ACCEPTED` / `FALLBACK`).
+  - **Scorers**: `exact`, `contains` (required and forbidden phrases, e.g. citations), `schema`, `refusal`, `no_pii`, `grounded` (through `BaseRAGPipeline.evaluate_answer`), `trajectory` (required, forbidden and ordered tools, argument values, a maximum number of calls, required workflow steps), and `score_case`, which runs the checks a case declares under `expect` (the lowest score wins; an empty `expect` fails).
+  - **Online evaluation (backlog B-2)**: the port `BaseOnlineEvaluator`; `BaseWorkflow.execute()` submits a redacted record of each settled run when `config['online_evaluator']` is bound. Sampled (`online_eval_sample_rate`, default 0.1, deterministic by correlation id), budgeted (`online_eval_max_per_minute`), never for a replay, a pause or an interrupted run, and never on the critical path (a failing evaluator is logged as `online_evaluation_failed`, never raised). Implementations: `RecordingOnlineEvaluator` (JSON lines), `OutboxOnlineEvaluator` (an outbox record for a consumer), `ScoringOnlineEvaluator` (scorers in a background thread).
+  - **`calibration_report`**: scorer or judge results against human labels: agreement, Cohen's kappa, correlation, and the threshold that best matches the labels.
+  - **`promote_candidates`** and `python -m e2a.evals promote`: low-score, fallback, refusal and failed records become redacted **candidate** cases with provenance and an empty `expect`, for a person to review. A candidate fails the gate until reviewed.
+- **The run's trajectory**: `ReadAccess` and `ModifyAccess` record every tool call (name, read or modify, scalar arguments, payload hash, outcome, status, latency; denied calls too) and each agent its run, in `state['trajectory']`. Excluded from the request fingerprint.
+- **`ProjectReleaseGate`**:
+  - a case with `expect` is scored without a scorer: the project implements one hook, `_run_case(case)` (run the service on `case['input']`, return the state). `_score_case` and `_probe` keep failing for a case without `expect` (fail-closed);
+  - `eval_trials` (default 1): each case runs that many times; the report has the scores, minimum, standard deviation and pass@k per case; the gate scores the mean;
+  - `evidence['run']`: the kind of evidence (`wiring` for a simulated or replayed model, `quality` set by a project replaying a real model's recorded answers, `live` with `E2A_SWAP_LIVE=true`), the profile and the model.
+- Configuration keys: `online_evaluator`, `online_eval_sample_rate`, `online_eval_max_per_minute`, `eval_trials`. `docs/config_reference.md` and `reference/env.example` are regenerated from the registry (they had not been since v1.2.1).
+
+### Fixed
+- **A non-retryable failure inside an agent is no longer retried** (E2A O-3, family X-9). `BaseAgent.run()` records `state['failure']` (`retryable` from a `GovernanceRefusal`'s own flag; `False` for `ValueError`, `TypeError`, `PermissionError`), and `BaseWorkflow` settles the claim from it: `FAILED_FINAL` instead of `FAILED_RETRYABLE`, so a repeat is answered, not re-run.
+- **Replays and conflicts reach the observability engine** (E2A O-10): the short-circuit path of `BaseWorkflow.execute()` hands its log to `observability_engine` like every other path.
+
+### Not changed
+- e2a-java: its idempotency store has no retryable flag, so the settlement fix has no Java counterpart yet (follow-up). The evaluation module is Python only.
+
 ## Unreleased — documents
 
 ### Removed

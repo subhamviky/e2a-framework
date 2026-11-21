@@ -26,6 +26,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from typing import Mapping, Sequence
 
+from .evals import submit_online
 from .core import ClaimStatus, Deadline, DehydrationInterrupt, PhysicalOutcome, _DETERMINISTIC_ERRORS
 from .config import resolve_config, scoped_config
 from ._propagation import _PropagationMixin
@@ -233,6 +234,10 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 self._send_to_dlq(failed_keys, config)
             state['message_log'] = message_log
             state['failed_keys'] = failed_keys
+        if not interrupted and not dehydrated:
+            # v1.9.0 (EV-01, B-2): after the claim is settled, never on the critical path
+            submit_online(state, config, type(self).__name__,
+                          lambda event, **f: self._log(message_log, correlation_id, 'WARN', event, **f))
         return state
  
     @abstractmethod
@@ -328,7 +333,9 @@ class BaseWorkflow(ABC, _PropagationMixin):
         volatile = {'correlation_id', 'idempotency_key', 'message_log', 'failed_keys', 'deadline',
                     'status', 'response', 'outcome', 'cumulative_tokens_used', 'trace_context',
                     # v1.2: workflow bookkeeping and the approval decision are not request content
-                    'steps', 'evaluation', 'refusal', 'checkpoint_id', 'approval_granted', 'approved_by'}
+                    'steps', 'evaluation', 'refusal', 'checkpoint_id', 'approval_granted', 'approved_by',
+                    # v1.9.0: evaluation and the run's path are bookkeeping too
+                    'eval_outcome', 'trajectory', 'failure', 'model_refusal'}
         body = {k: v for k, v in state.items() if k not in volatile}
         return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -431,6 +438,7 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 agent = step.agent_for(state)
                 started = time.time()
                 state.pop('evaluation', None)
+                state.pop('eval_outcome', None)
                 try:
                     state = self.__run_agent(agent, state, config, run['ctx'], io_config,
                                              message_log, failed_keys, kwargs)
@@ -480,6 +488,10 @@ class BaseWorkflow(ABC, _PropagationMixin):
                 self._send_to_dlq(failed_keys, config)
             state['message_log'] = message_log
             state['failed_keys'] = failed_keys
+        if not interrupted and not dehydrated and run['short'] is None:
+            # v1.9.0 (EV-01, B-2): after the claim is settled, never on the critical path
+            submit_online(state, config, type(self).__name__,
+                          lambda event, **f: self._log(message_log, correlation_id, 'WARN', event, **f))
         return state
 
     def __claim(self, state, config, run, store, legacy):
@@ -541,7 +553,11 @@ class BaseWorkflow(ABC, _PropagationMixin):
             state.update({k: v for k, v in claim.result.items() if k in ('response', 'outcome', 'cumulative_tokens_used')})
             state['replayed'] = True
         self._log(message_log, correlation_id, 'INFO', 'idempotent_short_circuit', claim_status=claim.status.value)
-        self._flush_logs(message_log, config)
+        obs_engine = config.get('observability_engine')         # v1.9.0 (E2A O-10): replays are visible
+        if obs_engine and isinstance(obs_engine, BaseObservability):
+            obs_engine.record_telemetry(message_log, correlation_id, config, tenant_id=state.get('tenant_id'))
+        else:
+            self._flush_logs(message_log, config)
         state['message_log'], state['failed_keys'] = message_log, []
         return state
 
@@ -553,6 +569,12 @@ class BaseWorkflow(ABC, _PropagationMixin):
         elif outcome == PhysicalOutcome.UNKNOWN:
             store.fail(key, retryable=False, outcome=PhysicalOutcome.UNKNOWN, **kw)   # parked for reconciliation
         elif failed_keys:
-            store.fail(key, retryable=not isinstance(error, _DETERMINISTIC_ERRORS), **kw)
+            # v1.9.0 (E2A O-3, family X-9): an agent records why it failed (state['failure']); a
+            # refusal that is not retryable, or a deterministic error, settles final
+            if error is not None:
+                retryable = not isinstance(error, _DETERMINISTIC_ERRORS)
+            else:
+                retryable = bool((state.get('failure') or {}).get('retryable', True))
+            store.fail(key, retryable=retryable, **kw)
         else:
             store.complete(key, self._replayable_result(state, config), **kw)

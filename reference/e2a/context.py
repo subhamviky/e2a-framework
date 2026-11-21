@@ -16,6 +16,9 @@ et_failed_key:
 The entry point creates these once per request and passes the same objects down.
 The context is never written into the state.
 """
+import hashlib
+import json
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -142,9 +145,11 @@ class _Access:
 
     def __init__(self, ctx: RequestContext, config: Optional[Mapping[str, Any]] = None,
                  tools: Optional[Mapping[str, Any]] = None, resources: Optional[Mapping[str, Any]] = None,
-                 allowed: Optional[Iterable[str]] = None, messages: Optional[MessageLog] = None) -> None:
+                 allowed: Optional[Iterable[str]] = None, messages: Optional[MessageLog] = None,
+                 trajectory: Optional[List[Dict[str, Any]]] = None) -> None:
         config = config or {}
         self._ctx, self._config, self._messages = ctx, dict(config), messages
+        self._trajectory = trajectory          # v1.9.0: every call recorded (state['trajectory'])
         self._tools = dict(tools if tools is not None else config.get('tools') or {})
         self._resources = dict(resources if resources is not None else config.get('resources') or {})
         self._allowed = set(allowed) if allowed is not None else None
@@ -156,7 +161,31 @@ class _Access:
             raise KeyError(f"no resource named '{name}'")
         return self._resources[name]
 
+    def _record(self, name: str, payload: Mapping[str, Any], outcome: str, status: str, started: float) -> None:
+        if self._trajectory is None:
+            return
+        args = {k: (v if len(str(v)) <= 200 else str(v)[:200]) for k, v in dict(payload).items()
+                if isinstance(v, (str, int, float, bool)) or v is None}
+        self._trajectory.append({'kind': 'tool', 'tool': name, 'access': 'modify' if self.material else 'read',
+                                 'args': args, 'payload_sha256': hashlib.sha256(json.dumps(
+                                     dict(payload), sort_keys=True, default=str).encode()).hexdigest()[:16],
+                                 'outcome': outcome, 'status': status,
+                                 'latency_ms': round((time.time() - started) * 1000, 1)})
+
     def _call(self, name: str, payload: Mapping[str, Any], **call_kwargs) -> Dict[str, Any]:
+        started = time.time()
+        try:
+            result = self.__call(name, payload, **call_kwargs)
+        except ToolDenied:
+            self._record(name, payload, 'DENIED', 'DENIED', started)
+            raise
+        except Exception as error:
+            self._record(name, payload, 'ERROR', type(error).__name__, started)
+            raise
+        self._record(name, payload, PhysicalOutcome(result['outcome']).value, str(result.get('status', '')), started)
+        return result
+
+    def __call(self, name: str, payload: Mapping[str, Any], **call_kwargs) -> Dict[str, Any]:
         if name not in self._tools:
             raise KeyError(f"no tool named '{name}'")
         if self._allowed is not None and name not in self._allowed:
