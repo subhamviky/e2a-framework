@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
-from .core import _DETERMINISTIC_ERRORS, DehydrationInterrupt, PhysicalOutcome
+from .core import DehydrationInterrupt, PhysicalOutcome, is_retryable
 from .evals import as_outcome
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext
 from ._contract import call_hook, declares_ctx, refuse_v11_hooks
@@ -169,8 +169,7 @@ class BaseAgent(ABC, _PropagationMixin):
                 messages.warn('governance_refusal', code=e.code, stage=e.stage)
             # v1.9.0 (E2A O-3, family X-9): the workflow settles the claim from this, so a refusal that
             # says it is not retryable, or a deterministic error, is not retried
-            state['failure'] = {'error': type(e).__name__, 'retryable': bool(
-                e.retryable if isinstance(e, GovernanceRefusal) else not isinstance(e, _DETERMINISTIC_ERRORS))}
+            state['failure'] = {'error': type(e).__name__, 'retryable': is_retryable(e)}
             failed.add(ctx.idempotency_key or ctx.correlation_id)
             hook('_handle_error', 'handle_error', (e, state, config),
                  dict(correlation_id=ctx.correlation_id, message_log=messages.entries,

@@ -22,8 +22,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from e2a_base import (BasePipeline, resolve_config, ClaimStatus, BaseIdempotencyStore,
                       BaseTransactionalStore, Deadline, ConcurrencyConflict, AdmissionTimeout)
-from e2a.core import _DETERMINISTIC_ERRORS, NFRViolationError
-from e2a.stages import GovernanceRefusal
+from e2a.core import is_retryable
 from developer_platform_workflow import DeveloperPlatformWorkflow
 from a2c_base import SDLCWorkflow, DevPlatformValidationService
 
@@ -85,14 +84,6 @@ class AIDLCPipelineResult(TypedDict, total=False):
     errors: List[str]
     retryable: bool             # E2A v1.9.1: on a failure, whether resending the same request can pass
     failure: dict               # E2A v1.9.1: {error, retryable} of the exception that ended the build
-
-
-def _retryable(error: BaseException) -> bool:
-    """E2A v1.9.1 (EV-01 2.4, family X-9): a governance refusal says itself; a governance or NFR
-    violation, an invalid value or type and a permission error fail the same way every time."""
-    if isinstance(error, GovernanceRefusal):
-        return bool(error.retryable)
-    return not isinstance(error, _DETERMINISTIC_ERRORS + (NFRViolationError,))
 
 
 class PipelineStateRecord(TypedDict, total=False):
@@ -414,7 +405,7 @@ class AIDLCPipelineOrchestrator:
             self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_overload', detail=str(e))
         except Exception as e:
             failed_keys.append(generator_key)
-            result['retryable'] = _retryable(e)
+            result['retryable'] = is_retryable(e)
             result['failure'] = {'error': type(e).__name__, 'retryable': result['retryable']}
             self._handle_error(e, request, result, config,
                                 correlation_id=correlation_id, message_log=message_log)

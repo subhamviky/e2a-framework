@@ -92,9 +92,14 @@ class Gov:
     def enforce_governance_gate(self, request, io_config, config, **kw): raise self.error
 from e2a.core import NFRViolationError
 from e2a.stages import GovernanceRefusal
-cfg = mk(governance_engine=Gov(NFRViolationError('cloud not approved'))); orch = AIDLCPipelineOrchestrator(cfg)
+class PolicyViolation(NFRViolationError):
+    retryable = False                         # a project's policy error says it is final (A2C's does)
+cfg = mk(governance_engine=Gov(PolicyViolation('cloud not approved'))); orch = AIDLCPipelineOrchestrator(cfg)
 r = orch.execute_pipeline(req('gov'), cfg)
-check('v1.9.1 a governance violation is not retryable', not r['success'] and r['retryable'] is False)
+check('v1.9.1 a governance violation that says it is final is not retryable', not r['success'] and r['retryable'] is False)
+cfg = mk(governance_engine=Gov(NFRViolationError('latency SLO breached'))); orch = AIDLCPipelineOrchestrator(cfg)
+r = orch.execute_pipeline(req('slo'), cfg)
+check('v1.9.1 an NFR breach (latency, quota) stays retryable', not r['success'] and r['retryable'] is True)
 cfg = mk(governance_engine=Gov(GovernanceRefusal('awaiting approval', 'approval', retryable=True)))
 r = AIDLCPipelineOrchestrator(cfg).execute_pipeline(req('gov2'), cfg)
 check('v1.9.1 a refusal that says it is retryable stays retryable', r['retryable'] is True)
