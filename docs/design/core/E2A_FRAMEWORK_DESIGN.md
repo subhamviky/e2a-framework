@@ -10,8 +10,8 @@
 | Document type | Design Document (HLD + LLD) |
 | Author | Subham Gupta, Principal Platform Architect |
 | Source baseline | `subhamviky/e2a-framework` `v1.2.0` — the `e2a` package (`reference/e2a/`, 19 modules, 5,159 lines), `reference/e2a_base.py` (compatibility module), `reference/multimodal_orchestrator.py`, `reference/e2a_inmemory_adapters.py`; baseline of the v1.1 sections: `main` 32c99c0 |
-| Date | 21 November 2026 (v1.9.0, Section 15.3; v1.2.0 on 13 November 2026; baseline 7 November 2026) |
-| Status | Aligned to E2A v1.2.0 and its test suite (design notes 01–05); Section 15 records what later releases changed (v1.2.2, v1.3.0, v1.9.0) |
+| Date | 21 November 2026 (v1.9.0 and v1.9.1, Section 15.3; v1.2.0 on 13 November 2026; baseline 7 November 2026) |
+| Status | Aligned to E2A v1.2.0 and its test suite (design notes 01–05); Section 15 records what later releases changed (v1.2.2, v1.3.0, v1.9.0, v1.9.1) |
 
 ## 1. Introduction
 
@@ -555,7 +555,7 @@ The value types (`Deadline`, `ClaimStatus`, `ClaimResult`, `CommitResult`, `Phys
 | `__resolve_deadline` | template | `(config, kwargs) → Deadline \| None` | Pops `deadline`; else `request_deadline_seconds` > 0. |
 | `__resolve_idempotency` | template | `(state, config, **kw) → str` | Client key wins; derives only. |
 | `__short_circuit` | template | `(state, claim, log, cid, config) → dict` | Map claim status; copy replayable keys on `REPLAY`; flush logs locally; empty `failed_keys`. |
-| `__settle_claim` | template | `(store, key, tenant, owner, state, failed_keys, dehydrated, error, config)` | Dehydrated → `fail(retryable=True)`; `UNKNOWN` → park; failures → `fail(retryable = not deterministic)`; else `complete()`. |
+| `__settle_claim` | template | `(store, key, tenant, owner, state, failed_keys, dehydrated, error, config)` | Dehydrated → `fail(retryable=True)`; `UNKNOWN` → park; failures → `fail(retryable = is_retryable(error))`, or the agent's `state['failure']` (v1.9.0, v1.9.1); else `complete()`. |
 
 **v1.2 — declared steps and resume.** A v1.2 workflow implements `_build_workflow(self, ctx)` and returns `Steps(...)`; `_validate_workflow` and `_get_agent` then have defaults and are not needed.
 
@@ -1348,6 +1348,8 @@ Hub design note EV-01. Evaluation had three separate shapes before v1.9.0: a flo
 **Fixes.** A failure inside an agent was swallowed into `failed_keys`, so the workflow saw no error and settled the claim retryable, even for a `GovernanceRefusal` that said it was not (O-3, family X-9). The agent now records `state['failure']` with `retryable` (the refusal's own flag; `False` for `ValueError`, `TypeError`, `PermissionError`), and the workflow settles `FAILED_FINAL` from it. The short-circuit path (a replay or a conflict) now hands its log to `observability_engine` (O-10).
 
 **New configuration keys.** `online_evaluator` (object), `online_eval_sample_rate` (0.1), `online_eval_max_per_minute` (600), `eval_trials` (1). The full table is `docs/config_reference.md`, regenerated from the registry.
+
+**v1.9.1: one retry rule.** `e2a.is_retryable(error)` decides whether the same request can pass if it is run again. An exception that carries a bool `retryable` attribute is believed: a `GovernanceRefusal`, or a project's own policy error, such as A2C's `GovernanceViolationError` (`retryable = False`). Otherwise `ValueError`, `TypeError` and `PermissionError` are final and anything else is retryable; `NFRViolationError` stays retryable, because E2A raises it for latency SLO breaches and quota waits. `BaseAgent.run()` (`state['failure']`), `BaseWorkflow`'s settlement and the AI-DLC orchestrator use it. In AI-DLC the claim itself stays retryable, because its key is the project rather than the request; the build result and the dead-letter entry carry `retryable` instead (E2A AI-DLC design document, Section 10.3). e2a-java is versioned 1.9.1, so its version again equals the E2A tag; no Java code changed.
 
 ## Appendix A. Configuration Reference (generated from E2A_CONFIG)
 

@@ -14,8 +14,8 @@ All notable changes to the E2A framework documents and reference code.
 ### Changed
 - **e2a-java is versioned 1.9.1**, so its version again equals the E2A tag (v1.9.0 left it at 1.8.0). A2C builds generated Java services against `e2a-java` from the tag of the same number. No Java code changed.
 
-### Not changed
-- The design documents describe v1.9.1 with the EV-01 documentation pass (phase 4).
+### Documents
+- Updated after the tag: the E2A framework design document (Section 15.3, the settlement contract), the AI-DLC design document (Sections 6.2 and 10.3; O-4 resolved) and the family system design document (X-9 resolved), Markdown and PDF.
 
 ## v1.9.0 — Evaluation across the framework (hub design note EV-01)
 
