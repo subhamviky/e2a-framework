@@ -2,6 +2,15 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.9.1 — AI-DLC: a failed build says whether it can be resent (hub design note EV-01, 2.4)
+
+### Fixed
+- **AI-DLC builds that cannot pass are no longer reported as retryable (family X-9, AI-DLC half).** `AIDLCPipelineOrchestrator.execute_pipeline()` now sets `result['retryable']` on every failure, and `result['failure'] = {error, retryable}` when an exception ended the build. Not retryable: a governance or NFR violation, a `GovernanceRefusal` that says so, an invalid value, type or permission (Phase C failures included), and an invalid request (`REJECTED_INVALID`). Retryable: transient errors and overload. The dead-letter entry carries the same flag, so a caller or queue does not resend a request that fails the same way every time.
+- **The build's claim stays retryable, by design.** The AI-DLC claim key is the project (`project_name:runtime:build_tool:platform`), not the request. A `FAILED_FINAL` claim would answer the developer's corrected request (a new fingerprint) with `CONFLICT` for good, so the project could never be rebuilt. The typed result carries the decision instead. (The workflow settlement of v1.9.0 is unchanged: there the key identifies one request.)
+
+### Not changed
+- The design documents describe v1.9.1 with the EV-01 documentation pass (phase 4).
+
 ## v1.9.0 — Evaluation across the framework (hub design note EV-01)
 
 Additive, plus two fixes. Existing agents, workflows and gates run unchanged.

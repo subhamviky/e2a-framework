@@ -33,4 +33,4 @@ from .stages import (ApprovalRequired, ApprovalStage, CapacityRefusal, CapacityS
                      RedactionStage, SandboxRefusal, SandboxStage, TokenBudgetRefusal, TokenBudgetStage,
                      ToolRefusal, compile_redactions, redact_text)
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
