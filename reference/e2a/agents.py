@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
-from .core import DehydrationInterrupt, PhysicalOutcome
+from .core import _DETERMINISTIC_ERRORS, DehydrationInterrupt, PhysicalOutcome
+from .evals import as_outcome
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext
 from ._contract import call_hook, declares_ctx, refuse_v11_hooks
 from .stages import GovernanceRefusal
@@ -91,8 +92,9 @@ class BaseAgent(ABC, _PropagationMixin):
         name = getattr(self, 'agent_name', type(self).__name__)
         if allowed is None and gov_engine is not None and name in (gov_engine.tool_policy or {}):
             allowed = gov_engine.tool_policy[name]          # v1.2: the engine's per-agent tool policy
-        io_read = ReadAccess(ctx, config, allowed=allowed, messages=messages)
-        io_modify = ModifyAccess(ctx, config, allowed=allowed, messages=messages)
+        trajectory = state.setdefault('trajectory', [])        # v1.9.0 (EV-01): the path of the run
+        io_read = ReadAccess(ctx, config, allowed=allowed, messages=messages, trajectory=trajectory)
+        io_modify = ModifyAccess(ctx, config, allowed=allowed, messages=messages, trajectory=trajectory)
 
         def hook(name, step, legacy_args, legacy_kwargs, **available):
             # v1.3: every hook declares the v1.2 parameters (checked when the class is defined)
@@ -122,10 +124,20 @@ class BaseAgent(ABC, _PropagationMixin):
                 if refused:                  # v1.6.0: a model refusal goes straight to the fallback
                     state['model_refusal'] = response.get('refusal') or {}
                     messages.warn('model_refused', **{k: v for k, v in state['model_refusal'].items() if v})
-                confidence = 0.0 if refused else hook(
+                threshold = float(resolve_config('min_confidence', config, kwargs))
+                evaluated = as_outcome(0.0 if refused else hook(
                     '_evaluate_output', 'evaluate_output', (response, state, config),
-                    dict(common, **kwargs), response=response, state=state, ctx=ctx, messages=messages)
-                if refused or confidence < resolve_config('min_confidence', config, kwargs):
+                    dict(common, **kwargs), response=response, state=state, ctx=ctx, messages=messages),
+                    threshold, name)
+                if refused and not evaluated.reason:
+                    evaluated.reason = 'model refusal'
+                confidence = evaluated.score
+                # v1.9.0 (EV-01): one shape for every evaluation, in the state and the message log
+                state['eval_outcome'] = evaluated.to_dict()
+                messages.info('evaluation', **{'eval.score': evaluated.score, 'eval.threshold': threshold,
+                                               'eval.grader': evaluated.grader,
+                                               'eval.fallback': refused or confidence < threshold})
+                if refused or confidence < threshold:
                     accepted = False
                     response = hook('_fallback', 'fallback', (state, config), dict(common, **kwargs),
                                     state=state, ctx=ctx, messages=messages)
@@ -155,12 +167,19 @@ class BaseAgent(ABC, _PropagationMixin):
             if isinstance(e, GovernanceRefusal):        # v1.2: typed, so callers can tell a refusal from a bug
                 state['refusal'] = {'code': e.code, 'stage': e.stage, 'reason': e.reason, 'retryable': e.retryable}
                 messages.warn('governance_refusal', code=e.code, stage=e.stage)
+            # v1.9.0 (E2A O-3, family X-9): the workflow settles the claim from this, so a refusal that
+            # says it is not retryable, or a deterministic error, is not retried
+            state['failure'] = {'error': type(e).__name__, 'retryable': bool(
+                e.retryable if isinstance(e, GovernanceRefusal) else not isinstance(e, _DETERMINISTIC_ERRORS))}
             failed.add(ctx.idempotency_key or ctx.correlation_id)
             hook('_handle_error', 'handle_error', (e, state, config),
                  dict(correlation_id=ctx.correlation_id, message_log=messages.entries,
                       failed_keys=failed.keys, **kwargs),
                  error=e, state=state, ctx=ctx, messages=messages, failed_keys=failed)
         latency = time.time() - start
+        trajectory.append({'kind': 'agent', 'agent': name, 'evaluation': state.get('evaluation'),
+                           'score': (state.get('eval_outcome') or {}).get('score'),
+                           'failed': 'failure' in state, 'latency_ms': round(latency * 1000, 1)})
         max_latency = resolve_config('max_latency', config, kwargs)
         self._log(messages.entries, ctx.correlation_id, 'INFO', 'agent_run_complete',
                    latency=round(latency, 3), tokens_used=state.get('cumulative_tokens_used', 0))

@@ -10,8 +10,8 @@
 | Document type | Design Document (HLD + LLD) |
 | Author | Subham Gupta, Principal Platform Architect |
 | Source baseline | `subhamviky/e2a-framework` `v1.2.0` — the `e2a` package (`reference/e2a/`, 19 modules, 5,159 lines), `reference/e2a_base.py` (compatibility module), `reference/multimodal_orchestrator.py`, `reference/e2a_inmemory_adapters.py`; baseline of the v1.1 sections: `main` 32c99c0 |
-| Date | 13 November 2026 (v1.2.0; baseline 7 November 2026) |
-| Status | Aligned to E2A v1.2.0 and its test suite (design notes 01–05) |
+| Date | 21 November 2026 (v1.9.0, Section 15.3; v1.2.0 on 13 November 2026; baseline 7 November 2026) |
+| Status | Aligned to E2A v1.2.0 and its test suite (design notes 01–05); Section 15 records what later releases changed (v1.2.2, v1.3.0, v1.9.0) |
 
 ## 1. Introduction
 
@@ -1262,14 +1262,14 @@ These were found by reading the reference against this design. O-1 to O-4 were r
 |---|---|---|---|
 | O-1 | `BaseMCPServer.__dispatch_jsonrpc()` calls the async `_call_tool()` without awaiting it. | `tools/call` returns a coroutine object in `result` (reproduced); the wrapped tool never runs. | Make `serve()` async and await, or run `_call_tool()` on the bridge loop.  **Status:** Resolved in v1.1.2 (E-2): `serve()` completes the call; v1.2 adds `serve_async`. |
 | O-2 | `__enforce_token_budget` reads `max_token_budget` from `io_config`, but `_resolve_io_config()` keeps only `io_`-prefixed keys. | The budget resolves to its default (infinity); token budgets are never enforced (reproduced). When the key is present it raises `ValueError`, not the documented `NFRViolationError`. | Read `io_max_token_budget` (or resolve from `config`) and raise `NFRViolationError`.  **Status:** Resolved in v1.1.2 (E-1); v1.2 `TokenBudgetStage` reads the budget from the request context. |
-| O-3 | `BaseAgent.run()` swallows exceptions into `failed_keys`; `BaseWorkflow.__settle_claim()` then sees no workflow-level error. | Deterministic errors inside the agent (validation, permission) settle as `FAILED_RETRYABLE`, so redeliveries retry them (reproduced). | Carry the agent's error type in `state` (e.g. `state['error_type']`) and use it in settlement. |
+| O-3 (resolved in v1.9.0, Section 15.3) | `BaseAgent.run()` swallows exceptions into `failed_keys`; `BaseWorkflow.__settle_claim()` then sees no workflow-level error. | Deterministic errors inside the agent (validation, permission) settle as `FAILED_RETRYABLE`, so redeliveries retry them (reproduced). | Carry the agent's error type in `state` (e.g. `state['error_type']`) and use it in settlement. |
 | O-4 | `BaseAgent.run()` raises the latency SLO after the response and any tool side effect. | A slow run whose tool committed is dead-lettered and settled retryable; a redelivery executes the side effect again (reproduced). | Record the breach without raising once `outcome == COMMITTED`, or settle by outcome before failures.  **Status:** Resolved in v1.1.2 (E-3): the breach is recorded in `state['slo_breached']`, not raised. |
 | O-5 | `LLMOnlyAgent.run()` has no governance gate, no `redact_response()` and no latency SLO. | Model-only requests bypass the semantic firewall and egress masking (the gateway's own sanitiser and DLP still apply). | Mirror the `BaseAgent.run()` governance wiring. |
 | O-6 | `_resolve_tool_call()` creates a new `MCPToolService()` per call on the MCP path. | Each MCP call gets a fresh, empty circuit and retry budget, defeating per-dependency resilience. | Use the cached `_get_tool_service(tool, transport='mcp')`. |
 | O-7 | `BaseRAGPipeline.retrieve()` enforces no latency SLO, does not require `tenant_id`, and `__embed` is a placeholder. | Docs reference a retrieval SLO; an absent tenant reaches `_search_index`. | Add the SLO and tenant check; make embedding a hook.  **Status:** Partly resolved: `_embed_query` is a hook (v1.1.2); v1.2 adds the embedding and index ports and takes the tenant from `ctx`. The retrieval SLO is still open. |
 | O-8 | `BaseToolService.execute()` does not apply `max_latency` (scoped 5.0 s). | Only per-attempt timeouts bound tool calls. | Apply the scoped SLO or document it as per-attempt only. |
 | O-9 | Several registry keys are not read by base classes: `approved_agents`, `approved_tools`, `approved_models`, `max_tokens`, `shadow_mode_enabled`, `shadow_target_pipeline`, `idempotency_store_url`, `rag_top_k`, `hybrid_alpha`, `tool_filter`, `mcp_protocol_version`; some `used_by` texts name retired methods (`__lookup_idempotency_store`). | Allow-lists and shadow mode look enforced but are subclass responsibilities. | Mark them "for subclass use" in the registry or wire them in. |
-| O-10 | `BaseWorkflow` short-circuit flushes logs locally but does not call `observability_engine`. | Replays and conflicts are invisible in the telemetry backend. | Ship telemetry on the short-circuit path. |
+| O-10 (resolved in v1.9.0, Section 15.3) | `BaseWorkflow` short-circuit flushes logs locally but does not call `observability_engine`. | Replays and conflicts are invisible in the telemetry backend. | Ship telemetry on the short-circuit path. |
 | O-11 | `_circuit_breaker()` is abstract on governance but never called; `ResiliencePolicy` is the active circuit. | Two circuit concepts. | Document `_circuit_breaker` as a metrics/policy hook or remove it. |
 | O-12 | `BaseWebhookDispatcher.dispatch()` retries immediately without backoff or deadline. | Hot retry loop against a failing receiver. | Route through `ResiliencePolicy`. |
 | O-13 | In the reference orchestrator `_route_intent`/graph nodes call `agent.run(state)` without propagation fields; `execute()` routes via `_get_agent()` instead. | The compiled graph is validated but not executed by `execute()`. | Document the graph as the routing specification, or invoke it with propagation fields. |
@@ -1319,6 +1319,35 @@ As announced in v1.2.0 and prepared in v1.2.3 (design note V13-01):
 - **`e2a.conformance` is strict by default:** R2 and D1 are errors; `--lenient` reports them while migrating.
 - **What stays:** `e2a_base` (a re-export), the v1.1 workflow form (a graph and `_get_agent`, never deprecated), the v1.1 governance hooks of an engine without stages, and the mirrored `state['tenant_id']`.
 - **What changes for this document:** where it describes a v1.1 hook signature (Sections 8 and 12), read the v1.2 signature of Table 13 instead.
+
+### 15.3 v1.9.0: evaluation across the framework
+
+Hub design note EV-01. Evaluation had three separate shapes before v1.9.0: a float from `_evaluate_output`, a float from `evaluate_answer`, and the release gate's per-case scores. Nothing recorded which tools a run called, and nothing evaluated runs after release. v1.9.0 adds one shape, the path of each run, reusable scorers, and an online-evaluation port, and fixes two settlement and telemetry defects.
+
+**Table 52 — E2A v1.9.0 additions**
+
+| Addition | What it is |
+|---|---|
+| `EvalOutcome` (`e2a.evals`) | `score`, `passed`, `threshold`, `reason`, `grader`, `evidence`. `_evaluate_output` may return one or a float, as before. `BaseAgent.run()` records it in `state['eval_outcome']` and as an `evaluation` event in the message log (`eval.score`, `eval.threshold`, `eval.grader`, `eval.fallback`); `state['evaluation']` still says `ACCEPTED` or `FALLBACK` |
+| The run's trajectory | `ReadAccess` and `ModifyAccess` record each tool call (name, read or modify, scalar arguments, payload hash, outcome, status, latency; a denied call too); each agent adds its own entry. `state['trajectory']`, excluded from the request fingerprint |
+| Scorers | `exact`, `contains`, `schema`, `refusal`, `no_pii`, `grounded` (through `evaluate_answer`), `trajectory`; `score_case(state, expect)` runs the checks a case declares (lowest score wins; an empty `expect` fails) |
+| `ProjectReleaseGate` | A case with `expect` is scored by the default `_score_case` / `_probe` after the project's one hook, `_run_case(case)`; a case without `expect` still fails (fail-closed). `eval_trials` runs each case several times (mean, minimum, standard deviation, pass@k). `evidence['run']` labels the evidence `wiring`, `quality` or `live`, with the profile and model |
+| `BaseOnlineEvaluator` | The online-evaluation port (backlog B-2). After the claim is settled, `BaseWorkflow.execute()` submits a redacted record of the run when `config['online_evaluator']` is bound: sampled (`online_eval_sample_rate`), budgeted (`online_eval_max_per_minute`), never for a replay, a pause or an interrupted run; a failing evaluator is logged, never raised. `RecordingOnlineEvaluator`, `OutboxOnlineEvaluator`, `ScoringOnlineEvaluator` |
+| `calibration_report` | A scorer or judge against human labels: agreement, Cohen's kappa, correlation, suggested threshold |
+| `promote_candidates`, `python -m e2a.evals promote` | Low-score, fallback, refusal and failed records become redacted candidate cases with provenance and an empty `expect`, for review |
+
+**Table 53 — Where each kind of evaluation lives**
+
+| Layer | What belongs there | In E2A |
+|---|---|---|
+| Framework (base classes, ports) | The lifecycle runs the evaluation, compares it with the threshold and falls back; one result shape; the evaluator port; the scorers | `BaseAgent.run()`, `EvalOutcome`, `BaseOnlineEvaluator`, `e2a.evals` |
+| Service (subclasses, cases) | What "right" means for the domain: `_evaluate_output`, golden and red-team cases with `expect`, `_run_case`, per-agent thresholds through configuration scopes | the project |
+| CI (emulators, replay) | Proof that the gate and the wiring work: thresholds, fail-closed cases, trajectories, settlement. Labelled `wiring` | the project's CI with `ProjectReleaseGate` |
+| Production | Sampled online evaluation, drift, calibration against human labels, live quotas and guardrails. Labelled `live` | `BaseOnlineEvaluator` bound to a managed or custom evaluator; not exercised in this repository (no live account) |
+
+**Fixes.** A failure inside an agent was swallowed into `failed_keys`, so the workflow saw no error and settled the claim retryable, even for a `GovernanceRefusal` that said it was not (O-3, family X-9). The agent now records `state['failure']` with `retryable` (the refusal's own flag; `False` for `ValueError`, `TypeError`, `PermissionError`), and the workflow settles `FAILED_FINAL` from it. The short-circuit path (a replay or a conflict) now hands its log to `observability_engine` (O-10).
+
+**New configuration keys.** `online_evaluator` (object), `online_eval_sample_rate` (0.1), `online_eval_max_per_minute` (600), `eval_trials` (1). The full table is `docs/config_reference.md`, regenerated from the registry.
 
 ## Appendix A. Configuration Reference (generated from E2A_CONFIG)
 

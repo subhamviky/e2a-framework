@@ -24,6 +24,8 @@ from .messaging import (BaseMessageBroker, BaseOutboxStore, BrokerMessage, Broke
                         InMemoryBroker, InMemoryOutboxStore)
 from .identity import BaseIdentityResolver, ClaimMapIdentityResolver, Identity, IdentityRefused, require_roles
 from .infra import BaseInfraProvisioner, GCPInfraProvisioner
+from .evals import (BaseOnlineEvaluator, EvalOutcome, OutboxOnlineEvaluator, RecordingOnlineEvaluator,
+                    ScoringOnlineEvaluator, calibration_report, promote_candidates, score_case)
 from .context import FailedKeys, MessageLog, ModifyAccess, ReadAccess, RequestContext, ToolDenied
 from .stages import (ApprovalRequired, ApprovalStage, CapacityRefusal, CapacityStage, EgressStage,
                      FirewallRefusal, FirewallStage, GovernanceRefusal, GuardrailVerdict, IngressStage,
@@ -31,4 +33,4 @@ from .stages import (ApprovalRequired, ApprovalStage, CapacityRefusal, CapacityS
                      RedactionStage, SandboxRefusal, SandboxStage, TokenBudgetRefusal, TokenBudgetStage,
                      ToolRefusal, compile_redactions, redact_text)
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"

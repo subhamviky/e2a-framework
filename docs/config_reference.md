@@ -19,11 +19,100 @@ Every config key and environment variable used by the E2A framework, grouped by 
 | idempotency_ttl_seconds | IDEMPOTENCY_TTL_SECONDS | 86400 | __lookup_idempotency_store() |
 | tenant_routing_map | TENANT_ROUTING_MAP | {} | get_endpoint() — per-tenant overrides |
 
+### Bindings
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| provider_profile | E2A_PROVIDER_PROFILE | (unset) | e2a.bindings.bindings_from_profile() — the profile name or path |
+| profile_settings | — (not env-resolvable) | (unset) | resolve_config() — the profile layer, below env (filled by e2a.bindings) |
+| required_capabilities | E2A_REQUIRED_CAPABILITIES | [] | Bindings.verify() — capabilities the deployment relies on |
+| provider_options | E2A_PROVIDER_OPTIONS | {} | provider transports only — {provider: {vendor parameters}}, never read by base classes |
+| credential_provider | — (not env-resolvable) | (unset) | BaseToolService — a BaseCredentialProvider (object reference); default: auth_token |
+| scopes | E2A_SCOPES | {} | v1.6.1: {"tenant:<id>": {key: value}, "agent:<name>": {...}} — overlays applied per call (tenant, then agent) |
+
+### LLM service
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| dlp_patterns | E2A_DLP_PATTERNS | [] | v1.6.0: extra egress DLP patterns [{name, regex, validator?}], compiled at construction |
+| injection_patterns | E2A_INJECTION_PATTERNS | [] | v1.6.0: extra prompt-injection patterns [{name, regex}], compiled at construction |
+| dlp_patterns_replace | E2A_DLP_PATTERNS_REPLACE | False | v1.6.0: true replaces the built-in DLP patterns instead of adding to them |
+| model_routes | E2A_MODEL_ROUTES | [] | v1.6.1: [{on: [error kinds | "refusal"], to: model_id, llm_service: seam, max_attempts}] — answer a failure or refusal with another model, once |
+| structured_output_strict | E2A_STRUCTURED_OUTPUT_STRICT | False | v1.6.1: true makes a structured result that fails its schema FAILED (StructuredOutputInvalid); false only marks it |
+| reasoning_effort | LLM_REASONING_EFFORT | (unset) | v1.6.1: minimal | low | medium | high | max; providers map it to their own control |
+| model_price_table | E2A_MODEL_PRICE_TABLE | {} | v1.6.1: {model_id: {input_per_mtok, output_per_mtok, cache_read_per_mtok}} USD — sets cost_usd on results |
+| quota_authority | E2A_QUOTA_AUTHORITY | 'e2a' | v1.6.1: e2a (the pod token bucket admits) | gateway (a gateway enforces quota; E2A skips its bucket, keeps concurrency) |
+| admission_throttle_decay | E2A_ADMISSION_THROTTLE_DECAY | 0.5 | v1.6.1: a provider throttle multiplies the pod admission share by this |
+| admission_throttle_floor | E2A_ADMISSION_THROTTLE_FLOOR | 0.1 | v1.6.1: the lowest admission share after throttles |
+| admission_recovery_seconds | E2A_ADMISSION_RECOVERY_SECONDS | 60.0 | v1.6.1: seconds for the share to recover linearly to 1 after a throttle |
+| delegated_max_turns | DELEGATED_MAX_TURNS | 8 | v1.6.1: DelegatedRuntime — most tool round-trips in one managed session |
+| model_id | LLM_MODEL_ID | 'default' | _dispatch_upstream_call() — provider routing; LLMOnlyAgent._select_model() default |
+| temperature | LLM_TEMPERATURE | 0.0 | _dispatch_upstream_call() |
+| context_budget | LLM_CONTEXT_BUDGET | 8192 | _manage_context_budget() — input token budget |
+| max_output_tokens | LLM_MAX_OUTPUT_TOKENS | 2048 | quota estimate and upstream limit |
+| llm_max_latency | LLM_MAX_LATENCY | 3.0 | upstream call deadline — NFRViolationError on breach |
+| llm_max_retries | LLM_MAX_RETRIES | 2 | v1.5.1: retries of a model call whose failure is in llm_retry_on |
+| llm_retry_on | LLM_RETRY_ON | ['transient', 'throttled', 'overloaded'] | v1.5.1: error kinds (ErrorClass) that are retried |
+| circuit_counts | LLM_CIRCUIT_COUNTS | ['transient', 'overloaded', 'unknown'] | v1.5.1: error kinds that count toward the circuit breaker (throttling does not) |
+| llm_retry_after_cap | LLM_RETRY_AFTER_CAP | 30.0 | v1.5.1: a Retry-After longer than this (seconds) is not waited for: the call fails |
+| pod_concurrency | LLM_POD_CONCURRENCY | 32 | pod semaphore — in-flight upstream calls |
+| tenant_concurrency | LLM_TENANT_CONCURRENCY | 0 | per-tenant cap within the pod (0 = off) |
+| llm_replica_count | LLM_REPLICA_COUNT | 1 | divides max_rpm / max_tpm into a per-pod share |
+| max_rpm | LLM_MAX_RPM | 600 | fleet requests-per-minute limit |
+| max_tpm | LLM_MAX_TPM | 300000 | fleet tokens-per-minute limit |
+| quota_timeout | LLM_QUOTA_TIMEOUT | 5.0 | max wait for quota before NFRViolationError |
+| enable_context_caching | LLM_ENABLE_CONTEXT_CACHING | True | _apply_kv_caching() |
+| min_cache_threshold | LLM_MIN_CACHE_THRESHOLD | 1024 | _apply_kv_caching() — minimum static prefix tokens |
+| enable_semantic_cache | LLM_ENABLE_SEMANTIC_CACHE | True | _check_semantic_cache() / _store_semantic_cache() |
+| dlp_enabled | LLM_DLP_ENABLED | True | egress and stream redaction |
+| dlp_holdback_chars | LLM_DLP_HOLDBACK_CHARS | 128 | stream holdback window |
+| speculative_model | SPECULATIVE_MODEL | (unset) | _dispatch_upstream_call() io_config — speculative-decoding draft model |
+| max_speculative_tokens | MAX_SPECULATIVE_TOKENS | (unset) | _dispatch_upstream_call() io_config — draft length |
+| permit_timeout | LLM_PERMIT_TIMEOUT | 5.0 | bounded wait for the tenant + pod permit — AdmissionTimeout on expiry (also capped by the remaining deadline) |
+| tenant_idle_evict_seconds | LLM_TENANT_IDLE_EVICT_SECONDS | 300.0 | idle per-tenant permit entries are evicted after this long |
+
+### Governance
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| guardrail_fields | GUARDRAIL_FIELDS | ['query'] | v1.6.1: ManagedGuardrailStage — state fields the classifier screens |
+| guardrail_fail_open | GUARDRAIL_FAIL_OPEN | False | v1.6.1: true lets a request through when the classifier cannot answer (default: refuse) |
+| approved_agents | APPROVED_AGENTS | [] | BaseAgent.run() — agent_name must be listed |
+| approved_models | APPROVED_MODELS | [] | BaseRAGPipeline — embedding / reranker model allow-list |
+| approved_tools | APPROVED_TOOLS | [] | BaseToolService — tool_name must be listed |
+
+### Pipeline
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| artifact_matrix | E2A_ARTIFACT_MATRIX | [] | v1.6.1: BasePipeline — the images to build (empty: the default matrix) |
+| secret_scan_paths | E2A_SECRET_SCAN_PATHS | ['src'] | v1.6.1: BasePipeline built-in secret scan roots ([] turns it off) |
+
+### Messaging
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| consumer_batch_size | E2A_CONSUMER_BATCH_SIZE | 10 | v1.7.0: IdempotentConsumer / BrokerOutboxSweeper — messages or records per batch |
+| consumer_wait_seconds | E2A_CONSUMER_WAIT_SECONDS | 0.0 | v1.7.0: IdempotentConsumer.consume() — long-poll wait for a batch |
+| consumer_max_deliveries | E2A_CONSUMER_MAX_DELIVERIES | 5 | v1.7.0: a message delivered more often is dead-lettered (0 = no limit; brokers without a count are not limited) |
+| consumer_resume_expired | E2A_CONSUMER_RESUME_EXPIRED | False | v1.7.2: true when the handler confirms what is already done itself (resumable): a redelivery may take over a claim whose owner stopped, instead of dead-lettering it for reconcile() |
+| consumer_retry_delay_seconds | E2A_CONSUMER_RETRY_DELAY_SECONDS | 5.0 | v1.7.0: a retried or deferred message becomes visible again after this |
+
+### Identity
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| identity_claim_map | E2A_IDENTITY_CLAIM_MAP | {} | v1.7.0: {tenant_id, subject, roles, issuer: claim name or dotted path} — the identity provider's claim names |
+| identity_trusted_issuers | E2A_IDENTITY_TRUSTED_ISSUERS | [] | v1.7.0: issuers accepted by BaseIdentityResolver (empty: any issuer the gateway verified) |
+| identity_tenant_map | E2A_IDENTITY_TENANT_MAP | {} | v1.7.0: external tenant id (an Entra directory id) -> E2A tenant_id |
+| identity_tenants_from_roles | E2A_IDENTITY_TENANTS_FROM_ROLES | '' | v1.8.0 (SI-01): for service callers, a role prefix such as "tenant:". The tenant is the one the request names, and only if a role "<prefix><tenant>" grants it; the tenant claim is not used |
+
 ### Engines (object references)
 
 | Config key | Environment variable | Default | Used by |
 |---|---|---|---|
 | observability_engine | — (not env-resolvable) | (unset) | BaseWorkflow.execute() — BaseObservability instance |
+| online_evaluator | — (not env-resolvable) | (unset) | BaseWorkflow.execute() — e2a.evals.BaseOnlineEvaluator; a settled run is submitted for online evaluation (v1.9.0) |
 | governance_engine | — (not env-resolvable) | (unset) | BaseAgent.run() — BaseGovernanceFramework instance |
 | llm_service | — (not env-resolvable) | (unset) | BaseAgent / LLMOnlyAgent _infer() — the bound BaseLLMAgentService (required) |
 | max_token_budget | — (not env-resolvable) | inf | BaseGovernanceFramework.__enforce_token_budget() — io_config key |
@@ -31,6 +120,14 @@ Every config key and environment variable used by the E2A framework, grouped by 
 | cache_store | — (not env-resolvable) | (unset) | BaseQueryService.fetch() — the bound BaseCacheStore (single-flight get_or_load) |
 | transactional_store | — (not env-resolvable) | (unset) | BaseCommandService._commit_versioned() — the bound BaseTransactionalStore (conditional commit) |
 | pipeline_state_store | — (not env-resolvable) | (unset) | AIDLCPipelineOrchestrator — the bound BaseTransactionalStore (durable phase state) |
+
+### Evaluation
+
+| Config key | Environment variable | Default | Used by |
+|---|---|---|---|
+| online_eval_sample_rate | ONLINE_EVAL_SAMPLE_RATE | 0.1 | e2a.evals.submit_online() — share of settled runs submitted (deterministic by correlation id), 0 to 1 |
+| online_eval_max_per_minute | ONLINE_EVAL_MAX_PER_MINUTE | 600 | e2a.evals.submit_online() — budget: at most this many submissions per minute per evaluator (0 = no limit) |
+| eval_trials | EVAL_TRIALS | 1 | ProjectReleaseGate — runs per evaluation case (variance, pass@k); 1 = one run, as before v1.9.0 |
 
 ### Validation
 
@@ -49,14 +146,6 @@ Every config key and environment variable used by the E2A framework, grouped by 
 | prompt_template | PROMPT_TEMPLATE | (unset) | BaseAgent._build_messages() — default prompt template when no registry is used |
 | cache_refresh_token | — (not env-resolvable) | 'v1' | BaseAgent._build_messages() — mutate to force a context-cache miss |
 
-### Governance
-
-| Config key | Environment variable | Default | Used by |
-|---|---|---|---|
-| approved_agents | APPROVED_AGENTS | [] | BaseAgent.run() — agent_name must be listed |
-| approved_models | APPROVED_MODELS | [] | BaseRAGPipeline — embedding / reranker model allow-list |
-| approved_tools | APPROVED_TOOLS | [] | BaseToolService — tool_name must be listed |
-
 ### Multimodal
 
 | Config key | Environment variable | Default | Used by |
@@ -66,31 +155,6 @@ Every config key and environment variable used by the E2A framework, grouped by 
 | document_extractor | DOCUMENT_EXTRACTOR_PROVIDER | (unset) | ModalityPreprocessor.extract() |
 | max_audio_duration_seconds | MAX_AUDIO_DURATION_SECONDS | 600 | checked before transcribe() — NFRViolationError on breach |
 | max_document_pages | MAX_DOCUMENT_PAGES | 50 | checked before extract() — NFRViolationError on breach |
-
-### LLM service
-
-| Config key | Environment variable | Default | Used by |
-|---|---|---|---|
-| model_id | LLM_MODEL_ID | 'default' | _dispatch_upstream_call() — provider routing; LLMOnlyAgent._select_model() default |
-| temperature | LLM_TEMPERATURE | 0.0 | _dispatch_upstream_call() |
-| context_budget | LLM_CONTEXT_BUDGET | 8192 | _manage_context_budget() — input token budget |
-| max_output_tokens | LLM_MAX_OUTPUT_TOKENS | 2048 | quota estimate and upstream limit |
-| llm_max_latency | LLM_MAX_LATENCY | 3.0 | upstream call deadline — NFRViolationError on breach |
-| pod_concurrency | LLM_POD_CONCURRENCY | 32 | pod semaphore — in-flight upstream calls |
-| tenant_concurrency | LLM_TENANT_CONCURRENCY | 0 | per-tenant cap within the pod (0 = off) |
-| llm_replica_count | LLM_REPLICA_COUNT | 1 | divides max_rpm / max_tpm into a per-pod share |
-| max_rpm | LLM_MAX_RPM | 600 | fleet requests-per-minute limit |
-| max_tpm | LLM_MAX_TPM | 300000 | fleet tokens-per-minute limit |
-| quota_timeout | LLM_QUOTA_TIMEOUT | 5.0 | max wait for quota before NFRViolationError |
-| enable_context_caching | LLM_ENABLE_CONTEXT_CACHING | True | _apply_kv_caching() |
-| min_cache_threshold | LLM_MIN_CACHE_THRESHOLD | 1024 | _apply_kv_caching() — minimum static prefix tokens |
-| enable_semantic_cache | LLM_ENABLE_SEMANTIC_CACHE | True | _check_semantic_cache() / _store_semantic_cache() |
-| dlp_enabled | LLM_DLP_ENABLED | True | egress and stream redaction |
-| dlp_holdback_chars | LLM_DLP_HOLDBACK_CHARS | 128 | stream holdback window |
-| speculative_model | SPECULATIVE_MODEL | (unset) | _dispatch_upstream_call() io_config — speculative-decoding draft model |
-| max_speculative_tokens | MAX_SPECULATIVE_TOKENS | (unset) | _dispatch_upstream_call() io_config — draft length |
-| permit_timeout | LLM_PERMIT_TIMEOUT | 5.0 | bounded wait for the tenant + pod permit — AdmissionTimeout on expiry (also capped by the remaining deadline) |
-| tenant_idle_evict_seconds | LLM_TENANT_IDLE_EVICT_SECONDS | 300.0 | idle per-tenant permit entries are evicted after this long |
 
 ### RAG
 

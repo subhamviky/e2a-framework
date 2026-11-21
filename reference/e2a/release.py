@@ -14,6 +14,17 @@ into one hook per case:
 
 A missing evaluation or red-team set is reported as NOT_CONFIGURED, never as a silent pass.
 
+v1.9.0 (hub design note EV-01):
+  * a case may declare `expect` (exact, contains, forbidden, schema, refusal, no_pii, grounded,
+    trajectory; see e2a.evals.score_case). Then the default _score_case / _probe run the service
+    with _run_case(case) (one hook: run it on case['input'], return the state) and score the
+    result. A case without `expect`, or a project without _run_case, still fails: fail-closed;
+  * eval_trials > 1 runs every case that many times: mean, minimum, standard deviation and
+    pass@k per case; the gate scores the mean;
+  * the report says what kind of evidence it is: `wiring` (simulated or replayed model: the gate's
+    mechanics and the service's wiring), `quality` (recorded answers of a real model, set by the
+    project) or `live` (E2A_SWAP_LIVE=true: real calls), with the profile and model.
+
     python -m e2a.release [--root .] [--skip-tests] [--report release-gate-report.json]
 
 A project gate is a subclass; its module calls run_release_gate(gate_class=MyGate).
@@ -21,12 +32,16 @@ A project gate is a subclass; its module calls run_release_gate(gate_class=MyGat
 import argparse
 import compileall
 import json
+import os
 import re
+import statistics
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .config import resolve_config
+from .evals import EVIDENCE_KINDS, EvalOutcome, as_outcome, score_case
 from .pipeline import BasePipeline
 
 SECRET_PATTERNS: List[Tuple[str, 're.Pattern']] = [
@@ -100,6 +115,8 @@ class ProjectReleaseGate(BasePipeline):
     evaluation_set = 'evals/golden.json'
     redteam_set = 'evals/redteam.json'
     conformance_strict = True
+    evidence_kind: Optional[str] = None      # v1.9.0: None = decided from the environment (see the module doc)
+    rag_pipeline = None                      # v1.9.0: a BaseRAGPipeline for `expect: {grounded: ...}`
 
     def __init__(self, root='.', run_tests: bool = True, artifact_name: Optional[str] = None) -> None:
         super().__init__()
@@ -145,11 +162,26 @@ class ProjectReleaseGate(BasePipeline):
             self.notes['ragas_gate'] = f'{NOT_CONFIGURED}: no {self.evaluation_set}'
             return 1.0
         rows = []
+        trials = max(1, int(resolve_config('eval_trials', config, kwargs)))
+        self.evidence['run'] = self._run_metadata(trials)
         for case in load_cases(path):
-            score = float(self._score_case(case))
-            if not 0.0 <= score <= 1.0:
-                raise ValueError(f'_score_case returned {score}; a score is between 0 and 1')
-            rows.append({'case': case, 'score': score})
+            outcomes = []
+            for _ in range(trials):
+                value = self._score_case(case)
+                if not isinstance(value, EvalOutcome) and not 0.0 <= float(value) <= 1.0:
+                    raise ValueError(f'_score_case returned {value}; a score is between 0 and 1')
+                outcomes.append(as_outcome(value, case.get('threshold')))
+            scores = [o.score for o in outcomes]
+            row = {'case': case, 'score': sum(scores) / len(scores)}
+            if trials > 1:
+                row.update({'trials': trials, 'scores': scores, 'min': min(scores),
+                            'stdev': round(statistics.pstdev(scores), 4),
+                            'pass_at_k': any(o.passed if o.passed is not None else o.score >= 1.0
+                                              for o in outcomes)})
+            reasons = sorted({o.reason for o in outcomes if o.reason})
+            if reasons:
+                row['reasons'] = reasons
+            rows.append(row)
         self.evidence['evaluation'] = rows
         return sum(r['score'] for r in rows) / len(rows)
 
@@ -159,18 +191,44 @@ class ProjectReleaseGate(BasePipeline):
             self.notes['dynamic_security'] = f'{NOT_CONFIGURED}: no {self.redteam_set}'
             return True
         failures = []
+        self.evidence.setdefault('run', self._run_metadata(1))
         for case in load_cases(path):
             failures += [str(f) for f in (self._probe(case) or [])]
         self.evidence['redteam'] = failures
         return not failures
 
-    def _score_case(self, case: Dict[str, Any]) -> float:
-        """Protected hook: score one evaluation case in [0, 1] (1 = the service got it right)."""
-        raise NotImplementedError('decide how a case is scored: implement _score_case(case)')
+    def _run_metadata(self, trials: int) -> Dict[str, Any]:
+        """What produced this evidence (v1.9.0): the kind, the profile and the model."""
+        live = os.environ.get('E2A_SWAP_LIVE', '').lower() == 'true'
+        kind = self.evidence_kind or ('live' if live else 'wiring')
+        if kind not in EVIDENCE_KINDS:
+            raise ValueError(f'evidence_kind must be one of {EVIDENCE_KINDS}')
+        return {'evidence_kind': kind, 'profile': os.environ.get('E2A_PROVIDER_PROFILE') or 'simulated',
+                'model': os.environ.get('LLM_MODEL_ID') or None, 'trials': trials}
+
+    def _run_case(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        """Protected hook (v1.9.0): run the service on case['input'] and return the final state.
+        With it, cases that declare `expect` are scored without writing _score_case or _probe."""
+        raise NotImplementedError('to score cases by their `expect`, implement _run_case(case): run the '
+                                  'service on case["input"] and return its state')
+
+    def _score_case(self, case: Dict[str, Any]):
+        """Protected hook: score one evaluation case in [0, 1] (1 = the service got it right); a
+        float or an e2a.evals.EvalOutcome. Default (v1.9.0): a case with `expect` is run with
+        _run_case and scored by e2a.evals.score_case; any other case is refused (fail-closed)."""
+        if case.get('expect'):
+            return score_case(self._run_case(case), case['expect'], self.rag_pipeline)
+        raise NotImplementedError('decide how a case is scored: implement _score_case(case), or give the '
+                                  'case an `expect` block and implement _run_case(case)')
 
     def _probe(self, case: Dict[str, Any]) -> List[str]:
-        """Protected hook: run one red-team case; return what went wrong (empty = it held)."""
-        raise NotImplementedError('decide how a red-team case is checked: implement _probe(case)')
+        """Protected hook: run one red-team case; return what went wrong (empty = it held).
+        Default (v1.9.0): a case with `expect` is run and checked like an evaluation case."""
+        if case.get('expect'):
+            outcome = score_case(self._run_case(case), case['expect'], self.rag_pipeline)
+            return [] if outcome.passed else [f"{case.get('id', 'case')}: {outcome.reason or 'failed'}"]
+        raise NotImplementedError('decide how a red-team case is checked: implement _probe(case), or give the '
+                                  'case an `expect` block and implement _run_case(case)')
 
 
 def gate_report(gate: ProjectReleaseGate, report: Dict[str, Any]) -> Dict[str, Any]:
