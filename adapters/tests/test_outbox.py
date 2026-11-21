@@ -79,7 +79,7 @@ def test_firestore_outbox_meets_the_contract_and_commits_with_the_business_chang
 
 
 @pytest.mark.skipif(not os.getenv('COSMOS_EMULATOR_ENDPOINT'), reason='COSMOS_EMULATOR_ENDPOINT not set')
-def test_cosmos_outbox_meets_the_contract_and_commits_with_the_business_change():
+def test_cosmos_outbox_meets_the_contract_and_commits_with_the_business_change(drop_cosmos_container):
     from azure.cosmos import CosmosClient, PartitionKey
     from azure.cosmos.exceptions import CosmosBatchOperationError
 
@@ -97,7 +97,7 @@ def test_cosmos_outbox_meets_the_contract_and_commits_with_the_business_change()
                                  partition_key='tenant-acme')
         assert [r['idempotency_key'] for r in outbox.pending()] == ['k1']
     finally:
-        db.delete_container(c.id)
+        drop_cosmos_container(db, c.id)
 
 
 def test_the_pubsub_broker_binds_without_its_sdk(monkeypatch):

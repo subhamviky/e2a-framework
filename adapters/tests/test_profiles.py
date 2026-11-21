@@ -81,7 +81,7 @@ def test_firestore_stores_from_config_keep_the_contracts():
 
 
 @pytest.mark.skipif(not os.getenv('COSMOS_EMULATOR_ENDPOINT'), reason='COSMOS_EMULATOR_ENDPOINT not set')
-def test_cosmos_stores_from_config_keep_the_contracts():
+def test_cosmos_stores_from_config_keep_the_contracts(drop_cosmos_container):
     from azure.cosmos import CosmosClient, PartitionKey
 
     from e2a_adapters.azure import CosmosIdempotencyStore
@@ -94,4 +94,4 @@ def test_cosmos_stores_from_config_keep_the_contracts():
                'cosmos_database': 'e2a-adapters-test', 'cosmos_container': name}
         assert check_idempotency_store(lambda c: CosmosIdempotencyStore.from_config(cfg, clock=c))
     finally:
-        db.delete_container(name)
+        drop_cosmos_container(db, name)

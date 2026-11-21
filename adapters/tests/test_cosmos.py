@@ -22,11 +22,11 @@ def database():
 
 
 @pytest.fixture
-def container(database):
+def container(database, drop_cosmos_container):
     from azure.cosmos import PartitionKey
     c = database.create_container(f'ports-{uuid.uuid4().hex[:8]}', PartitionKey('/pk'), default_ttl=-1)
     yield c
-    database.delete_container(c.id)
+    drop_cosmos_container(database, c.id)
 
 
 def test_idempotency(container):

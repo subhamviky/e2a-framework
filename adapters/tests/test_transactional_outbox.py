@@ -85,7 +85,7 @@ def test_firestore_commits_records_with_the_row():
 
 
 @pytest.mark.skipif(not os.getenv('COSMOS_EMULATOR_ENDPOINT'), reason='COSMOS_EMULATOR_ENDPOINT not set')
-def test_cosmos_commits_records_with_the_row():
+def test_cosmos_commits_records_with_the_row(drop_cosmos_container):
     from azure.cosmos import CosmosClient, PartitionKey
 
     from e2a_adapters.azure import CosmosOutboxStore, CosmosTransactionalStore
@@ -97,4 +97,4 @@ def test_cosmos_commits_records_with_the_row():
             return CosmosTransactionalStore(c, outbox=outbox), outbox
         assert len(check_transactional_outbox(make)) == SUITE
     finally:
-        db.delete_container(c.id)
+        drop_cosmos_container(db, c.id)
