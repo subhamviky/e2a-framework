@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from e2a_base import (BasePipeline, resolve_config, ClaimStatus, BaseIdempotencyStore,
                       BaseTransactionalStore, Deadline, ConcurrencyConflict, AdmissionTimeout)
+from e2a.core import is_retryable
 from developer_platform_workflow import DeveloperPlatformWorkflow
 from a2c_base import SDLCWorkflow, DevPlatformValidationService
 
@@ -81,6 +82,8 @@ class AIDLCPipelineResult(TypedDict, total=False):
     trace_id: str
     latency_ms: float
     errors: List[str]
+    retryable: bool             # E2A v1.9.1: on a failure, whether resending the same request can pass
+    failure: dict               # E2A v1.9.1: {error, retryable} of the exception that ended the build
 
 
 class PipelineStateRecord(TypedDict, total=False):
@@ -246,6 +249,7 @@ class AIDLCPipelineOrchestrator:
         if problem:
             result['phase_reached'] = 'REJECTED_INVALID'
             result['errors'] = [problem]
+            result['retryable'] = False
             self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_invalid', detail=problem)
             result['latency_ms'] = round((time.time() - start) * 1000, 1)
             result['trace_id'] = correlation_id
@@ -401,19 +405,28 @@ class AIDLCPipelineOrchestrator:
             self._log(message_log, correlation_id, 'WARN', 'pipeline_rejected_overload', detail=str(e))
         except Exception as e:
             failed_keys.append(generator_key)
+            result['retryable'] = is_retryable(e)
+            result['failure'] = {'error': type(e).__name__, 'retryable': result['retryable']}
             self._handle_error(e, request, result, config,
                                 correlation_id=correlation_id, message_log=message_log)
         finally:
             if release_slot:
                 release_slot()
+            if not result['success']:
+                result.setdefault('retryable', True)
             if failed_keys:
-                self._send_to_dlq(failed_keys, config)
+                self._send_to_dlq(failed_keys, config, retryable=result['retryable'])
                 self.__trigger_compensation(result, config, correlation_id=correlation_id)
             if owned:      # settle AFTER compensation, so the key is never claimable mid-cleanup
                 kw = dict(config=config, tenant_id=tenant_id, owner=correlation_id)
                 if result['success']:
                     store.complete(claim_key, {'phase_reached': result['phase_reached']}, **kw)
                 else:
+                    # The claim key is the project (name, runtime, build tool, platform), not the
+                    # request: settling it FAILED_FINAL would refuse the developer's corrected request
+                    # (a new fingerprint -> CONFLICT) forever. So the claim stays retryable, and the
+                    # result and the dead-letter entry say when the same request cannot pass
+                    # (result['retryable'] is False: do not redeliver it unchanged).
                     store.fail(claim_key, retryable=True, **kw)
             obs_engine = config.get('observability_engine')
             if obs_engine:
@@ -479,10 +492,12 @@ class AIDLCPipelineOrchestrator:
                              'class': type(self).__name__, **fields})
 
     def _send_to_dlq(self, failed_keys, config=None, **kwargs):
+        """kwargs: retryable (E2A v1.9.1) -- False when resending the same request cannot pass."""
         config = config or {}
         queue_url = resolve_config('dlq_queue_url', config)
         if queue_url and failed_keys:
-            logging.warning(f'DLQ dispatch -> {queue_url}: {failed_keys}')
+            logging.warning(f'DLQ dispatch -> {queue_url}: {failed_keys} '
+                            f'(retryable={kwargs.get("retryable", True)})')
 
     def _handle_error(self, error, request, result, config=None, **kwargs):
         logging.error(f"[AIDLCPipelineOrchestrator][{kwargs.get('correlation_id')}] {error}")

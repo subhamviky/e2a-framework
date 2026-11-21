@@ -77,6 +77,16 @@ class BulkheadFullError(NFRViolationError):
 _DETERMINISTIC_ERRORS = (ValueError, TypeError, PermissionError)
 
 
+def is_retryable(error: BaseException) -> bool:
+    """v1.9.1: can the same request pass if it is run again? An exception that says so itself (a
+    bool `retryable` attribute, e.g. GovernanceRefusal or a project's own policy error) is believed;
+    otherwise an invalid value, type or permission is final and anything else is retryable."""
+    flag = getattr(error, 'retryable', None)
+    if isinstance(flag, bool):
+        return flag
+    return not isinstance(error, _DETERMINISTIC_ERRORS)
+
+
 class PhysicalOutcome(str, Enum):
     """Typed commit evidence for a material side effect. Logical/model
     success is not proof of a system-of-record commit. UNKNOWN (e.g. a

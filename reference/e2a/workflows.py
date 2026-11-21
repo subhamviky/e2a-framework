@@ -27,7 +27,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from typing import Mapping, Sequence
 
 from .evals import submit_online
-from .core import ClaimStatus, Deadline, DehydrationInterrupt, PhysicalOutcome, _DETERMINISTIC_ERRORS
+from .core import ClaimStatus, Deadline, DehydrationInterrupt, PhysicalOutcome, is_retryable
 from .config import resolve_config, scoped_config
 from ._propagation import _PropagationMixin
 from ._contract import call_hook, declares_ctx
@@ -572,7 +572,7 @@ class BaseWorkflow(ABC, _PropagationMixin):
             # v1.9.0 (E2A O-3, family X-9): an agent records why it failed (state['failure']); a
             # refusal that is not retryable, or a deterministic error, settles final
             if error is not None:
-                retryable = not isinstance(error, _DETERMINISTIC_ERRORS)
+                retryable = is_retryable(error)
             else:
                 retryable = bool((state.get('failure') or {}).get('retryable', True))
             store.fail(key, retryable=retryable, **kw)

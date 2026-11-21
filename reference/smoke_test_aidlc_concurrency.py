@@ -82,6 +82,38 @@ cfg['static_pipeline'] = StaticOK()
 r2 = orch.execute_pipeline(req('p2'), cfg)
 check('failed build -> retry allowed and succeeds', not r1['success'] and r2['success'])
 
+# v1.9.1 (EV-01 2.4, X-9): the result says whether resending the same request can pass; the claim
+# (the project's key) stays retryable so a corrected request still builds
+check('v1.9.1 a Phase C failure is not retryable (the same request fails the same way)',
+      r1['retryable'] is False and r1['failure'] == {'error': 'ValueError', 'retryable': False})
+check('v1.9.1 ...yet the project key is not locked: the next request builds', r2['success'] and 'retryable' not in r2)
+class Gov:
+    def __init__(self, error): self.error = error
+    def enforce_governance_gate(self, request, io_config, config, **kw): raise self.error
+from e2a.core import NFRViolationError
+from e2a.stages import GovernanceRefusal
+class PolicyViolation(NFRViolationError):
+    retryable = False                         # a project's policy error says it is final (A2C's does)
+cfg = mk(governance_engine=Gov(PolicyViolation('cloud not approved'))); orch = AIDLCPipelineOrchestrator(cfg)
+r = orch.execute_pipeline(req('gov'), cfg)
+check('v1.9.1 a governance violation that says it is final is not retryable', not r['success'] and r['retryable'] is False)
+cfg = mk(governance_engine=Gov(NFRViolationError('latency SLO breached'))); orch = AIDLCPipelineOrchestrator(cfg)
+r = orch.execute_pipeline(req('slo'), cfg)
+check('v1.9.1 an NFR breach (latency, quota) stays retryable', not r['success'] and r['retryable'] is True)
+cfg = mk(governance_engine=Gov(GovernanceRefusal('awaiting approval', 'approval', retryable=True)))
+r = AIDLCPipelineOrchestrator(cfg).execute_pipeline(req('gov2'), cfg)
+check('v1.9.1 a refusal that says it is retryable stays retryable', r['retryable'] is True)
+class Broken(_DPW):
+    def generate(self, req, cfg): raise RuntimeError('model gateway unavailable')
+import ai_dlc_pipeline as _adp
+_adp.DeveloperPlatformWorkflow, _orig = Broken, _adp.DeveloperPlatformWorkflow
+cfg = mk(); r = AIDLCPipelineOrchestrator(cfg).execute_pipeline(req('flaky'), cfg)
+_adp.DeveloperPlatformWorkflow = _orig
+check('v1.9.1 a transient failure is retryable', not r['success'] and r['retryable'] is True
+      and r['failure']['error'] == 'RuntimeError')
+r = AIDLCPipelineOrchestrator(mk()).execute_pipeline(dict(req('inv'), a2c_sdlc={'enabled': True}), mk())
+check('v1.9.1 an invalid request is not retryable', r['phase_reached'] == 'REJECTED_INVALID' and r['retryable'] is False)
+
 # T-14 shared abstract class: B references it, A fails -> NOT deleted; sole creator failing -> deleted
 deleted = []
 class Comp(AIDLCSagaCompensator):

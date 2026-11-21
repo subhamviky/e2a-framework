@@ -2,7 +2,7 @@
 
 Modules: core, config, resilience, observability, governance, validation, llm, agents, workflows, rag, tools, ports, pipeline, infra; context, stages, conformance (v1.2); release (v1.2.2: ProjectReleaseGate, import it from e2a.release); port_contract (v1.4.0: the behavioural suite every port adapter passes, import it from e2a.port_contract); llm_types, capabilities, bindings (v1.6.0: canonical model types, capabilities, profiles and bindings); delegated, schema_check (v1.6.1: the delegated-runtime base, the structured-output check); messaging, identity (v1.7.0: exactly-once effects from at-least-once brokers, identity at ingress).
 """
-from .core import ErrorClass, classify_error, ModelRefusal, DehydrationInterrupt, NFRViolationError, ConcurrencyConflict, AdmissionTimeout, DeadlineExceeded, CircuitOpenError, BulkheadFullError, PhysicalOutcome, outcome_of, Deadline, ClaimStatus, ClaimResult, CommitResult, LeaseHandle, E2A_METRICS
+from .core import ErrorClass, classify_error, ModelRefusal, DehydrationInterrupt, NFRViolationError, ConcurrencyConflict, AdmissionTimeout, DeadlineExceeded, CircuitOpenError, BulkheadFullError, PhysicalOutcome, outcome_of, Deadline, ClaimStatus, ClaimResult, CommitResult, LeaseHandle, E2A_METRICS, is_retryable
 from .config import ConfigKey, E2A_CONFIG, register_config_key, resolve_config, unknown_config_keys, scoped_config, config_reference_markdown, env_example
 from .resilience import run_sync, RetryBudget, CircuitBreaker, Bulkhead, ResiliencePolicy, validate_capacity
 from .observability import BaseObservability
@@ -33,4 +33,4 @@ from .stages import (ApprovalRequired, ApprovalStage, CapacityRefusal, CapacityS
                      RedactionStage, SandboxRefusal, SandboxStage, TokenBudgetRefusal, TokenBudgetStage,
                      ToolRefusal, compile_redactions, redact_text)
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"

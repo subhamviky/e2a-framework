@@ -14,6 +14,7 @@ from e2a.evals import (BaseOnlineEvaluator, EvalOutcome, OutboxOnlineEvaluator, 
                        refusal, run_evals_cli, schema, score_case, trajectory)
 from e2a.messaging import InMemoryOutboxStore
 from e2a.release import ProjectReleaseGate
+from e2a.core import NFRViolationError, is_retryable
 from e2a.stages import GovernanceRefusal
 from e2a_inmemory_adapters import InMemoryIdempotencyStore
 from e2a_simulated_llm import SimulatedLLMService, always
@@ -180,10 +181,17 @@ class Store(InMemoryIdempotencyStore):
         return super().fail(key, retryable=retryable, **kw)
 
 
+class PolicyViolation(NFRViolationError):
+    """A project's own policy error that says it is final (v1.9.1: is_retryable believes it)."""
+    retryable = False
+
+
 @pytest.mark.parametrize("error,retryable", [
     (GovernanceRefusal("over the limit", stage="policy", code="LIMIT"), False),
     (ValueError("bad amount"), False),
     (RuntimeError("upstream hiccup"), True),
+    (PolicyViolation("cloud not approved"), False),                   # v1.9.1
+    (NFRViolationError("latency SLO breached"), True),                # v1.9.1: transient, as before
 ])
 def test_an_agents_failure_settles_as_it_says(error, retryable):
     store = Store()
@@ -371,3 +379,13 @@ def test_promotion_makes_redacted_candidates_for_review(tmp_path):
     assert run_evals_cli(["promote", "--records", str(src), "--out", str(out)]) == 0
     assert run_evals_cli(["promote", "--records", str(src), "--out", str(out)]) == 0      # idempotent
     assert len(json.loads(out.read_text())) == 2
+
+
+def test_is_retryable_believes_an_exceptions_own_flag():
+    """v1.9.1: the one rule the agent, the workflow and AI-DLC use."""
+    assert is_retryable(RuntimeError()) and not is_retryable(ValueError()) and not is_retryable(PermissionError())
+    assert not is_retryable(PolicyViolation()) and is_retryable(NFRViolationError())
+    assert not is_retryable(GovernanceRefusal("no", stage="s")) and is_retryable(GovernanceRefusal("wait", retryable=True))
+    flagged = ValueError("but this one says otherwise")
+    flagged.retryable = True
+    assert is_retryable(flagged)

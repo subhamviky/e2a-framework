@@ -2,6 +2,21 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.9.1 — One retry rule; AI-DLC failures say whether they can be resent (hub design note EV-01, 2.4)
+
+### Added
+- **`e2a.is_retryable(error)`**: can the same request pass if it is run again? An exception that says so itself (a bool `retryable` attribute: `GovernanceRefusal`, or a project's own policy error) is believed; otherwise an invalid value, type or permission is final and anything else is retryable. `BaseAgent.run()` (`state['failure']`), `BaseWorkflow`'s settlement and the AI-DLC orchestrator all use it. A2C's `GovernanceViolationError` declares `retryable = False` (A2C v1.6.0), so an unapproved cloud now settles final (A2C O-2).
+
+### Fixed
+- **AI-DLC builds that cannot pass are no longer reported as retryable (family X-9, AI-DLC half).** `AIDLCPipelineOrchestrator.execute_pipeline()` sets `result['retryable']` on every failure, and `result['failure'] = {error, retryable}` when an exception ended the build. Not retryable: a policy error that says so, a non-retryable refusal, an invalid value, type or permission (a Phase C failure is one), an invalid request (`REJECTED_INVALID`). Retryable: transient errors, NFR breaches such as a latency SLO or a quota wait, overload. The dead-letter entry carries the same flag, so a caller or queue does not resend a request that fails the same way every time.
+- **The build's claim stays retryable, by design.** The AI-DLC claim key is the project (`project_name:runtime:build_tool:platform`), not the request. A `FAILED_FINAL` claim would answer the developer's corrected request (a new fingerprint) with `CONFLICT` for good, so the project could never be rebuilt. The typed result carries the decision instead. (The workflow settlement of v1.9.0 is unchanged: there the key identifies one request.)
+
+### Changed
+- **e2a-java is versioned 1.9.1**, so its version again equals the E2A tag (v1.9.0 left it at 1.8.0). A2C builds generated Java services against `e2a-java` from the tag of the same number. No Java code changed.
+
+### Not changed
+- The design documents describe v1.9.1 with the EV-01 documentation pass (phase 4).
+
 ## v1.9.0 — Evaluation across the framework (hub design note EV-01)
 
 Additive, plus two fixes. Existing agents, workflows and gates run unchanged.
