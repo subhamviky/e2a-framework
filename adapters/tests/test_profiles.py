@@ -81,15 +81,17 @@ def test_firestore_stores_from_config_keep_the_contracts():
 
 
 @pytest.mark.skipif(not os.getenv('COSMOS_EMULATOR_ENDPOINT'), reason='COSMOS_EMULATOR_ENDPOINT not set')
-def test_cosmos_stores_from_config_keep_the_contracts(cosmos_contract):
-    from azure.cosmos import CosmosClient
+def test_cosmos_stores_from_config_keep_the_contracts():
+    from azure.cosmos import CosmosClient, PartitionKey
 
     from e2a_adapters.azure import CosmosIdempotencyStore
     key = 'C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=='  # the emulator's public key
     db = CosmosClient(os.environ['COSMOS_EMULATOR_ENDPOINT'], key).create_database_if_not_exists('e2a-adapters-test')
-
-    def check(container):
+    name = f'cfg-{uuid.uuid4().hex[:8]}'
+    db.create_container(name, PartitionKey('/pk'), default_ttl=-1)
+    try:
         cfg = {'cosmos_endpoint': os.environ['COSMOS_EMULATOR_ENDPOINT'], 'cosmos_key': key,
-               'cosmos_database': 'e2a-adapters-test', 'cosmos_container': container.id}
-        return check_idempotency_store(lambda c: CosmosIdempotencyStore.from_config(cfg, clock=c))
-    assert cosmos_contract(db, check, prefix='cfg')
+               'cosmos_database': 'e2a-adapters-test', 'cosmos_container': name}
+        assert check_idempotency_store(lambda c: CosmosIdempotencyStore.from_config(cfg, clock=c))
+    finally:
+        db.delete_container(name)

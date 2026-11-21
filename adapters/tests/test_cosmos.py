@@ -26,33 +26,27 @@ def container(database):
     from azure.cosmos import PartitionKey
     c = database.create_container(f'ports-{uuid.uuid4().hex[:8]}', PartitionKey('/pk'), default_ttl=-1)
     yield c
-    try:
-        database.delete_container(c.id)
-    except Exception as error:                      # noqa: BLE001 - emulator-side fault
-        import warnings
-        warnings.warn(f'could not delete test container {c.id}: {error}', stacklevel=1)
+    database.delete_container(c.id)
 
 
-def test_idempotency(database, cosmos_contract):
+def test_idempotency(container):
     from e2a_adapters.azure import CosmosIdempotencyStore
-    found = cosmos_contract(database, lambda ct: check_idempotency_store(lambda c: CosmosIdempotencyStore(ct, clock=c)))
-    assert len(found) == 24
+    assert len(check_idempotency_store(lambda c: CosmosIdempotencyStore(container, clock=c))) == 24
 
 
-def test_transactional(database, cosmos_contract):
+def test_transactional(container):
     from e2a_adapters.azure import CosmosTransactionalStore
-    found = cosmos_contract(database, lambda ct: check_transactional_store(lambda c: CosmosTransactionalStore(ct, clock=c)))
-    assert len(found) == 13
+    assert len(check_transactional_store(lambda c: CosmosTransactionalStore(container, clock=c))) == 13
 
 
-def test_lease(database, cosmos_contract):
+def test_lease(container):
     from e2a_adapters.azure import CosmosLease
-    assert len(cosmos_contract(database, lambda ct: check_lease(lambda c: CosmosLease(ct, clock=c)))) == 11
+    assert len(check_lease(lambda c: CosmosLease(container, clock=c))) == 11
 
 
-def test_checkpoint(database, cosmos_contract):
+def test_checkpoint(container):
     from e2a_adapters.azure import CosmosCheckpointStore
-    assert len(cosmos_contract(database, lambda ct: check_checkpoint_store(lambda c: CosmosCheckpointStore(ct, clock=c)))) == 8
+    assert len(check_checkpoint_store(lambda c: CosmosCheckpointStore(container, clock=c))) == 8
 
 
 def test_layout_and_ttl(container):

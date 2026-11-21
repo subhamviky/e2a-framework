@@ -56,7 +56,10 @@ jobs:
           docker run -d --name ddb -p 8000:8000 amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -inMemory -port 8000
           docker run -d --name firestore -p 8085:8085 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
             gcloud emulators firestore start --host-port=0.0.0.0:8085
-          docker run -d --name cosmos -p 8081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+          # Pinned by digest: the last build that passed (pulled as vnext-preview on 19 Nov 2026). The tag
+          # moved to vnext-EN20261019, whose PostgreSQL layer fails concurrent creates of one item with
+          # HTTP 500 "cannot drop portal" instead of 409, which breaks the contract kit's races.
+          docker run -d --name cosmos -p 8081:8081 mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator@sha256:db53613dae19d0a3d5ad50688d14aa6e957af082dafea56b52e1bd3a6b3f1406
           docker run -d --name pubsub -p 8086:8086 gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
             gcloud beta emulators pubsub start --host-port=0.0.0.0:8086 --project=demo-e2a-adapters
           docker run -d --name sqledge --network host -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD="$SQL_PASSWORD" \
