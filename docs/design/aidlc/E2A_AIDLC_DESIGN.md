@@ -10,7 +10,7 @@
 | Document type | Design Document (HLD + LLD) |
 | Author | Subham Gupta, Principal Platform Architect |
 | Source baseline | `subhamviky/e2a-framework` `v1.2.0` — `reference/ai_dlc_pipeline.py` and the shared contracts it imports through `e2a_base` from the `e2a` package; composes `subhamviky/a2c-framework` `v1.2.0` (G2C, P0 and A2C implementations) |
-| Date | 13 November 2026 (E2A v1.2.0, A2C v1.2.0; baseline 8 November 2026) |
+| Date | 21 November 2026 (E2A v1.9.1: failure outcomes, Sections 6.2 and 10.3; E2A v1.2.0 and A2C v1.2.0 on 13 November 2026; baseline 8 November 2026) |
 | Status | Aligned to the current reference implementation |
 
 ## 1. Introduction
@@ -264,6 +264,8 @@ This mapping is vendor-neutral by design; a vendor-specific binding (for example
 | `dev_request`, `sdlc_result` | A2C input and returned `DevRequest` (with `critic_report`, `errors`). |
 | `pipeline_report` | `BasePipeline` report from Phase C. |
 | `message_log`, `failed_keys`, `errors` | Telemetry, failure keys, error messages. |
+| `retryable` | v1.9.1, on every failure: whether resending the same request can pass (`e2a.is_retryable`). `False` for an invalid request (`REJECTED_INVALID`), a policy error or refusal that says it is final, and an invalid value, type or permission (a Phase C failure is one). |
+| `failure` | v1.9.1, when an exception ended the build: `{error, retryable}` (the exception's type). |
 | `build_key`, `generator_key` (alias), `correlation_id`, `trace_id`, `latency_ms` | Identity and timing (`trace_id` = `correlation_id`). |
 
 ### 6.3 Durable records
@@ -521,6 +523,8 @@ Figure 5 shows the end-to-end path across tiers; Figure 11 shows the orchestrato
 
 `__request_problem()` returns `REJECTED_INVALID` before the claim. `AdmissionTimeout` is caught first and is overload, not failure. Non-`CLAIMED` claims return before any phase. Everything else — G2C or A2C failure, a missing or invalid `dev_request` (`FAILED_A2C`), Phase C failure (raised as `ValueError` with the report's error), an expired deadline (`DeadlineExceeded` at a phase boundary), a `ConcurrencyConflict` from the state or artifact store — appends `generator_key` to `failed_keys`, is dead-lettered and compensated by phase. The claim is then settled retryable, so a corrected retry starts from a clean slate.
 
+Since v1.9.1 the result says whether the *same* request can pass: `result['retryable']` (and `result['failure'] = {error, retryable}` for an exception), decided by `e2a.is_retryable`, and the dead-letter entry carries the same flag. The claim stays retryable on purpose: its key is the project (`project_name:runtime:build_tool:platform`), not the request, so a `FAILED_FINAL` claim would answer the developer's corrected request (a new fingerprint) with `CONFLICT` for good. A caller or queue reads `retryable` and does not resend a request that fails the same way every time; `aidlc-build` (A2C v1.6.0) reports it with a next step.
+
 ## 11. Non-Functional Design
 
 ### 11.1 Latency budgets
@@ -616,7 +620,7 @@ Table 5 records every observation with its current status. Resolved items are ke
 | O-1 | Resolved | `compensate()` had no branch for `G2C_P0_DONE`. | When A2C is disabled and Phase C fails, the reference was never released. | `G2C_P0_DONE` keeps scaffold and classes and releases the reference. |
 | O-2 | Open | `build_key` and G2C's `generator_key` omit the tenant; artifact ownership records use G2C's key as the reference identity. | Claims are tenant-scoped, but two tenants building the same agent share one reference entry, so one tenant's compensation can release the other's. | Prefix references (and object-store paths) with `tenant_id`. |
 | O-3 | Open | `tenant_id` is optional; a missing tenant becomes `'-'`. | Builds without a tenant share one admission bucket. | Require `tenant_id` like the other profiles' entry points. |
-| O-4 | Open | The claim is always settled `fail(retryable=True)` on failure. | Deterministic failures (governance or validation rejections) never become `FAILED_FINAL`; every redelivery rebuilds. | Classify `ValueError`/`TypeError`/`PermissionError` as final, as `BaseWorkflow` does. |
+| O-4 | Resolved (v1.9.1) | The claim is settled `fail(retryable=True)` on failure, by design (its key is the project; see Section 10.3). | A deterministic failure is reported `retryable: false` in the result and the dead-letter entry, so a caller does not resend it; a corrected request still builds. | None. |
 | O-5 | Open | The governance gate runs before the claim. | Duplicates consume governance capacity checks and quota before being short-circuited. | Claim first, as `BaseWorkflow` and `BaseOrchestrator` do. |
 | O-6 | Resolved with a limit | `claim()` used the configured lease (300 s) against a < 10 min pipeline. | With a deadline, the lease is now `max(configured, deadline remaining + 60)`. Without a deadline, healthy long builds can still be taken for lost. | Always set a deadline, or raise the lease or renew it between phases. |
 | O-7 | Open | `__persist_state()` writes only `correlation_id`, `build_key`, `generator_key`, `phase`, `updated_at`; `tenant_id`, `artifact_pointers`, `created_at` are declared but never written. | Recovery tooling cannot locate artifacts from state alone. | Populate the declared fields. |

@@ -10,7 +10,7 @@
 | Document type | System Design Document (cross-framework HLD + interface contracts) |
 | Author | Subham Gupta, Principal Platform Architect |
 | Source baseline | `subhamviky/e2a-framework` `v1.2.0` (`reference/`); `subhamviky/a2c-framework` `v1.2.0`; baseline of the v1.1 sections: e2a-framework @ db49af1, a2c-framework @ 0caa2ac |
-| Date | 13 November 2026 (E2A v1.2.0, A2C v1.2.0; baseline 7 November 2026) |
+| Date | 21 November 2026 (X-9 resolved: E2A v1.9.0 and v1.9.1, A2C v1.6.0; E2A v1.2.0 and A2C v1.2.0 on 13 November 2026; baseline 7 November 2026) |
 | Status | Baseline system design; cross-framework behaviour verified by an integration test over the real modules |
 
 ## 1. Introduction
@@ -383,7 +383,7 @@ Fixed on the current branches: the missing `a2c_concurrency` module; `DeveloperP
 |---|---|---|---|
 | X-6a | A replay whose output was removed returns `recovery_required`, but nothing reconciles it. | After an opt-in orphan deletion, new projects of that tenant cannot generate the base until an operator intervenes. | Add a reconciler that re-opens a claim whose recorded output is gone (needs a store operation beyond claim/complete/fail), or keep orphan deletion off. |
 | X-7 | Without a request deadline the build lease is the configured 300 s, below A2C's worst case. | A long build can lose its claim. | Set `request_deadline_seconds`, or raise `idempotency_lease_seconds` for AI-DLC deployments. |
-| X-9 | A governance violation inside an agent settles retryable (E2A workflow settlement); AI-DLC also settles every failed build retryable. | Redelivery repeats a request that cannot pass. | Classify `GovernanceViolationError` and validation failures as final. |
+| X-9 | Resolved (E2A v1.9.0, v1.9.1; A2C v1.6.0). One rule, `e2a.is_retryable`: an exception's own `retryable` flag, else invalid values, types and permissions are final. The workflow settles an agent's final failure `FAILED_FINAL`; A2C's `GovernanceViolationError` is final. AI-DLC keeps its claim retryable (the key is the project, so a final claim would refuse the corrected request) and reports `retryable: false` in the result and the dead-letter entry. | A redelivery of a request that cannot pass is not run again (workflows) or not resent (AI-DLC callers). | None. |
 | X-10 | Business keys do not line up: P0 and the build include `build_tool`, A2C omits runtime, G2C is per class. | Python and Java variants of one project share an A2C key. | Add `language` to A2C's key; document the mapping in Table 4. |
 | X-12 | Two `Deadline` types, bridged by float seconds. | Works, but two implementations of one concept. | Use E2A's type when `e2a_base` is present. Since A2C v1.2.0, E2A is a declared dependency (`e2a-framework` v1.2.0), so it always is. |
 | X-13 | The AI-DLC result keeps `generator_key` as an alias of the build key. | Readers can still confuse it with G2C's key. | Remove the alias after consumers move to `build_key`. |
