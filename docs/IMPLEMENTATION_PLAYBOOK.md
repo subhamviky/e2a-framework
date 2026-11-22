@@ -949,6 +949,85 @@ class TestOrderAgent(AgentContract):
 
 The O2C migration (order-to-cash-agentic-ai, branch `feature/e2a-v1.2`) is the worked example: five agents, a workflow, governance and validation moved to v1.2 with all 39 tests passing. The unmigrated v1.1.2 code also passes on v1.2, so a service can migrate one class at a time. v1.3.0 removed the v1.1 agent-hook adapters and `get_endpoint` (a v1.1 hook is a `TypeError` when its class is defined) and made rule R2 an error; the unmigrated code no longer runs from v1.3, so migrate before you upgrade.
 
+## 2.21 Evaluation (E2A v1.9)
+
+Evaluation in E2A happens at four layers. Each proves something different, and none replaces another.
+
+| Layer | What it proves | Where |
+|---|---|---|
+| Framework | Every run is evaluated the same way: the score is compared with the threshold, a low score falls back, the result is recorded (`state['eval_outcome']`, an `evaluation` event) | `BaseAgent.run()`, `EvalOutcome`, `e2a.evals` |
+| Service | What "right" means for this domain | `_evaluate_output`, golden and red-team cases with `expect`, `_run_case` |
+| CI | The gate and the wiring work: cases pass, refusals hold, the path is right, settlement is right. Evidence labelled `wiring` (simulated profile) or `quality` | `ProjectReleaseGate` |
+| Production | Sampled runs scored over time, drift, calibration against people's labels. Evidence labelled `live` | `BaseOnlineEvaluator` bound to a managed or own evaluator |
+
+### 2.21.1 The agent's own evaluation
+
+`_evaluate_output` returns a float as before, or an `EvalOutcome` with a reason:
+
+```python
+from e2a.evals import EvalOutcome, schema
+
+def _evaluate_output(self, response, state, ctx):
+    checked = schema(response, ORDER_SCHEMA)                  # 1.0 or 0.0 with a reason
+    return EvalOutcome(checked.score, reason=checked.reason, grader='order-schema')
+```
+
+The threshold is `min_confidence`, which resolves per agent and per configuration scope, so a route or an action can have its own. Every tool call the agent makes through `io_read` / `io_modify` is recorded in `state['trajectory']` (name, read or modify, a payload hash, outcome, latency), and so is each agent run.
+
+### 2.21.2 Release-gate cases with `expect`
+
+A case that declares `expect` is scored by E2A's scorers: implement `_run_case` once, and you need not write `_score_case` or `_probe`. A case without `expect` still fails (fail-closed).
+
+```python
+class ReleaseGate(ProjectReleaseGate):
+    def _run_case(self, case):
+        return OrderWorkflow().execute({'tenant_id': 't1', **case['input']}, service_config(),
+                                       idempotency_key=f"gate:{case['id']}:{uuid.uuid4().hex}")
+```
+
+```json
+{"id": "order", "input": {"query": "Order 2 units of SKU-100"},
+ "expect": {"refusal": false,
+            "trajectory": {"steps_required": ["route", "act"],
+                           "tools_order": ["reserve_stock", "submit_settlement"],
+                           "tools_forbidden": ["refund"], "max_tool_calls": 2}}}
+```
+
+| `expect` key | Passes when |
+|---|---|
+| `exact` | the answer equals the value (normalised) |
+| `contains`, `forbidden` | every required phrase (a citation, an id) is present, no forbidden one |
+| `schema` | the answer (JSON) matches the JSON Schema |
+| `refusal` | the run was (`true`) or was not (`false`) refused or sent to its fallback |
+| `no_pii` | no personal data or credential appears in the answer |
+| `grounded` | `evaluate_answer` of the gate's `rag_pipeline` scores at least the value |
+| `trajectory` | `tools_required`, `tools_forbidden`, `tools_order`, `max_tool_calls`, `args`, `steps_required` |
+
+The lowest check decides the score, and the reasons appear in the gate report. `eval_trials` (default 1) runs each case several times and reports the mean, the minimum, the spread and pass@k. Each result says what produced it: `evidence_kind` (wiring, quality, live), the profile and the model.
+
+### 2.21.3 Online evaluation
+
+```python
+from e2a.evals import OutboxOnlineEvaluator
+config['online_evaluator'] = OutboxOnlineEvaluator(outbox)    # records go to topic e2a.evaluation
+```
+
+After a run settles, E2A samples it (`online_eval_sample_rate`, default 0.1), keeps within a budget (`online_eval_max_per_minute`), redacts it and submits it. A failing evaluator is logged, never raised: it cannot fail or slow the request. `RecordingOnlineEvaluator(path)` writes JSON lines for CI and demos; `ScoringOnlineEvaluator` runs scorers on the record.
+
+### 2.21.4 From records to cases, and calibrating a scorer
+
+```bash
+python -m e2a.evals promote --records records.jsonl --out candidates.json --below 0.7
+python -m e2a.evals calibrate --labels labelled.json --threshold 0.5
+```
+
+`promote` turns low-scoring, fallback and refused runs into candidate cases: redacted, with provenance, `status: NEEDS_REVIEW` and an empty `expect`, so a candidate fails the gate until a person reviews it and writes what it should expect. It never adds to the golden set by itself. `calibrate` compares a scorer's scores with people's labels: agreement, Cohen's kappa, correlation and a suggested threshold.
+
+### 2.21.5 Retries after a failure
+
+`e2a.is_retryable(error)` (v1.9.1) decides whether the same request can pass if run again: an exception's own `retryable` flag wins (`GovernanceRefusal`, or your own policy error with `retryable = False`); otherwise `ValueError`, `TypeError` and `PermissionError` are final and the rest retryable. The workflow settles a final failure `FAILED_FINAL`, so a redelivery is not run again.
+
+
 # 3. Scaffold File — e2a_base.py
 
 > **v1.2.** The listing below is the v1.1.x single-file scaffold, kept as a readable reference. Since v1.2.0 the same code lives in the `e2a` package (Section 2.20.1), installed with `pip install e2a-framework`; `e2a_base` re-exports every name below, so `from e2a_base import ...` keeps working. Do not copy the file into a project any more: depend on the package and pin its version.
