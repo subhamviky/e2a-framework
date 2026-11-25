@@ -2,7 +2,7 @@
 
 *A two-page summary for architects, platform leaders and security reviewers. Each section ends with a pointer to the document that explains **how**.*
 
-**Reference implementations:** [`e2a-framework`](https://github.com/subhamviky/e2a-framework) · [`financial-settlement-platform`](https://github.com/subhamviky/financial-settlement-platform) · [`order-to-cash-agentic-ai`](https://github.com/subhamviky/order-to-cash-agentic-ai) · [`aws-reconciliation-engine`](https://github.com/subhamviky/aws-reconciliation-engine)
+**Reference implementations:** [`e2a-framework`](https://github.com/subhamviky/e2a-framework) · [`financial-settlement-platform`](https://github.com/subhamviky/financial-settlement-platform) · [`order-to-cash-agentic-ai`](https://github.com/subhamviky/order-to-cash-agentic-ai) · [`payment-reconciliation-engine`](https://github.com/subhamviky/payment-reconciliation-engine)
 
 ---
 
