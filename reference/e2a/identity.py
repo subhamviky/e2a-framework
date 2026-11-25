@@ -20,6 +20,13 @@ carries no tenant: the tenants it may act for are roles, "tenant:<id>", granted 
 roles, for example). With `identity_tenants_from_roles` set to that prefix, the tenant is the one
 the request names (X-Tenant-Id), and only when a role grants it. require_roles() then checks the
 action roles a route needs.
+
+Roles granted by configuration (v1.11.0, hub design note GCP-01). Some verified tokens carry no
+roles at all: a Google ID token, which Cloud Run IAM verifies, names only its subject (the
+service account's or the user's email). `identity_subject_roles` grants roles to a subject,
+{"o2c-app@p.iam.gserviceaccount.com": ["tenant:acme", "settlement.submit"]}; they are added to
+the roles in the claims, so the rules above apply unchanged. The deployment, not the caller,
+decides what a subject may do.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -86,6 +93,9 @@ class BaseIdentityResolver:
         if isinstance(roles, str):
             roles = [r for r in roles.replace(',', ' ').split() if r]
         roles = [str(r) for r in (roles or [])]
+        subject = _claim(claims, mapping.get('subject'))
+        granted = (resolve_config('identity_subject_roles', cfg) or {}).get(None if subject is None else str(subject)) or []
+        roles += [str(r) for r in ([granted] if isinstance(granted, str) else granted) if str(r) not in roles]
         prefix = resolve_config('identity_tenants_from_roles', cfg)
         if prefix:                                   # a service caller: tenants are granted roles
             if request_tenant is None or str(request_tenant) == '':
@@ -99,7 +109,6 @@ class BaseIdentityResolver:
                 raise IdentityRefused(f"no tenant in the claims (claim {mapping.get('tenant_id')!r})", 'identity')
             if request_tenant is not None and str(request_tenant) != str(tenant):
                 raise IdentityRefused('the request names another tenant than its credentials', 'identity')
-        subject = _claim(claims, mapping.get('subject'))
         return Identity(tenant_id=str(tenant), subject=None if subject is None else str(subject),
                         roles=roles, issuer=issuer)
 

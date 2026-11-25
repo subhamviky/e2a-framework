@@ -2,6 +2,20 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.11.0 — Cloud Run IAM as the identity at ingress and between services (hub design note GCP-01)
+
+Additive. Existing identity sources, presets and workload modes behave as before.
+
+### Added
+- **Ingress source `gcp_cloud_run`** (`e2a_adapters.ingress`, and e2a-java's `VerifiedClaims`): the caller's Google ID token, which Cloud Run IAM verified (signature, expiry, audience = the service URL) before the request reached the container. Read from `X-Serverless-Authorization` when the caller sent it, else `Authorization: Bearer`; the payload is read, not verified again. A token without an issuer or a subject, or one that is not a JWT, is a malformed carrier (Python `ValueError`, Java 401). Trustworthy only while the service is not public (no `allUsers` / `allAuthenticatedUsers` invoker); the projects' Terraform refuses those. With it, a Cloud Run service on the free tier (no API Gateway, no Identity Platform) resolves its callers fail-closed instead of taking headers as given.
+- **`identity_subject_roles`** (`E2A_IDENTITY_SUBJECT_ROLES`, core, and e2a-java): `{subject: [roles]}`, roles granted by configuration to a verified subject and added to the roles in its claims. A Google ID token names its subject (the service account's or the user's email) and carries no roles, so the deployment grants `tenant:<id>` and action roles to each caller; `identity_tenants_from_roles` and `require_roles()` apply unchanged. Works with any provider.
+- **Preset `google_id_token`** (`e2a_adapters.identity`, e2a-java `IdentitySettings.PRESETS`): the subject is `email`. In e2a-java it is the default claim map when the source is `gcp_cloud_run`.
+- **Outbound `workload_identity = "gcp_id_token"`** (`e2a_adapters.workload.GoogleIdTokenCredentialProvider`): the service account's Google ID token is itself the credential, with the target's origin as its audience (or the audience `workload_token_scopes` names for a URL prefix). No Entra app and no token exchange: Cloud Run IAM in front of the target verifies it, and the target reads it with `gcp_cloud_run`. Cached per audience like the other modes.
+- Tests: `adapters/tests/test_cloud_run_identity.py`, `java/e2a-identity/.../CloudRunIdentityTest.java`.
+
+### Changed
+- e2a-java is versioned 1.11.0 (equals the tag). `IdentitySettings` gains the component `subjectRoles`; the five-argument constructor remains.
+
 ## v1.10.0 — Pub/Sub push delivery for the consumer (hub design note GCP-01)
 
 ### Added

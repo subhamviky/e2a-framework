@@ -10,7 +10,9 @@ import java.util.Map;
  * issuer outside the trusted list is refused; a user's tenant comes from its claim (through the
  * tenant map) and must equal the one the request names. For a service caller
  * ({@code tenantsFromRoles}, e.g. "tenant:") the tenant is the one the request names, and only
- * if a role "tenant:&lt;id&gt;" grants it (v1.8.0, hub design note SI-01).
+ * if a role "tenant:&lt;id&gt;" grants it (v1.8.0, hub design note SI-01). Roles that configuration
+ * grants the subject (E2A_IDENTITY_SUBJECT_ROLES) are added to those in the claims (v1.11.0,
+ * GCP-01: a Google ID token carries none).
  */
 public final class ClaimMapIdentityResolver {
 
@@ -30,6 +32,12 @@ public final class ClaimMapIdentityResolver {
             throw new IdentityRefused("issuer " + issuer + " is not trusted", false);
         }
         List<String> roles = roles(claim(claims, map.getOrDefault("roles", "roles")));
+        Object subject = claim(claims, map.getOrDefault("subject", "sub"));
+        for (String granted : settings.rolesOf(subject == null ? null : subject.toString())) {
+            if (!roles.contains(granted)) {
+                roles.add(granted);
+            }
+        }
         String tenant;
         if (settings.tenantsFromRoles() != null) {
             if (requestTenant == null || requestTenant.isBlank()) {
@@ -49,7 +57,6 @@ public final class ClaimMapIdentityResolver {
                 throw new IdentityRefused("the request names another tenant than its credentials", false);
             }
         }
-        Object subject = claim(claims, map.getOrDefault("subject", "sub"));
         return new Identity(tenant, subject == null ? null : subject.toString(), roles, issuer == null ? null : issuer.toString());
     }
 

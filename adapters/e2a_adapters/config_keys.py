@@ -47,7 +47,7 @@ KEYS = [
     ConfigKey('cosmos_database', 'COSMOS_DATABASE', 'e2a', str, _GROUP, 'Cosmos*.from_config'),
     ConfigKey('cosmos_container', 'COSMOS_CONTAINER', 'e2a', str, _GROUP, 'Cosmos*.from_config — the container of E2A records'),
     ConfigKey('cosmos_key', 'COSMOS_KEY', None, str, _GROUP, 'Cosmos*.from_config — an account key (the emulator); unset in the cloud: Entra ID', secret=True),
-    ConfigKey('identity_source', 'E2A_IDENTITY_SOURCE', None, str, _GROUP, 'v1.7.4: where the platform hands over verified claims (e2a_adapters.ingress): aws_http_api, gcp_api_gateway or azure_container_apps; unset = no ingress identity'),
+    ConfigKey('identity_source', 'E2A_IDENTITY_SOURCE', None, str, _GROUP, 'v1.7.4: where the platform hands over verified claims (e2a_adapters.ingress): aws_http_api, gcp_api_gateway, azure_container_apps or (v1.11.0) gcp_cloud_run; unset = no ingress identity'),
     ConfigKey('servicebus_namespace', 'SERVICEBUS_NAMESPACE', None, str, _GROUP, 'ServiceBusBroker — <namespace>.servicebus.windows.net, with Entra ID'),
     ConfigKey('servicebus_connection_string', 'SERVICEBUS_CONNECTION_STRING', None, str, _GROUP, 'ServiceBusBroker — a connection string (the emulator); unset in the cloud', secret=True),
     ConfigKey('keyvault_url', 'KEYVAULT_URL', None, str, _GROUP, 'KeyVaultCredentialProvider — https://<vault>.vault.azure.net'),
@@ -57,7 +57,7 @@ KEYS = [
     ConfigKey('secret_headers', 'E2A_SECRET_HEADERS', [], _list, _GROUP, '[{target, secret, header, prefix, json_key}] — the header a tool call to <target> carries, read from a secret store'),
     ConfigKey('secret_cache_seconds', 'E2A_SECRET_CACHE_SECONDS', 300, int, _GROUP, 'secret-backed credential providers — how long a secret value is reused'),
     # v1.8.0 (hub design note SI-01): outbound workload identity (e2a_adapters.workload)
-    ConfigKey('workload_identity', 'E2A_WORKLOAD_IDENTITY', None, str, _GROUP, 'v1.8.0: the cloud identity this service presents to other services: gcp, aws or azure; unset = no token (local runs)'),
+    ConfigKey('workload_identity', 'E2A_WORKLOAD_IDENTITY', None, str, _GROUP, 'v1.8.0: the cloud identity this service presents to other services: gcp, aws or azure (exchanged for an Entra token), or (v1.11.0) gcp_id_token (the Google ID token itself, for Cloud Run IAM); unset = no token (local runs)'),
     ConfigKey('workload_entra_tenant', 'E2A_WORKLOAD_ENTRA_TENANT', None, str, _GROUP, 'v1.8.0: the Entra directory that issues the landscape\'s workload tokens (gcp and aws)'),
     ConfigKey('workload_entra_client_id', 'E2A_WORKLOAD_ENTRA_CLIENT_ID', None, str, _GROUP, 'v1.8.0: this caller\'s Entra app, whose federated credential trusts its native identity (gcp and aws)'),
     ConfigKey('workload_azure_client_id', 'E2A_WORKLOAD_AZURE_CLIENT_ID', None, str, _GROUP, 'v1.8.0: a user-assigned managed identity\'s client id (azure); unset = the system-assigned one'),

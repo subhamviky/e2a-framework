@@ -10,6 +10,10 @@ itself. Each cloud delivers the verified claims differently, and this module rea
                         base64url-encoded JWT payload
   azure_container_apps  Container Apps (and App Service) authentication: the X-MS-CLIENT-PRINCIPAL
                         header, base64 JSON {"claims": [{"typ", "val"}], "role_typ", ...}
+  gcp_cloud_run         v1.11.0 (GCP-01): Cloud Run IAM. The caller's Google ID token, which Cloud
+                        Run verified (signature, expiry, audience = the service URL) before the
+                        request reached the container: X-Serverless-Authorization when the caller
+                        sent it, else Authorization: Bearer. Its payload is read, not re-verified.
 
 verified_claims(source, event=..., headers=...) returns (claims, verified). `verified` is True
 only when the platform's own carrier is present. That is trustworthy only where the platform
@@ -19,17 +23,22 @@ guarantees the carrier:
   * Google Cloud: API Gateway sets the header, so the backend must accept calls ONLY from the
     gateway (Cloud Run IAM: the gateway's service account is the sole invoker). Otherwise a
     caller could reach the backend directly and send the header itself.
+  * Cloud Run IAM (gcp_cloud_run): only while the service requires authentication, i.e. no
+    allUsers / allAuthenticatedUsers invoker. A public service passes unverified tokens through.
+    A Google ID token names its subject only (email, sub); grant roles and tenants to subjects
+    with identity_subject_roles, and use the preset google_id_token.
 """
 import base64
 import json
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 __all__ = ['SOURCES', 'verified_claims', 'identity_at_ingress', 'claims_from_aws_http_api', 'claims_from_gcp_api_gateway',
-           'claims_from_azure_container_apps']
+           'claims_from_azure_container_apps', 'claims_from_gcp_cloud_run']
 
 Claims = Dict[str, Any]
 
 GCP_USERINFO_HEADER = 'x-apigateway-api-userinfo'
+SERVERLESS_AUTHORIZATION_HEADER = 'x-serverless-authorization'
 AZURE_PRINCIPAL_HEADER = 'x-ms-client-principal'
 
 # Container Apps / App Service map claim names before injecting them (long URI forms). The
@@ -109,10 +118,27 @@ def claims_from_azure_container_apps(headers: Optional[Mapping[str, str]] = None
     return claims, True
 
 
+def claims_from_gcp_cloud_run(headers: Optional[Mapping[str, str]] = None, **_) -> Tuple[Claims, bool]:
+    value = _header(headers, SERVERLESS_AUTHORIZATION_HEADER) or _header(headers, 'authorization')
+    if not value:
+        return {}, False
+    scheme, _, token = value.strip().partition(' ')
+    if scheme.lower() != 'bearer' or not token.strip():
+        return {}, False
+    parts = token.strip().split('.')
+    if len(parts) != 3:
+        raise ValueError('the bearer token is not a JWT')
+    claims = _b64json(parts[1], urlsafe=True)
+    if not claims.get('iss') or not (claims.get('email') or claims.get('sub')):
+        raise ValueError('the token names no issuer or subject')
+    return claims, True
+
+
 SOURCES = {
     'aws_http_api': claims_from_aws_http_api,
     'gcp_api_gateway': claims_from_gcp_api_gateway,
     'azure_container_apps': claims_from_azure_container_apps,
+    'gcp_cloud_run': claims_from_gcp_cloud_run,
 }
 
 

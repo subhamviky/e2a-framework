@@ -106,6 +106,7 @@ Every config key and environment variable used by the E2A framework, grouped by 
 | identity_trusted_issuers | E2A_IDENTITY_TRUSTED_ISSUERS | [] | v1.7.0: issuers accepted by BaseIdentityResolver (empty: any issuer the gateway verified) |
 | identity_tenant_map | E2A_IDENTITY_TENANT_MAP | {} | v1.7.0: external tenant id (an Entra directory id) -> E2A tenant_id |
 | identity_tenants_from_roles | E2A_IDENTITY_TENANTS_FROM_ROLES | '' | v1.8.0 (SI-01): for service callers, a role prefix such as "tenant:". The tenant is the one the request names, and only if a role "<prefix><tenant>" grants it; the tenant claim is not used |
+| identity_subject_roles | E2A_IDENTITY_SUBJECT_ROLES | {} | v1.11.0 (GCP-01): {subject: [roles]} — roles granted by configuration to a verified subject, added to the roles in its claims (Google ID tokens carry none: "tenant:<id>" and action roles for a service account or a user) |
 
 ### Engines (object references)
 

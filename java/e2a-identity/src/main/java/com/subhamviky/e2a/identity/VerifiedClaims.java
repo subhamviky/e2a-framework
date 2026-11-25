@@ -14,10 +14,16 @@ import java.util.Map;
  * {@code azure_container_apps}: Container Apps (and App Service) authentication's
  * X-MS-CLIENT-PRINCIPAL header, base64 JSON {claims: [{typ, val}], role_typ, auth_typ}. External
  * requests cannot set that header, so its presence means the platform verified the token.
+ * {@code gcp_cloud_run} (v1.11.0, GCP-01): the Google ID token Cloud Run IAM verified before the
+ * request reached the container, from X-Serverless-Authorization or else Authorization: Bearer;
+ * its payload is read, not re-verified. Trustworthy only while the service is not public.
  */
 public final class VerifiedClaims {
 
     public static final String AZURE_PRINCIPAL_HEADER = "X-MS-CLIENT-PRINCIPAL";
+    public static final String AZURE_CONTAINER_APPS = "azure_container_apps";
+    public static final String GCP_CLOUD_RUN = "gcp_cloud_run";
+    public static final String SERVERLESS_AUTHORIZATION_HEADER = "X-Serverless-Authorization";
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Map<String, String> AZURE_ALIASES = Map.of(
@@ -31,11 +37,44 @@ public final class VerifiedClaims {
 
     /** The claims, or null when the platform's carrier is absent (not verified). */
     public static Map<String, Object> from(String source, Map<String, String> headers) {
-        if (!"azure_container_apps".equals(source)) {
-            throw new IllegalArgumentException("identity source " + source + " is not supported by e2a-java: use azure_container_apps");
+        if (GCP_CLOUD_RUN.equals(source)) {
+            return cloudRun(headers);
+        }
+        if (!AZURE_CONTAINER_APPS.equals(source)) {
+            throw new IllegalArgumentException("identity source " + source
+                    + " is not supported by e2a-java: use azure_container_apps or gcp_cloud_run");
         }
         String value = header(headers, AZURE_PRINCIPAL_HEADER);
         return value == null || value.isBlank() ? null : azure(value);
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> cloudRun(Map<String, String> headers) {
+        String value = header(headers, SERVERLESS_AUTHORIZATION_HEADER);
+        if (value == null || value.isBlank()) {
+            value = header(headers, "Authorization");
+        }
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String[] scheme = value.trim().split("\\s+", 2);
+        if (scheme.length != 2 || !"bearer".equalsIgnoreCase(scheme[0]) || scheme[1].isBlank()) {
+            return null;
+        }
+        String[] parts = scheme[1].trim().split("\\.");
+        if (parts.length != 3) {
+            throw new IllegalArgumentException("malformed gcp_cloud_run identity carrier: the bearer token is not a JWT");
+        }
+        Map<String, Object> claims;
+        try {
+            claims = JSON.readValue(Base64.getUrlDecoder().decode(parts[1]), Map.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("malformed gcp_cloud_run identity carrier: " + e.getMessage(), e);
+        }
+        if (claims == null || claims.get("iss") == null || (claims.get("email") == null && claims.get("sub") == null)) {
+            throw new IllegalArgumentException("malformed gcp_cloud_run identity carrier: the token names no issuer or subject");
+        }
+        return new LinkedHashMap<>(claims);
     }
 
     static String header(Map<String, String> headers, String name) {
