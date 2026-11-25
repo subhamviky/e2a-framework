@@ -28,6 +28,12 @@ UNKNOWN for a material call.
     })
     provider.headers("https://settlement.example/api/v1/settlements")   # {"Authorization": "Bearer ..."}
 
+Google Cloud alone (v1.11.0, hub design note GCP-01): with `workload_identity = "gcp_id_token"`
+the service account's Google ID token is itself the credential, with the target's own URL as its
+audience. Cloud Run IAM verifies it in front of the target (roles/run.invoker), and the target
+reads it with the ingress source gcp_cloud_run. No Entra app, no exchange. The audience is the
+target's origin (https://host) unless `workload_token_scopes` names one for its URL prefix.
+
 Every network call goes through an injectable `http` (or STS client, or Azure credential), so the
 sources are tested without a cloud.
 """
@@ -43,7 +49,8 @@ from e2a import BaseCredentialProvider
 from e2a.config import resolve_config
 
 __all__ = ['WorkloadTokenError', 'GoogleIdTokenSource', 'AwsWebIdentityTokenSource', 'AzureManagedIdentitySource',
-           'EntraFederatedTokenSource', 'WorkloadCredentialProvider', 'workload_credentials',
+           'EntraFederatedTokenSource', 'WorkloadCredentialProvider', 'GoogleIdTokenCredentialProvider',
+           'workload_credentials',
            'ENTRA_EXCHANGE_AUDIENCE', 'jwt_expiry']
 
 # The audience Entra expects on a federated (native) token
@@ -201,9 +208,21 @@ class WorkloadCredentialProvider(BaseCredentialProvider):
         return {'Authorization': f'Bearer {self.token(chosen)}'}
 
 
+class GoogleIdTokenCredentialProvider(WorkloadCredentialProvider):
+    """v1.11.0: a Google ID token for every target, its audience the target's origin (Cloud Run
+    IAM checks it against the service URL) unless a configured URL prefix names another."""
+
+    def scope_for(self, target: str, scope: Optional[str] = None) -> Optional[str]:
+        chosen = super().scope_for(target, scope)
+        if chosen:
+            return chosen
+        parts = urllib.parse.urlsplit(str(target or ''))
+        return f'{parts.scheme}://{parts.netloc}' if parts.scheme in ('http', 'https') and parts.netloc else None
+
+
 def workload_credentials(config: Optional[Dict[str, Any]] = None, *, http: Http = None, sts_client=None,
                          azure_credential=None) -> Optional[WorkloadCredentialProvider]:
-    """The provider configured by `workload_identity` (gcp | aws | azure), or None when it is not
+    """The provider configured by `workload_identity` (gcp | aws | azure | gcp_id_token), or None when it is not
     set (local runs and tests: calls go without a token, as before)."""
     cfg = dict(config or {})
     kind = (resolve_config('workload_identity', cfg) or '').strip().lower()
@@ -211,6 +230,8 @@ def workload_credentials(config: Optional[Dict[str, Any]] = None, *, http: Http 
         return None
     scopes = resolve_config('workload_token_scopes', cfg) or {}
     refresh = float(resolve_config('workload_token_refresh_seconds', cfg))
+    if kind == 'gcp_id_token':
+        return GoogleIdTokenCredentialProvider(GoogleIdTokenSource(http), scopes, refresh)
     if kind == 'azure':
         source = AzureManagedIdentitySource(azure_credential, resolve_config('workload_azure_client_id', cfg) or None)
     elif kind in ('gcp', 'aws'):
@@ -221,5 +242,5 @@ def workload_credentials(config: Optional[Dict[str, Any]] = None, *, http: Http 
             raise ValueError(f'workload_identity={kind!r} needs workload_entra_tenant and workload_entra_client_id')
         source = EntraFederatedTokenSource(native, tenant, client, http)
     else:
-        raise ValueError(f'workload_identity={kind!r}: use gcp, aws or azure')
+        raise ValueError(f'workload_identity={kind!r}: use gcp, aws, azure or gcp_id_token')
     return WorkloadCredentialProvider(source, scopes, refresh)
