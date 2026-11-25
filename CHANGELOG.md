@@ -2,6 +2,14 @@
 
 All notable changes to the E2A framework documents and reference code.
 
+## v1.10.0 — Pub/Sub push delivery for the consumer (hub design note GCP-01)
+
+### Added
+- **`e2a_adapters.gcp.PubSubPushDelivery`**: one Pub/Sub **push** request as a `BaseMessageBroker`, so `IdempotentConsumer` settles a message Pub/Sub pushes to an HTTP endpoint (Cloud Run, no always-on worker) exactly as it settles a pulled one, the pattern of `SQSLambdaBatch` for one message. `response_status()` answers the push: 204 when the message is done (processed, a duplicate, or dead-lettered with its reason to `<subscription>-dlq`), 500 otherwise, so Pub/Sub delivers it again by the subscription's retry policy; an unsettled message is never answered 2xx. A body that is not a JSON object is dead-lettered with `e2a_body_error`, not retried forever. Tests with a fake publisher (`adapters/tests/test_pubsub_push.py`).
+
+### Changed
+- e2a-java is versioned 1.10.0 (equals the tag); no Java code changed.
+
 ## v1.9.1 — One retry rule; AI-DLC failures say whether they can be resent (hub design note EV-01, 2.4)
 
 ### Added
