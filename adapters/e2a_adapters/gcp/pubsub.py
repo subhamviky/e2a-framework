@@ -84,3 +84,97 @@ class PubSubBroker(BaseMessageBroker):
     def ack_dead_letter(self, source, message, config=None):
         self.subscriber.acknowledge(request={'subscription': self._sub(source + self.suffix),
                                              'ack_ids': [message.receipt]})
+
+
+class PubSubPushDelivery(BaseMessageBroker):
+    """v1.10.0 (hub design note GCP-01): one Pub/Sub PUSH request as a BaseMessageBroker, so
+    IdempotentConsumer settles a message Pub/Sub pushed to an HTTP endpoint (Cloud Run, no
+    always-on worker) as it does pulled ones. The pattern of SQSLambdaBatch, for one message:
+
+        delivery = PubSubPushDelivery(envelope, broker=PubSubBroker(project))
+        consumer.consume(delivery.source)
+        return Response(status_code=delivery.response_status())   # 204 done, 500 deliver again
+
+    ack: the request answers 2xx. nack: it answers 500 and Pub/Sub delivers again by the
+    subscription's retry policy (a delay is not possible). dead_letter: the message is published
+    to <subscription><suffix> with the reason (through `broker`), then answered 2xx. Without an
+    explicit settlement the request answers 500 (never lose a message). The endpoint must check
+    the push request's OIDC token (Cloud Run IAM does). A body that is not a JSON object arrives
+    as {"_raw": <text>} with the attribute `e2a_body_error`, so a consumer can dead-letter it."""
+    capabilities = frozenset({'messaging', 'dead_letter'})
+
+    def __init__(self, envelope: Dict[str, Any], broker: 'PubSubBroker' = None, dead_letter_suffix: str = '-dlq') -> None:
+        if not isinstance(envelope, dict) or not isinstance(envelope.get('message'), dict):
+            raise ValueError('not a Pub/Sub push envelope: {"message": {...}, "subscription": "..."} expected')
+        self._envelope, self._broker, self.suffix = envelope, broker, dead_letter_suffix
+        self._taken, self._settled = False, None
+
+    @property
+    def source(self) -> str:
+        """The subscription the push came from (its short name)."""
+        sub = str(self._envelope.get('subscription') or '')
+        if not sub:
+            raise ValueError('the push envelope names no subscription')
+        return sub.rsplit('/', 1)[-1]
+
+    def _pubsub(self) -> 'PubSubBroker':
+        if self._broker is None:
+            raise ValueError('PubSubPushDelivery needs a PubSubBroker for dead letters and publishing')
+        return self._broker
+
+    def publish(self, destination, body, attributes=None, config=None):
+        return self._pubsub().publish(destination, body, attributes, config)
+
+    def receive(self, source, max_messages=10, wait_seconds=0.0, config=None):
+        if self._taken or source != self.source:
+            return []                                   # one message per request
+        self._taken = True
+        import base64
+        m = self._envelope['message']
+        attrs = {str(k): str(v) for k, v in (m.get('attributes') or {}).items()}
+        raw = m.get('data') or ''
+        try:
+            text = base64.b64decode(raw).decode('utf-8')
+        except (ValueError, UnicodeDecodeError) as e:
+            text, attrs = raw, {**attrs, 'e2a_body_error': f'not base64 UTF-8: {e}'[:200]}
+        body: Dict[str, Any]
+        if 'e2a_body_error' in attrs:
+            body = {'_raw': text}
+        else:
+            try:
+                body = json.loads(text)
+                if not isinstance(body, dict):
+                    raise ValueError('the body is JSON but not an object')
+            except ValueError as e:
+                body, attrs = {'_raw': text}, {**attrs, 'e2a_body_error': str(e)[:200]}
+        count = self._envelope.get('deliveryAttempt')
+        msg_id = str(m.get('messageId') or m.get('message_id') or '')
+        return [BrokerMessage(msg_id, body, attrs, int(count) if count else None, source, msg_id)]
+
+    def ack(self, source, message, config=None):
+        self._settled = 'ack'
+
+    def nack(self, source, message, delay_seconds=0.0, config=None):
+        self._settled = 'nack'
+
+    def dead_letter(self, source, message, reason, config=None):
+        attrs = {**{k: v for k, v in message.attributes.items() if v is not None},
+                 'dead_letter_reason': str(reason)[:1000], 'dead_letter_source': source}
+        self._pubsub().publish(source + self.suffix, message.body, attrs)
+        self._settled = 'dead_lettered'                  # answered 2xx only after it is published
+
+    def receive_dead_letters(self, source, max_messages=10, config=None):
+        return self._pubsub().receive_dead_letters(source, max_messages, config)
+
+    def ack_dead_letter(self, source, message, config=None):
+        return self._pubsub().ack_dead_letter(source, message, config)
+
+    @property
+    def settlement(self):
+        """'ack', 'nack', 'dead_lettered' or None (not settled)."""
+        return self._settled
+
+    def response_status(self) -> int:
+        """The HTTP status to answer the push with: 204 when the message is done (processed or
+        dead-lettered), 500 otherwise, so Pub/Sub delivers it again."""
+        return 204 if self._settled in ('ack', 'dead_lettered') else 500

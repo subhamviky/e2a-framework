@@ -2,14 +2,15 @@
 
     Firestore*                         claims, rows, leases, checkpoints
     PubSubBroker                       messaging, with dead letters
+    PubSubPushDelivery                 one Pub/Sub push request as a broker (v1.10.0)
     FirestoreOutboxStore               the transactional outbox (v1.7.1)
     SecretManagerCredentialProvider    tool credentials from Secret Manager
 """
 from .firestore import (FirestoreBackend, FirestoreCheckpointStore, FirestoreIdempotencyStore, FirestoreLease,
                         FirestoreTransactionalStore)
 from .outbox import FirestoreOutboxStore
-from .pubsub import PubSubBroker
+from .pubsub import PubSubBroker, PubSubPushDelivery
 from .secrets import SecretManagerCredentialProvider
 
 __all__ = ['FirestoreBackend', 'FirestoreIdempotencyStore', 'FirestoreTransactionalStore', 'FirestoreLease',
-           'FirestoreCheckpointStore', 'PubSubBroker', 'SecretManagerCredentialProvider', 'FirestoreOutboxStore']
+           'FirestoreCheckpointStore', 'PubSubBroker', 'PubSubPushDelivery', 'SecretManagerCredentialProvider', 'FirestoreOutboxStore']
