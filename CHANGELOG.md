@@ -13,6 +13,14 @@ Additive. Existing identity sources, presets and workload modes behave as before
 - **Outbound `workload_identity = "gcp_id_token"`** (`e2a_adapters.workload.GoogleIdTokenCredentialProvider`): the service account's Google ID token is itself the credential, with the target's origin as its audience (or the audience `workload_token_scopes` names for a URL prefix). No Entra app and no token exchange: Cloud Run IAM in front of the target verifies it, and the target reads it with `gcp_cloud_run`. Cached per audience like the other modes.
 - Tests: `adapters/tests/test_cloud_run_identity.py`, `java/e2a-identity/.../CloudRunIdentityTest.java`.
 
+### Verified in the cloud (25 November 2026)
+
+Run live on Google Cloud Run (five services, the GenAI landscape of hub design note GCP-01): Cloud Run IAM verified the Google ID tokens, `gcp_cloud_run` read them, `identity_subject_roles` granted tenants and roles, and `gcp_id_token` carried the services' calls to each other. What the live run showed, for anyone configuring it:
+
+- **Two issuer spellings.** A person's token (`gcloud auth print-identity-token` as a user) names its issuer `accounts.google.com`; a service account's names `https://accounts.google.com`. With `identity_trusted_issuers` set, list both, or one kind of caller is refused (`issuer '...' is not trusted`).
+- **The token must carry an e-mail.** `identity_subject_roles` is keyed by the token's e-mail (preset `google_id_token`). The metadata server's token has it with `format=full`, which `GoogleIdTokenSource` asks for; a token made by `google-github-actions/auth` needs `id_token_include_email: true`, and `gcloud auth print-identity-token --audiences=...` is refused for a federated (keyless) identity. Without an e-mail the caller matches no grant (`the caller is not granted tenant ...`).
+- **A fallback ends a workflow.** After a model reply that fails evaluation, `_fallback` runs and the workflow stops (state `evaluation = FALLBACK`). An agent whose later steps must still run should repair its own state inside `_evaluate_output` (a deterministic reading of the request) rather than rely on `_fallback`.
+
 ### Changed
 - e2a-java is versioned 1.11.0 (equals the tag). `IdentitySettings` gains the component `subjectRoles`; the five-argument constructor remains.
 
@@ -20,6 +28,10 @@ Additive. Existing identity sources, presets and workload modes behave as before
 
 ### Added
 - **`e2a_adapters.gcp.PubSubPushDelivery`**: one Pub/Sub **push** request as a `BaseMessageBroker`, so `IdempotentConsumer` settles a message Pub/Sub pushes to an HTTP endpoint (Cloud Run, no always-on worker) exactly as it settles a pulled one, the pattern of `SQSLambdaBatch` for one message. `response_status()` answers the push: 204 when the message is done (processed, a duplicate, or dead-lettered with its reason to `<subscription>-dlq`), 500 otherwise, so Pub/Sub delivers it again by the subscription's retry policy; an unsettled message is never answered 2xx. A body that is not a JSON object is dead-lettered with `e2a_body_error`, not retried forever. Tests with a fake publisher (`adapters/tests/test_pubsub_push.py`).
+
+### Verified in the cloud (25 November 2026)
+
+`PubSubPushDelivery` ran live: settlement-service's events reached audit-ai, and bank lines reached reconciliation, as Pub/Sub push requests to Cloud Run endpoints with dead-letter topics; a redelivered event added no second finding. The endpoint answers after the message is settled, so Pub/Sub's own retry and dead-letter policy apply unchanged.
 
 ### Changed
 - e2a-java is versioned 1.10.0 (equals the tag); no Java code changed.

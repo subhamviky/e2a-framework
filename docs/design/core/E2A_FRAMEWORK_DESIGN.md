@@ -1250,6 +1250,8 @@ The scaffold ships executable smoke tests against the in-memory doubles. At base
 
 **v1.2.0:** `pytest tests` runs every smoke script above against the installed package, plus 51 tests of the v1.2 contracts: `test_contract.py` (14, context and accessors, the agent order), `test_governance_stages.py` (9), `test_entry_points.py` (9), `test_workflow_steps.py` (9), `test_conformance.py` (5) and `test_package.py` (5, every v1.1 name importable, one home per public name). All 67 pass (the multimodal orchestrator self-test needs `langgraph`; without it 66 pass and that one is skipped). CI also runs `python -m e2a.conformance --strict` over the framework and reference code. The O2C migration (39 tests and the three-service landscape demo) is the integration proof.
 
+**Cloud verification (v1.10.0 and v1.11.0).** The Google Cloud additions ran live on 25 November 2026, in the five-service landscape of hub design note GCP-01: Pub/Sub push into `IdempotentConsumer`, Cloud Run IAM identity read by `gcp_cloud_run`, roles granted by `identity_subject_roles`, and the services' own Google ID tokens between them (`CHANGELOG.md`, "Verified in the cloud", lists what the run showed: the two issuer spellings, the e-mail in the token, and O-18).
+
 Recommended additions from Section 14: MCP `tools/call` returns a resolved result; token budget enforcement through `io_config`; agent-internal deterministic error settles `FAILED_FINAL`; latency breach after a committed side effect does not re-execute.
 
 ## 14. Implementation Reality, Gaps and Design Observations
@@ -1277,6 +1279,7 @@ These were found by reading the reference against this design. O-1 to O-4 were r
 | O-15 | Conformance rule R2 is a warning by default. | A hook called from outside its class is reported but not blocking. | Run `--strict` in CI now; it becomes the default in v1.3. |
 | O-16 | The v1.2 contracts exist for Python only. | Java services (A2C generates them) stay on the v1.1 shape. | `e2a-java` (deferred wave D). |
 | O-17 | `Steps` has no loops, parallel branches or graphs. | A graph-shaped workflow keeps a v1.1 `_build_workflow`, or composes several workflows. | Intended: declared steps cover the projects so far; revisit on evidence. |
+| O-18 | A workflow that follows a failed evaluation of an agent ends (a fallback ends a workflow). | An agent whose reply cannot be read, but whose request can be read by rules, stops the whole request although the rest could run (live: a valid question answered "no record was found"). | In `_evaluate_output`, read the request deterministically and accept it (marked degraded) when the model reply is unusable but the request is not; keep `_fallback` for answers that cannot be repaired. Found in the first Google Cloud run (GCP-01). |
 
 ## 15. What v1.2 Changes
 
