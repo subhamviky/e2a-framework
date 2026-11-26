@@ -40,6 +40,10 @@ registry: a service's CI builds it from the tag (`mvn -f java/pom.xml install -D
 
 | e2a-framework | a2c-framework | capability-oriented-dsa |
 |---|---|---|
+| `v1.11.0` (Cloud Run IAM as the identity at ingress and between services: `gcp_cloud_run`, `identity_subject_roles`, preset `google_id_token`, outbound `gcp_id_token`; ran live on Google Cloud on 25 November 2026, see the changelog) | `v1.6.x` (a generated project pins its own E2A tag) | `v0.3.x` |
+| `v1.10.0` (Pub/Sub push delivery for the consumer: `PubSubPushDelivery`; ran live on Google Cloud) | `v1.6.x` | `v0.3.x` |
+| `v1.9.1` (one retry rule; AI-DLC failures say whether they can be resent) | `v1.6.x` | `v0.3.x` |
+| `v1.9.0` (evaluation across the framework, hub design note EV-01) | `v1.6.x` | `v0.3.x` |
 | `v1.8.0` (service-to-service identity, hub design note SI-01: service callers granted tenants as roles, `require_roles`; e2a-adapters outbound workload identity for Google Cloud, AWS and Azure, exchanged for Entra; e2a-java `e2a-identity`; a `BaseException` in a workflow step no longer completes its claim) | `v1.4.0` | `v0.2.x`, `v0.3.x` |
 | `v1.7.5` (egress DLP: the card-number pattern no longer matches the all-digit tail of a UUID or digits joined to a word) | `v1.4.0` | `v0.2.x`, `v0.3.x` |
 | `v1.7.4` (identity at ingress: `e2a_adapters.ingress` reads the claims each cloud's platform verified — API Gateway's JWT authorizer, Google API Gateway's userinfo header, Container Apps authentication — and each cloud profile names its `identity_source`) | `v1.4.0` | `v0.2.x`, `v0.3.x` |
