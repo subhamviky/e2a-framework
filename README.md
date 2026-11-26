@@ -1,5 +1,7 @@
 # E2A — Enterprise-to-Agentic Architecture Framework
 
+![E2A — Enterprise-to-Agentic Architecture Framework](docs/assets/e2a-banner.png)
+
 > **The runtime changes. The architectural responsibilities do not disappear.**
 
 E2A is a vendor-neutral architecture framework for applying enterprise engineering discipline to Agentic AI systems.
