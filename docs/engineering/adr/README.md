@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-One record per significant decision (context, options, decision, consequences). Records are not edited to change history: a reversed decision gets a new record that supersedes the old one. These are the decisions of the E2A framework and its adapters and Java libraries. Platform-wide decisions (free tier, synthetic data, Workload Identity Federation, promotion, the documentation layout) are in the [assistant repository's ADR index](https://github.com/subhamviky/enterprise-finance-genai-assistant/blob/main/docs/engineering/adr/README.md).
+One record per significant decision (context, options, decision, consequences). Records are not edited to change history: a reversed decision gets a new record that supersedes the old one. These are the decisions of the E2A framework and its adapters and Java libraries. Platform-wide decisions (a real cloud rather than emulators only, synthetic data, Workload Identity Federation, promotion, the documentation layout) are in the [assistant repository's ADR index](https://github.com/subhamviky/enterprise-finance-genai-assistant/blob/main/docs/engineering/adr/README.md).
 
 Template: [`0000-template.md`](0000-template.md).
 
