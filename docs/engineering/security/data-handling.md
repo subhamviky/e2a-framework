@@ -1,0 +1,3 @@
+# Data handling: e2a-framework
+
+e2a-framework stores no data of its own and ships no secrets. The data it touches is whatever the consuming project passes through it. Rules that follow from that: tests and examples use synthetic data only; credentials are read from the environment or a secret store by the consumer, never committed; the egress DLP and redaction features are controls the consumer enables, and are tested here against synthetic card numbers, IBANs and e-mail addresses. The consuming project's own [data classification](https://github.com/subhamviky/enterprise-finance-genai-assistant/blob/main/docs/engineering/security/data-classification.md) governs real handling.
