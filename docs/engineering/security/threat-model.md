@@ -1,6 +1,6 @@
 # Threat model: e2a-framework
 
-- **Status:** Reviewed 2026-11-28 · STRIDE for a framework: the risks are in how it is *used* and in what it lets a consumer get wrong.
+- **Status:** Draft 2026-11-28, awaiting owner review · STRIDE for a framework: the risks are in how it is *used* and in what it lets a consumer get wrong.
 
 | # | Threat | Control | Evidence |
 |---|---|---|---|
